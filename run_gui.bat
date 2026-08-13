@@ -1,7 +1,6 @@
 @echo off
-rem GTNH Extra Mod Manager - GUI version
-chcp 65001 >nul
+rem GTNH Extra Mod Manager - GUI (no console window)
 set PYTHONIOENCODING=utf-8
 cd /d "%~dp0"
-py -m gtnhmod gui
-if errorlevel 1 pause
+where pyw >nul 2>nul || (echo Python pyw launcher not found. Install Python with the py launcher option. & pause & exit /b 1)
+start "" pyw -m gtnhmod gui

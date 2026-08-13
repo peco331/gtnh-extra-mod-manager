@@ -1455,8 +1455,20 @@ class GuiApp:
 
 def run():
     data_dir = utils.resolve_data_dir()
-    app = GuiApp(data_dir)
-    app.run()
+    try:
+        app = GuiApp(data_dir)
+        app.run()
+    except Exception:
+        # pyw 无控制台：启动错误写入文件，方便排查
+        try:
+            import traceback
+            err_file = data_dir / "logs" / "gui_error.log"
+            err_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(err_file, "a", encoding="utf-8") as f:
+                f.write(f"[{utils.now_str()}]\n{traceback.format_exc()}\n")
+        except OSError:
+            pass
+        raise
 
 
 if __name__ == "__main__":
