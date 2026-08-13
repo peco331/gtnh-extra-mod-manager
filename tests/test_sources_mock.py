@@ -116,6 +116,11 @@ class TestGitHubSource(unittest.TestCase):
         self.assertEqual(extract_version("1.7.10-0.8.0"), "0.8.0")
         self.assertEqual(extract_version("0.8.0"), "0.8.0")
 
+    def test_version_from_modver_mc_tag(self):
+        # 第二段是已知 MC 版本 → 首段是 mod 版本，整体保留
+        self.assertEqual(extract_version("1.0.1-1.7.10-GTNH"), "1.0.1-1.7.10-GTNH")
+        self.assertEqual(extract_version("1.0.1-1.12.2"), "1.0.1-1.12.2")
+
     def test_cached_fresh(self):
         # ttl=0 下第二次请求应 304 并返回缓存数据
         src = make_source(self.port, self.tmp)
@@ -150,6 +155,72 @@ class TestGitHubTagsFallback(unittest.TestCase):
         info = src.check("0.8.0")
         self.assertEqual(info.latest_version, "0.9.1")  # dev-build 无法解析被跳过
         self.assertEqual(info.candidates[0].file_name, "FakeMod-1.7.10-0.9.1.jar")
+
+
+class TestGitHubTagFilter(unittest.TestCase):
+    """tag_regex：仓库混装多MC版本时只取匹配的最新版本（如 GTNH 版）。"""
+
+    RELEASES = [
+        {"tag_name": "1.0.2.1-1.21.1", "body": "其他MC版本",
+         "assets": [{"name": "advanced_memory_card-1.0.2.1-1.21.1.jar",
+                     "browser_download_url": "http://127.0.0.1:PORT/download/a.jar",
+                     "size": 100}]},
+        {"tag_name": "1.0.1-1.7.10-GTNH", "body": "GTNH版本",
+         "assets": [{"name": "advanced_memory_card-1.0.1-1.7.10-GTNH.jar",
+                     "browser_download_url": "http://127.0.0.1:PORT/download/b.jar",
+                     "size": 100}]},
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="gtnh_src3_"))
+        cls.routes = {}
+        cls.srv, cls.port = start_server(cls.routes)  # 共享同一个 dict，后续可加路由
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _route_releases(self, releases):
+        body = json.dumps(releases).encode().replace(
+            b"127.0.0.1:PORT", f"127.0.0.1:{self.port}".encode())
+        self.routes[("GET", "/repos/owner/FakeMod/releases")] = (body, {})
+
+    def _make(self, tag_regex):
+        # 每个测试独立缓存目录，避免前一个用例的缓存干扰路由变化
+        return GitHubSource("owner", "FakeMod", api_base=f"http://127.0.0.1:{self.port}",
+                            cache_dir=self.tmp / self._testMethodName, ttl_hours=0,
+                            tag_regex=tag_regex)
+
+    def test_filtered_picks_gtnh_release(self):
+        self._route_releases(self.RELEASES)
+        src = self._make("GTNH")
+        info = src.check("1.0.1-1.7.10-GTNH")
+        self.assertEqual(info.latest_version, "1.0.1-1.7.10-GTNH")
+        self.assertEqual(info.candidates[0].file_name,
+                         "advanced_memory_card-1.0.1-1.7.10-GTNH.jar")
+
+    def test_filtered_list_versions(self):
+        self._route_releases(self.RELEASES)
+        src = self._make("GTNH")
+        options = src.list_versions(force=True)
+        self.assertEqual([o.version for o in options], ["1.0.1-1.7.10-GTNH"])
+
+    def test_filtered_no_match_falls_back_to_tags(self):
+        # release 列表无匹配 → 退 tags 列表取带 GTNH 的最新 tag
+        self._route_releases([self.RELEASES[0]])
+        tags = [{"name": "1.0.2-1.7.10-GTNH"}, {"name": "0.9.0"}]
+        self.routes[("GET", "/repos/owner/FakeMod/tags")] = (json.dumps(tags).encode(), {})
+        rel = json.dumps({
+            "tag_name": "1.0.2-1.7.10-GTNH", "body": "tags fallback",
+            "assets": [{"name": "advanced_memory_card-1.0.2-1.7.10-GTNH.jar",
+                        "browser_download_url": "http://127.0.0.1:PORT/download/c.jar",
+                        "size": 100}]}).encode()
+        self.routes[("GET", "/repos/owner/FakeMod/releases/tags/1.0.2-1.7.10-GTNH")] = (rel, {})
+        src = self._make("GTNH")
+        info = src.check("1.0.1-1.7.10-GTNH")
+        self.assertEqual(info.latest_version, "1.0.2-1.7.10-GTNH")
 
 
 class TestLocalFolder(unittest.TestCase):

@@ -129,6 +129,8 @@ def split_mc_mod_version(stem: str):
     "NeverEnoughCharacters-Rework-1.7.10-2.0.0" → 名字含连字符也切得开（1.7.10 锚点）
     "FoamFix-0.10.2"（无MC段）→ ("FoamFix", None, "0.10.2")
     "MC1.7.10-FoamFix-0.10.2"（MC段在最前）→ ("FoamFix", "MC1.7.10", "0.10.2")
+    "advanced_memory_card-1.0.1-1.7.10-GTNH"（版本段在MC锚点前，name-modver-mcver 命名）
+        → ("advanced_memory_card", "1.7.10", "1.0.1-1.7.10-GTNH")
     """
     stem = (stem or "").strip()
     parts = stem.split("-")
@@ -150,6 +152,11 @@ def split_mc_mod_version(stem: str):
             # "MC1.7.10-FoamFix-0.10.2"：MC段在最前，名字取下一段
             name = parts[1] if len(parts) > 1 else None
             ver = "-".join(parts[2:]) or None
+        elif re.match(r"^[vV]?\d", parts[mc_idx - 1]):
+            # "advanced_memory_card-1.0.1-1.7.10-GTNH"：MC 锚点前一段像版本
+            # → name-modver-mcver 命名，版本段在 MC 之前，整体保留为版本
+            name = "-".join(parts[:mc_idx - 1]) or None
+            ver = "-".join(parts[mc_idx - 1:]) or None
         else:
             name = "-".join(parts[:mc_idx]) or None
             ver = "-".join(parts[mc_idx + 1:]) or None

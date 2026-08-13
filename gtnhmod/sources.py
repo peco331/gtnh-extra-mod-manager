@@ -13,7 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import net, utils
-from .versions import MC_VERSION_RE, VersionParseError, max_version, parse_version, split_mc_mod_version
+from .versions import (MC_VERSION_RE, VersionParseError, _MC_SET,
+                       max_version, parse_version, split_mc_mod_version)
 
 
 class SourceError(Exception):
@@ -84,6 +85,7 @@ class Source(ABC):
                 owner=src.get("owner") or "", repo=src.get("repo") or "",
                 asset_regex=src.get("asset_regex") or "",
                 exclude_regex=src.get("exclude_regex") or "",
+                tag_regex=src.get("tag_regex") or "",
                 token=cfg.github_token, cache_dir=cfg.cache_dir,
                 ttl_hours=cfg.check_interval_hours, proxy=cfg.proxy)
         if st == "local_folder":
@@ -96,12 +98,15 @@ class Source(ABC):
 # ---------- GitHub ----------
 
 def extract_version(tag: str) -> str | None:
-    """从 tag 提取 mod 版本：首段是 MC 版本则去掉（1.7.10-0.8.0 → 0.8.0）。"""
+    """从 tag 提取 mod 版本：首段是 MC 版本则去掉（1.7.10-0.8.0 → 0.8.0）。
+
+    第二段若是已知 MC 版本（如 1.0.1-1.7.10-GTNH），说明首段是 mod 版本，不剥离。
+    """
     tag = (tag or "").strip()
     if not tag:
         return None
     parts = tag.split("-")
-    if len(parts) >= 2 and MC_VERSION_RE.match(parts[0]):
+    if len(parts) >= 2 and MC_VERSION_RE.match(parts[0]) and parts[1] not in _MC_SET:
         return "-".join(parts[1:])
     return tag
 
@@ -144,11 +149,12 @@ class GitHubSource(Source):
     source_type = "github"
 
     def __init__(self, owner: str, repo: str, *, asset_regex: str = "",
-                 exclude_regex: str = "", token: str = "", cache_dir: Path = None,
-                 ttl_hours: float = 6.0, api_base: str = "https://api.github.com",
-                 proxy=None):
+                 exclude_regex: str = "", tag_regex: str = "", token: str = "",
+                 cache_dir: Path = None, ttl_hours: float = 6.0,
+                 api_base: str = "https://api.github.com", proxy=None):
         self.owner, self.repo = owner, repo
         self.asset_regex, self.exclude_regex = asset_regex, exclude_regex
+        self.tag_regex = tag_regex
         self.token = token
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.ttl_hours = ttl_hours
@@ -181,6 +187,10 @@ class GitHubSource(Source):
             raise net.HttpError(404, f"{self.owner}/{self.repo} 无 {path}（缓存）")
         return data, src
 
+    def _tag_ok(self, tag: str) -> bool:
+        """tag_regex 过滤：仓库混装多版本（如其他MC版本）时只取匹配的版本。"""
+        return (not self.tag_regex) or bool(re.search(self.tag_regex, tag or "", re.I))
+
     def _rate_note(self) -> str:
         r = net.rate_remaining
         if r is not None and r < 10 and not self.token:
@@ -200,11 +210,15 @@ class GitHubSource(Source):
 
     def _check_via_tags(self) -> UpdateInfo:
         tags_data, _ = self._api(f"/repos/{self.owner}/{self.repo}/tags", "tags")
-        names = [t.get("name") for t in tags_data if isinstance(t, dict) and t.get("name")]
+        names = [t.get("name") for t in tags_data
+                 if isinstance(t, dict) and t.get("name") and self._tag_ok(t.get("name"))]
         best = max_version(names)
         if not best:
-            return UpdateInfo(None, None, None, utils.now_str(),
-                              f"仓库 {self.owner}/{self.repo} 无可用版本标签")
+            note = f"仓库 {self.owner}/{self.repo} 无可用版本标签"
+            if self.tag_regex:
+                note = (f"仓库 {self.owner}/{self.repo} 无匹配 {self.tag_regex!r} 的版本"
+                        "（已过滤其他版本）")
+            return UpdateInfo(None, None, None, utils.now_str(), note)
         try:
             rel, _ = self._api(f"/repos/{self.owner}/{self.repo}/releases/tags/{urllib.parse.quote(best)}",
                                f"rel_{best}")
@@ -218,6 +232,10 @@ class GitHubSource(Source):
         return info
 
     def check(self, current_version: str | None, *, force: bool = False) -> UpdateInfo:
+        if self.tag_regex:
+            # 仓库混装多版本：releases/latest 可能是不匹配的版本（如其他MC版本），
+            # 需按 tag 过滤后取最新
+            return self._check_filtered(force)
         try:
             rel, src = self._api(f"/repos/{self.owner}/{self.repo}/releases/latest", "latest",
                                  force=force)
@@ -226,6 +244,26 @@ class GitHubSource(Source):
                 raise
             return self._check_via_tags()
         return self._from_release(rel)
+
+    def _check_filtered(self, force: bool = False) -> UpdateInfo:
+        """按 tag_regex 过滤后的最新版本：先查最近30个 release，无匹配再退 tags 列表。"""
+        try:
+            releases, _ = self._api(f"/repos/{self.owner}/{self.repo}/releases?per_page=30",
+                                    "releases", force=force)
+        except net.HttpError as e:
+            if e.code != 404:
+                raise
+            releases = []
+        if isinstance(releases, list):
+            rel = next((r for r in releases
+                        if self._tag_ok(r.get("tag_name") or "") and not r.get("prerelease")),
+                       None)
+            if rel is None:
+                rel = next((r for r in releases
+                            if self._tag_ok(r.get("tag_name") or "")), None)
+            if rel is not None:
+                return self._from_release(rel)
+        return self._check_via_tags()
 
     def list_versions(self, *, force: bool = False) -> list:
         """列出最近发布（最多30个），最新在前，含每个版本的资产候选。"""
@@ -243,6 +281,8 @@ class GitHubSource(Source):
         options = []
         for rel in releases if isinstance(releases, list) else []:
             tag = rel.get("tag_name") or ""
+            if not self._tag_ok(tag):
+                continue
             ver = extract_version(tag)
             if not ver:
                 continue
@@ -257,6 +297,13 @@ class GitHubSource(Source):
                 continue
             seen.add(o.version)
             uniq.append(o)
+        if not uniq and self.tag_regex:
+            # 最近30个 release 无匹配 → 查 tags 列表兜底（可能有更老但匹配的版本）
+            info = self._check_via_tags()
+            if not info.latest_version:
+                return []
+            return [VersionOption(info.latest_version, info.latest_version,
+                                  info.release_body, None, info.candidates)]
         return sort_version_options(uniq)
 
 

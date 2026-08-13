@@ -489,9 +489,15 @@ def bind_source(db, mod_id: str, url: str) -> dict:
         repo = wikimod.github_repo_from_url(url)
         if not repo:
             return {"action": "error", "error": "无法从该链接解析出 GitHub 仓库（owner/repo）"}
+        old_src = entry.get("source") or {}
+        # 重绑同一仓库时保留用户配置的 tag 过滤（如只取带 GTNH 的版本）
+        tag_regex = (old_src.get("tag_regex") or ""
+                     if old_src.get("owner") == repo[0] and old_src.get("repo") == repo[1]
+                     else "")
         fields["source_type"] = "github"
         fields["source"] = {"owner": repo[0], "repo": repo[1], "asset_regex": "",
-                            "exclude_regex": wikimod.DEFAULT_EXCLUDE_REGEX}
+                            "exclude_regex": wikimod.DEFAULT_EXCLUDE_REGEX,
+                            "tag_regex": tag_regex}
         fields["urls"]["github"] = url
     elif "curseforge.com" in url:
         fields["source_type"] = "curseforge"

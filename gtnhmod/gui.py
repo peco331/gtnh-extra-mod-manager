@@ -210,16 +210,12 @@ class GuiApp:
         self.inst_tree.bind("<Double-1>", self._on_inst_double)
         self.inst_tree.bind("<Button-3>", lambda e: self._popup(self.inst_tree, self._inst_menu, e))
 
+        # 单个mod操作走右键菜单；下方只留全局/批量操作按钮
         btns = ttk.Frame(tab)
         btns.pack(fill="x", padx=6, pady=4)
         self.btn_check = ttk.Button(btns, text="检查更新", command=self.check_updates)
         self.btn_update = ttk.Button(btns, text="更新选中", command=self.update_selected)
         self.btn_update_all = ttk.Button(btns, text="全部更新", command=self.update_all)
-        self.btn_toggle = ttk.Button(btns, text="启用/禁用", command=self.toggle_selected)
-        self.btn_lock = ttk.Button(btns, text="锁定/解锁", command=self.lock_selected)
-        self.btn_open = ttk.Button(btns, text="打开下载页", command=self.open_link_selected)
-        self.btn_exclude = ttk.Button(btns, text="从列表剔除", command=self.exclude_selected)
-        self.btn_delete = ttk.Button(btns, text="删除mod", command=self.delete_selected)
         # 打开mods目录（下拉选择端别）
         self.btn_dirs = ttk.Menubutton(btns, text="打开mods目录")
         dir_menu = tk.Menu(self.btn_dirs, tearoff=0)
@@ -233,12 +229,9 @@ class GuiApp:
         if not has_dir:
             dir_menu.add_command(label="（未设置目录）", state="disabled")
         self.btn_dirs["menu"] = dir_menu
-        for b in (self.btn_check, self.btn_update, self.btn_update_all, self.btn_toggle,
-                  self.btn_lock, self.btn_open, self.btn_delete, self.btn_exclude, self.btn_dirs):
+        for b in (self.btn_check, self.btn_update, self.btn_update_all, self.btn_dirs):
             b.pack(side="left", padx=2)
-        self.busy_buttons = (self.btn_check, self.btn_update, self.btn_update_all,
-                             self.btn_toggle, self.btn_lock, self.btn_open,
-                             self.btn_delete, self.btn_exclude)
+        self.busy_buttons = (self.btn_check, self.btn_update, self.btn_update_all)
 
     def _build_addable_tab(self, tab):
         bar = ttk.Frame(tab)
@@ -762,11 +755,27 @@ class GuiApp:
         if not m:
             menu.add_command(label="（未选中mod）", state="disabled")
             return
+        sel = self._selected_inst()
+        multi = len(sel) > 1
+        tag = f"（选中{len(sel)}个）" if multi else ""
+        menu.add_command(label="查看详情", command=lambda: self._show_inst_detail(m))
         menu.add_command(label=f"检查更新: {m['name_en']}", command=lambda: self._check_single(m))
-        menu.add_command(label="更新...", command=lambda: self._start_single_update(m))
-        menu.add_command(label="启用/禁用", command=lambda: (self._toggle_mod(m), self.refresh_installed()))
-        menu.add_command(label="锁定/解锁", command=lambda: (self._lock_mod(m), self.refresh_installed()))
-        menu.add_command(label="打开下载页", command=lambda: self._open_link_mod(m))
+        if multi:
+            menu.add_command(label=f"批量更新{tag}",
+                             command=lambda: self._start_update_flow(list(sel)))
+        else:
+            menu.add_command(label="更新...", command=lambda: self._start_single_update(m))
+        if multi:
+            # 多选时批量操作（与单选同菜单，按选中数标注）
+            menu.add_command(label=f"启用/禁用{tag}", command=self.toggle_selected)
+            menu.add_command(label=f"锁定/解锁{tag}", command=self.lock_selected)
+            menu.add_command(label=f"打开下载页{tag}", command=self.open_link_selected)
+        else:
+            menu.add_command(label="启用/禁用",
+                             command=lambda: (self._toggle_mod(m), self.refresh_installed()))
+            menu.add_command(label="锁定/解锁",
+                             command=lambda: (self._lock_mod(m), self.refresh_installed()))
+            menu.add_command(label="打开下载页", command=lambda: self._open_link_mod(m))
         menu.add_separator()
         sides = list(m["sides"])
         if len(sides) == 1:
@@ -779,12 +788,54 @@ class GuiApp:
                                 command=lambda s=s: self.reveal_mod(m, s))
             menu.add_cascade(label="在资源管理器中打开", menu=sub)
         menu.add_separator()
-        menu.add_command(label="删除mod...", command=lambda: (self._delete_mod(m), self.refresh_all()))
-        menu.add_command(label="从列表剔除", command=lambda: (self._exclude_mod(m), self.refresh_all()))
+        if multi:
+            menu.add_command(label=f"删除mod...{tag}", command=self.delete_selected)
+            menu.add_command(label=f"从列表剔除{tag}", command=self.exclude_selected)
+        else:
+            menu.add_command(label="删除mod...",
+                             command=lambda: (self._delete_mod(m), self.refresh_all()))
+            menu.add_command(label="从列表剔除",
+                             command=lambda: (self._exclude_mod(m), self.refresh_all()))
         if m.get("duplicates"):
             menu.add_separator()
             menu.add_command(label=f"清理重复jar（{sum(len(v) for v in m['duplicates'].values())}个）",
                              command=lambda: self._cleanup_dups(m))
+
+    def _show_inst_detail(self, m):
+        """已安装 mod 的详情窗口：端别版本/文件、远端最新、wiki 详情。"""
+        e = self.db.get(m["mod_id"]) or {}
+        src = updater.current_source_url(e)
+        lines = [
+            f"名称: {m['name_en']} {m.get('name_cn') or ''}",
+            f"分类: {m.get('group')} / {m.get('category')}",
+            f"安装端别: {INSTALL_SIDE_CN.get(m.get('install_side'), '?')}",
+            f"状态: {STATUS_CN.get(m.get('status'), m.get('status'))}"
+            + ("（已锁定，跳过检查更新）" if m.get("locked") else ""),
+            f"下载源: {src or '（无）'}",
+        ]
+        for side in SIDES:
+            st = m["sides"].get(side)
+            if not st:
+                continue
+            lines.append(f"\n{SIDE_LABELS[side]}版本: v{st.get('version')}  [{st.get('file_name')}]")
+            if st.get("latest_version"):
+                lines.append(f"  远端最新: v{st['latest_version']}")
+            if st.get("duplicates"):
+                lines.append(f"  重复jar: {'、'.join(st['duplicates'])}")
+        if e.get("desc"):
+            lines.append(f"\n简介:\n{e['desc']}")
+        if e.get("detail"):
+            lines.append(f"\n详细信息:\n{e['detail']}")
+        top = tk.Toplevel(self.root)
+        top.title(f"{m['name_en']} {m.get('name_cn') or ''}")
+        top.geometry("680x460")
+        frame = ttk.Frame(top)
+        frame.pack(fill="both", expand=True, padx=8, pady=8)
+        t = tk.Text(frame, wrap="word", font=FONT)
+        t.insert("1.0", "\n".join(lines))
+        t.configure(state="disabled")
+        t.pack(side="left", fill="both", expand=True)
+        self._attach_scrollbar(t, frame)
 
     def _cleanup_dups(self, m):
         if not messagebox.askyesno("确认", f"清理 {m['name_en']} 的重复jar？\n"

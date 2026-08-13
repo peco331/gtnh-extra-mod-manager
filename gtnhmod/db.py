@@ -159,6 +159,10 @@ class ModsDB:
                     fe["source"] = old.get("source") or fe.get("source")
                     fe["source_type"] = old.get("source_type") or fe.get("source_type")
                     fe["source_override"] = True
+                # 用户配置的版本过滤（如 GitHub 只取带 GTNH 的版本）在刷新后保留
+                old_tag_regex = (old.get("source") or {}).get("tag_regex")
+                if old_tag_regex:
+                    fe.setdefault("source", {})["tag_regex"] = old_tag_regex
                 # 用户编辑过的中文名在刷新后保留
                 if old.get("name_cn_override"):
                     fe["name_cn"] = old.get("name_cn") or fe.get("name_cn")

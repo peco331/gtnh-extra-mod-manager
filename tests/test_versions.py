@@ -119,6 +119,17 @@ class TestSplit(unittest.TestCase):
         self.assertEqual(split_mc_mod_version("GTNH-Core-Mod"),
                          ("GTNH-Core-Mod", None, None))
 
+    def test_version_before_mc_anchor(self):
+        # name-modver-mcver 命名（如 advanced_memory_card-1.0.1-1.7.10-GTNH）：
+        # MC 锚点前一段像版本 → 版本整体保留（含 MC 段与后缀）
+        self.assertEqual(split_mc_mod_version("advanced_memory_card-1.0.1-1.7.10-GTNH"),
+                         ("advanced_memory_card", "1.7.10", "1.0.1-1.7.10-GTNH"))
+
+    def test_version_before_mc_anchor_no_suffix(self):
+        # 无后缀时 MC 段在末尾，走无MC段分支，版本同样整体保留
+        self.assertEqual(split_mc_mod_version("modernmarkings-0.3.13-1.7.10"),
+                         ("modernmarkings", None, "0.3.13-1.7.10"))
+
 
 if __name__ == "__main__":
     unittest.main()
