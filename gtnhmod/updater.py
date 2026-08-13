@@ -1,0 +1,798 @@
+"""编排层：注册表构建、检查更新、安装/更新、启用禁用、未受管管理。
+
+壳（CLI/GUI）只调本模块；所有交互经 UIProtocol（见 ui.py）。
+"""
+import os
+import re
+import shutil
+from pathlib import Path
+
+from . import SIDES, SIDE_LABELS, utils
+from . import downloader, installed as installed_mod, scanner, sources
+from . import wiki as wikimod
+from .sources import Source, UpdateInfo
+from .versions import VersionParseError, compare, parse_version, split_mc_mod_version
+
+IGNORED_HINT = "（已忽略）"
+
+
+def _log_op(cfg, msg: str) -> None:
+    """写操作日志（data/logs/operations.log），失败静默。"""
+    utils.append_log(cfg.data_dir, msg)
+
+
+# ---------- GTNH 版本兼容 ----------
+
+def _opt_parse(s):
+    """解析版本；空/不可解析返回 None。"""
+    if not s:
+        return None
+    try:
+        return parse_version(s)
+    except VersionParseError:
+        return None
+
+
+def _mod_pattern_match(pattern: str, version: str) -> bool:
+    """版本模式匹配：'0.2.0pXX' 匹配 '0.2.0p44'；'1.9' 匹配 '1.9'/'1.9.1'。"""
+    p = re.sub(r"p\d+|pxx", "p", (pattern or "").strip().lstrip("v").lower())
+    v = re.sub(r"p\d+|pxx", "p", (version or "").strip().lstrip("v").lower())
+    if not p or not v:
+        return False
+    return p == v or v.startswith(p + ".") or v.startswith(p + "-")
+
+
+def match_compat(compat_rules: list, gtnh_version: str, mod_version: str) -> str:
+    """判断某 mod 版本是否适配当前 GTNH 版本。
+
+    返回 compatible / incompatible / unknown（无规则或无法解析时）。
+    """
+    if not gtnh_version or not compat_rules:
+        return "unknown"
+    g = _opt_parse(gtnh_version)
+    v = _opt_parse(mod_version)
+    if g is None or v is None:
+        return "unknown"
+    known, bad = False, False
+    for r in compat_rules:
+        if r["kind"] == "range":
+            if not _mod_pattern_match(r["mod_ver"], mod_version):
+                continue
+            known = True
+            lo, hi = _opt_parse(r.get("min")), _opt_parse(r.get("max"))
+            if (lo is not None and compare(g, lo) < 0) or (hi is not None and compare(g, hi) > 0):
+                bad = True
+        elif r["kind"] == "gtnh_min":
+            gv = _opt_parse(r.get("gtnh"))
+            if gv is None or compare(g, gv) < 0:
+                continue
+            known = True
+            mm = _opt_parse(r.get("mod_min"))
+            if mm is not None and compare(v, mm) < 0:
+                bad = True
+        elif r["kind"] == "gtnh_max":
+            gv = _opt_parse(r.get("gtnh"))
+            if gv is None or compare(g, gv) > 0:
+                continue
+            known = True
+            mm = _opt_parse(r.get("mod_max"))
+            if mm is not None and compare(v, mm) > 0:
+                bad = True
+    if bad:
+        return "incompatible"
+    return "compatible" if known else "unknown"
+
+
+def get_available_versions(entry: dict, cfg, db=None, *, force: bool = False) -> list:
+    """列出可安装/更新的版本（最新在前），并标注适配性与推荐。
+
+    返回 [{"version","tag","body","candidates","compat","recommended","latest"}]。
+    传入 db 时会从下载资产文件名学习该mod的真实jar命名（存入aliases）。
+    """
+    source = Source.from_entry(entry, cfg)
+    try:
+        options = source.list_versions(force=force)
+    except Exception:
+        return []
+    # 从首个有资产的版本学习真实jar命名（供以后扫描精确匹配）
+    if db is not None:
+        for o in options:
+            if o.candidates:
+                _learn_asset_name(db, entry, o.candidates[0].file_name)
+                break
+    gtnh = (cfg.data.get("gtnh_version") or "").strip()
+    compat_rules = entry.get("compat") or []
+    result = []
+    for i, o in enumerate(options):
+        # 版本自述（GitHub release body）里的兼容说明优先于wiki条目级规则
+        body_rules = wikimod.parse_compat(o.body or "") if o.body else []
+        if body_rules:
+            compat = match_compat(body_rules, gtnh, o.version)
+        else:
+            compat = match_compat(compat_rules, gtnh, o.version)
+        result.append({
+            "version": o.version,
+            "tag": o.tag or o.version,
+            "body": o.body,
+            "candidates": o.candidates,
+            "compat": compat,
+            "recommended": False,
+            "latest": i == 0,
+        })
+    if not result:
+        return []
+    # 推荐：第一个确认适配的；全部 unknown 时推荐最新
+    for r in result:
+        if r["compat"] == "compatible":
+            r["recommended"] = True
+            break
+    else:
+        result[0]["recommended"] = True
+    return result
+
+
+def scan_sides(cfg, db) -> dict:
+    """扫描两端 mods 目录并匹配 db，返回 {side: [InstalledFile]}。"""
+    result = {}
+    for side in SIDES:
+        folder = cfg.mods_dir(side)
+        files = scanner.scan_folder(folder) if folder else []
+        scanner.match_all(files, db.all())
+        result[side] = files
+    return result
+
+
+def unmatched_files(cfg, db) -> dict:
+    """两端未匹配且未忽略的 jar，返回 {side: [InstalledFile]}。"""
+    ignored = set(cfg.data.get("ignored_files") or [])
+    result = {}
+    for side, files in scan_sides(cfg, db).items():
+        result[side] = [f for f in files if not f.mod_id and f.file_name not in ignored]
+    return result
+
+
+def build_registry(cfg, db, installed) -> dict:
+    """构建已安装注册表：{side: {mod_id: state}}，以磁盘扫描为准。
+
+    已剔除（ignored_files）的 jar 不出现；同一mod多个jar时取版本最高者，
+    其余记入 state["duplicates"] 供界面提示。
+    """
+    ignored = set(cfg.data.get("ignored_files") or [])
+    reg = {}
+    for side, files in scan_sides(cfg, db).items():
+        by_mod: dict = {}
+        for f in files:
+            if f.file_name in ignored or not f.mod_id:
+                continue
+            by_mod.setdefault(f.mod_id, []).append(f)
+        side_reg = {}
+        for mod_id, fs in by_mod.items():
+            ordered = _sort_files_by_version(fs)
+            f = ordered[0]
+            entry = db.get(f.mod_id) or {}
+            inst = installed.get(side, f.mod_id) or {}
+            latest = inst.get("last_remote_version")
+            status = "disabled" if not f.enabled else "installed"
+            if f.enabled and latest and f.version:
+                try:
+                    if compare(latest, f.version) > 0:
+                        status = "update_avail"
+                except VersionParseError:
+                    pass
+            st = {
+                "mod_id": f.mod_id,
+                "name_en": entry.get("name_en") or f.mod_id,
+                "name_cn": entry.get("name_cn") or "",
+                "group": entry.get("group") or "?",
+                "category": entry.get("category") or "?",
+                "want_side": entry.get("side") or "both",
+                "file_name": f.file_name,
+                "version": f.version or "未知",
+                "enabled": f.enabled,
+                "locked": bool(inst.get("locked")),
+                "status": status,
+                "latest_version": latest,
+            }
+            if len(ordered) > 1:
+                st["duplicates"] = [x.file_name for x in ordered[1:]]
+            side_reg[f.mod_id] = st
+        reg[side] = side_reg
+    return reg
+
+
+def build_merged_registry(cfg, db, installed) -> list:
+    """合并注册表：一个 mod 一行（不区分端别重复显示）。
+
+    安装端别分三类：both=双端 / client=仅客户端 / server=仅服务端。
+    每行: {mod_id, name_en, name_cn, group, category, want_side,
+          install_side, sides:{side: state}, status, locked, latest_version}
+    """
+    reg = build_registry(cfg, db, installed)
+    merged: dict = {}
+    for side in SIDES:
+        for mod_id, st in reg[side].items():
+            m = merged.setdefault(mod_id, {
+                "mod_id": mod_id, "name_en": st["name_en"], "name_cn": st["name_cn"],
+                "group": st["group"], "category": st["category"],
+                "want_side": st["want_side"], "sides": {},
+            })
+            m["sides"][side] = st
+    out = []
+    for m in merged.values():
+        sides = m["sides"]
+        dups = {s: st.get("duplicates") for s, st in sides.items() if st.get("duplicates")}
+        if dups:
+            m["duplicates"] = dups
+        if "client" in sides and "server" in sides:
+            m["install_side"] = "both"
+        elif "client" in sides:
+            m["install_side"] = "client"
+        else:
+            m["install_side"] = "server"
+        statuses = [st["status"] for st in sides.values()]
+        if "update_avail" in statuses:
+            m["status"] = "update_avail"
+        elif all(s == "disabled" for s in statuses):
+            m["status"] = "disabled"
+        else:
+            m["status"] = "installed"
+        m["locked"] = any(st["locked"] for st in sides.values())
+        m["latest_version"] = next(
+            (st["latest_version"] for st in sides.values() if st["latest_version"]), "")
+        out.append(m)
+    out.sort(key=lambda m: m["name_en"].lower())
+    return out
+
+
+def _sort_files_by_version(files: list) -> list:
+    """按文件版本降序排列（无法解析版本的排最后，保持原序）。"""
+    parseable = [f for f in files if f.version and _opt_parse(f.version)]
+    unparse = [f for f in files if not (f.version and _opt_parse(f.version))]
+    parseable.sort(key=lambda f: parse_version(f.version).key(), reverse=True)
+    return parseable + unparse
+
+
+def find_installed_files(cfg, db, side: str, mod_id: str) -> list:
+    """某端别某 mod 在磁盘上的所有匹配文件（版本降序）。"""
+    folder = cfg.mods_dir(side)
+    if not folder:
+        return []
+    files = scanner.scan_folder(folder)
+    scanner.match_all(files, db.all())
+    hits = [f for f in files if f.mod_id == mod_id]
+    return _sort_files_by_version(hits)
+
+
+def find_installed_file(cfg, db, side: str, mod_id: str):
+    """找到某端别某 mod 当前在磁盘上的代表文件（版本最高者）。失败返回 None。"""
+    hits = find_installed_files(cfg, db, side, mod_id)
+    return hits[0] if hits else None
+
+
+def backup_and_remove_extra(cfg, db, side: str, mod_id: str, extra) -> bool:
+    """把同mod的冗余jar备份后移除（防双jar冲突）。返回是否成功。"""
+    bak_dir = cfg.backup_dir / side / mod_id
+    bak_dir.mkdir(parents=True, exist_ok=True)
+    bak = downloader._unique_backup_path(bak_dir, extra.file_name)
+    try:
+        shutil.copy2(extra.path, bak)
+        extra.path.unlink()
+        _log_op(cfg, f"{SIDE_LABELS[side]} 清理重复jar {extra.file_name}（已备份）")
+        return True
+    except OSError:
+        return False
+
+
+def cleanup_duplicates(cfg, db, installed, mod_id: str) -> dict:
+    """清理某mod在所有端别的重复jar（只保留版本最高者）。返回结果dict。"""
+    cleaned = []
+    for side in SIDES:
+        hits = find_installed_files(cfg, db, side, mod_id)
+        for extra in hits[1:]:
+            if backup_and_remove_extra(cfg, db, side, mod_id, extra):
+                cleaned.append(f"{SIDE_LABELS[side]}: {extra.file_name}")
+    return {"action": "cleaned" if cleaned else "none", "cleaned": cleaned}
+
+
+def auto_install_sides(entry: dict, cfg) -> tuple:
+    """按mod端别声明自动决定安装到哪些端别。返回 (sides列表, 提示)。
+
+    both → 所有已设置目录的端别；client/server → 对应端别（目录未设置则提示）。
+    """
+    want = entry.get("side") or "both"
+    note = ""
+    if want == "both":
+        sides = [s for s in SIDES if cfg.mods_dir(s) and cfg.mods_dir(s).is_dir()]
+        missing = [SIDE_LABELS[s] for s in SIDES
+                   if not (cfg.mods_dir(s) and cfg.mods_dir(s).is_dir())]
+        if missing:
+            note = f"{'、'.join(missing)}mods目录未设置，已跳过该端别"
+    else:
+        d = cfg.mods_dir(want)
+        if d and d.is_dir():
+            sides, note = [want], ""
+        else:
+            sides, note = [], f"{SIDE_LABELS[want]}mods目录未设置，无法安装"
+    return sides, note
+
+
+def set_name_cn(db, mod_id: str, name_cn: str) -> dict:
+    """编辑条目中文名（可新增）。留空则恢复wiki原名。"""
+    entry = db.get(mod_id)
+    if not entry:
+        return {"action": "error", "error": f"未知mod: {mod_id}"}
+    name_cn = (name_cn or "").strip()
+    db.update_entry(mod_id, {"name_cn": name_cn, "name_cn_override": bool(name_cn)})
+    utils.append_log(db.path.parent,
+                     f"编辑中文名 {entry.get('name_en') or mod_id} → {name_cn or '（恢复wiki原名）'}")
+    return {"action": "saved", "name_cn": name_cn}
+
+
+def entry_links(entry: dict) -> list:
+    """条目的全部下载链接（含标签）。老数据无links字段时从分类url兜底重建。"""
+    links = list((entry.get("urls") or {}).get("links") or [])
+    if links:
+        return links
+    urls = entry.get("urls") or {}
+    for key, label in (("github", "github"), ("curseforge", "curseforge"),
+                       ("mcmod", "mcmod"), ("bilibili", "bilibili")):
+        if urls.get(key):
+            links.append({"url": urls[key], "label": label})
+    return links
+
+
+def _side_warning(entry: dict, side: str) -> str:
+    want = entry.get("side") or "both"
+    if want != "both" and want != side:
+        return (f"注意：该mod标注为{SIDE_LABELS.get(want, want)}专用，"
+                f"当前选择安装到{SIDE_LABELS[side]}")
+    return ""
+
+
+# ---------- 检查更新 ----------
+
+def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
+                  progress_cb=None, only=None) -> list:
+    """对已安装（未锁定）mod 逐一查询最新版本。only=指定mod_id集合时只查这些。
+
+    返回 [(side, mod_id, UpdateInfo|None, error_str|None)]。
+    """
+    results = []
+    ignored = set(cfg.data.get("ignored_files") or [])
+    for side in sides:
+        folder = cfg.mods_dir(side)
+        if not folder:
+            continue
+        files = scanner.scan_folder(folder)
+        scanner.match_all(files, db.all())
+        for f in files:
+            if not f.mod_id or f.file_name in ignored:
+                continue
+            if only is not None and f.mod_id not in only:
+                continue
+            if not f.enabled:
+                continue  # 已禁用的不查，省 API 配额
+            entry = db.get(f.mod_id)
+            if not entry:
+                continue
+            inst = installed.get(side, f.mod_id) or {}
+            if inst.get("locked"):
+                continue
+            source = Source.from_entry(entry, cfg)
+            try:
+                info = source.check(f.version, force=force)
+                if info.latest_version:
+                    installed.touch_checked(side, f.mod_id, info.latest_version)
+                if info.candidates:
+                    _learn_asset_name(db, entry, info.candidates[0].file_name)
+                results.append((side, f.mod_id, info, None))
+            except Exception as e:  # 单个失败不影响整体
+                results.append((side, f.mod_id, None, str(e)))
+            if progress_cb:
+                progress_cb(side, f.mod_id)
+    return results
+
+
+def version_status(current, latest) -> str:
+    """比较已装版本与远端版本：update=可更新 / uptodate=已最新 / unknown=无法判断。"""
+    if not current or not latest:
+        return "unknown"
+    try:
+        return "update" if compare(latest, current) > 0 else "uptodate"
+    except VersionParseError:
+        return "unknown"
+
+
+# ---------- 安装 / 更新 ----------
+
+def install_mod(cfg, db, installed, mod_id: str, side: str, *,
+                version: str = None, progress_cb=None) -> dict:
+    """安装 mod 到指定端别。version 指定时安装该版本（否则最新）。
+
+    返回结果 dict（action: installed/manual/error）。
+    """
+    entry = db.get(mod_id)
+    if not entry:
+        return {"action": "error", "error": f"未知mod: {mod_id}"}
+    folder = cfg.mods_dir(side)
+    if not folder or not folder.is_dir():
+        return {"action": "error",
+                "error": f"{SIDE_LABELS[side]}mods目录未设置或不存在，请先在设置中配置"}
+    warn = _side_warning(entry, side)
+    source = Source.from_entry(entry, cfg)
+    if version is not None:
+        opt = next((o for o in get_available_versions(entry, cfg, db, force=True)
+                    if o["version"] == version), None)
+        if not opt:
+            _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {entry.get('name_en') or mod_id} 失败: 版本 {version} 不可用")
+            return {"action": "error", "error": f"版本 {version} 不可用（列表可能已过期，请重试）"}
+        if not opt["candidates"]:
+            return {"action": "manual", "note": f"版本 {version} 无自动下载资产，需手动下载",
+                    "entry": entry, "warning": warn}
+        cand = opt["candidates"][0]
+        info = UpdateInfo(opt["version"], opt["candidates"], opt["body"],
+                          utils.now_str(), f"已选版本 {version}")
+    else:
+        try:
+            info = source.check(None, force=True)
+        except Exception as e:
+            return {"action": "error", "error": f"查询最新版本失败: {e}"}
+        if not info.candidates:
+            return {"action": "manual", "note": info.note or "该mod无自动下载渠道",
+                    "entry": entry, "warning": warn}
+        cand = info.candidates[0]
+    old = find_installed_file(cfg, db, side, mod_id)
+    try:
+        dest = downloader.update_with_backup(
+            cand, folder, cfg.backup_dir / side / mod_id,
+            old_file=old.path if old else None, backup_keep=cfg.backup_keep,
+            progress_cb=progress_cb, proxy=cfg.proxy, dl_cache_dir=cfg.cache_dir)
+    except downloader.FileBusyError as e:
+        _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {entry.get('name_en') or mod_id} 失败: {e}")
+        return {"action": "error", "error": str(e)}
+    except Exception as e:
+        _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {entry.get('name_en') or mod_id} 失败: {e}")
+        return {"action": "error", "error": f"下载/安装失败: {e}"}
+    ver = split_mc_mod_version(dest.stem)[2] or info.latest_version or "?"
+    installed.set(side, mod_id, file_name=dest.name, parsed_version=ver,
+                  install_date=utils.now_str(), last_remote_version=info.latest_version,
+                  last_checked=utils.now_str())
+    _learn_asset_name(db, entry, dest.name)
+    _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {entry.get('name_en') or mod_id} v{ver}（{dest.name}）")
+    _cleanup_extras(cfg, db, side, mod_id, dest)
+    return {"action": "installed", "file": dest.name, "version": ver,
+            "warning": warn, "note": info.note, "body": info.release_body}
+
+
+def current_source_url(entry: dict) -> str:
+    """条目当前绑定的下载源链接（github仓库页/curseforge页）；无则空串。"""
+    src = entry.get("source") or {}
+    if entry.get("source_type") == "github" and src.get("owner"):
+        return f"https://github.com/{src['owner']}/{src['repo']}"
+    if entry.get("source_type") == "curseforge":
+        return (entry.get("urls") or {}).get("curseforge") or ""
+    return ""
+
+
+def bind_source(db, mod_id: str, url: str) -> dict:
+    """把某mod的下载源绑定到指定链接（GitHub仓库/CurseForge页面）。
+
+    绑定记录 source_override 标记，刷新wiki数据后依然保留。
+    返回 {action: bound/error, ...}。
+    """
+    entry = db.get(mod_id)
+    if not entry:
+        return {"action": "error", "error": f"未知mod: {mod_id}"}
+    url = (url or "").strip().rstrip("/")
+    fields = {"source_override": True, "urls": dict(entry.get("urls") or {})}
+    if "github.com" in url:
+        repo = wikimod.github_repo_from_url(url)
+        if not repo:
+            return {"action": "error", "error": "无法从该链接解析出 GitHub 仓库（owner/repo）"}
+        fields["source_type"] = "github"
+        fields["source"] = {"owner": repo[0], "repo": repo[1], "asset_regex": "",
+                            "exclude_regex": wikimod.DEFAULT_EXCLUDE_REGEX}
+        fields["urls"]["github"] = url
+    elif "curseforge.com" in url:
+        fields["source_type"] = "curseforge"
+        fields["source"] = {}
+        fields["urls"]["curseforge"] = url
+    else:
+        return {"action": "error", "error": "仅支持绑定 GitHub 仓库或 CurseForge 页面链接"}
+    db.update_entry(mod_id, fields)
+    entry = db.get(mod_id)
+    utils.append_log(db.path.parent,
+                     f"绑定下载源 {entry.get('name_en') or mod_id} → {url}")
+    return {"action": "bound", "url": url, "source_type": fields["source_type"]}
+
+
+def _learn_asset_name(db, entry: dict, file_name: str) -> None:
+    """从下载资产文件名学习该mod的真实jar命名（存入aliases，供扫描匹配）。
+
+    例如资产 "GTNHModify_CutCorners-v1.3.17+2.9.0-beta-1.jar"
+    → 记住名字段 "GTNHModify_CutCorners"。
+    """
+    if not file_name:
+        return
+    stem = file_name[:-4] if file_name.lower().endswith(".jar") else file_name
+    name, mc, ver = split_mc_mod_version(stem)
+    if name and len(scanner.normalize_name(name)) >= scanner.MIN_FUZZY_LEN:
+        db.add_alias(entry["id"], name)
+
+
+def _cleanup_extras(cfg, db, side: str, mod_id: str, dest: Path) -> None:
+    """新文件就位后，把同mod的其他jar备份并移除（防双jar冲突）。"""
+    for extra in find_installed_files(cfg, db, side, mod_id):
+        if extra.path.resolve() == dest.resolve():
+            continue
+        backup_and_remove_extra(cfg, db, side, mod_id, extra)
+
+
+def update_mod(cfg, db, installed, mod_id: str, side: str, *,
+               version: str = None, progress_cb=None) -> dict:
+    """更新已安装 mod。version 指定时更新到该版本（否则最新）。
+
+    返回结果 dict（action: updated/uptodate/manual/error）。
+    """
+    entry = db.get(mod_id)
+    if not entry:
+        return {"action": "error", "error": f"未知mod: {mod_id}"}
+    folder = cfg.mods_dir(side)
+    if not folder or not folder.is_dir():
+        return {"action": "error",
+                "error": f"{SIDE_LABELS[side]}mods目录未设置或不存在"}
+    old = find_installed_file(cfg, db, side, mod_id)
+    if not old:
+        return {"action": "error", "error": f"{SIDE_LABELS[side]}未找到已安装文件"}
+    source = Source.from_entry(entry, cfg)
+    if version is not None:
+        if old.version and version == old.version:
+            return {"action": "uptodate", "version": old.version, "note": "已是指定版本"}
+        opt = next((o for o in get_available_versions(entry, cfg, db, force=True)
+                    if o["version"] == version), None)
+        if not opt:
+            _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id} 失败: 版本 {version} 不可用")
+            return {"action": "error", "error": f"版本 {version} 不可用（列表可能已过期，请重试）"}
+        if not opt["candidates"]:
+            return {"action": "manual", "note": f"版本 {version} 无自动下载资产，需手动下载",
+                    "entry": entry}
+        info = UpdateInfo(opt["version"], opt["candidates"], opt["body"],
+                          utils.now_str(), f"已选版本 {version}")
+    else:
+        try:
+            info = source.check(old.version, force=True)
+        except Exception as e:
+            return {"action": "error", "error": f"查询最新版本失败: {e}"}
+        if not info.candidates:
+            return {"action": "manual", "note": info.note or "该mod无自动下载渠道",
+                    "entry": entry}
+        if old.version and info.latest_version:
+            try:
+                if compare(info.latest_version, old.version) <= 0:
+                    return {"action": "uptodate", "version": old.version,
+                            "note": "已是最新版本"}
+            except VersionParseError:
+                pass
+    cand = info.candidates[0]
+    try:
+        dest = downloader.update_with_backup(
+            cand, folder, cfg.backup_dir / side / mod_id,
+            old_file=old.path, backup_keep=cfg.backup_keep,
+            progress_cb=progress_cb, proxy=cfg.proxy, dl_cache_dir=cfg.cache_dir)
+    except downloader.FileBusyError as e:
+        _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id} 失败: {e}")
+        return {"action": "error", "error": str(e)}
+    except Exception as e:
+        _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id} 失败: {e}")
+        return {"action": "error", "error": f"下载/更新失败: {e}"}
+    ver = split_mc_mod_version(dest.stem)[2] or info.latest_version or "?"
+    installed.set(side, mod_id, file_name=dest.name, parsed_version=ver,
+                  last_remote_version=info.latest_version, last_checked=utils.now_str())
+    _learn_asset_name(db, entry, dest.name)
+    _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id}: "
+                 f"v{old.version or '?'} → v{ver}（{dest.name}）")
+    _cleanup_extras(cfg, db, side, mod_id, dest)
+    return {"action": "updated", "from": old.version or "?", "to": ver,
+            "file": dest.name, "note": info.note, "body": info.release_body}
+
+
+def update_all(cfg, db, installed, *, sides=SIDES, progress_cb=None) -> list:
+    """逐端更新所有可更新的 mod；单个失败不中断。返回结果列表。"""
+    results = []
+    for side in sides:
+        reg = build_registry(cfg, db, installed).get(side, {})
+        for mod_id, st in reg.items():
+            if not st["enabled"] or st["locked"]:
+                continue
+            r = update_mod(cfg, db, installed, mod_id, side, progress_cb=progress_cb)
+            r["side"], r["mod_id"], r["name"] = side, mod_id, st["name_en"]
+            results.append(r)
+            if progress_cb:
+                progress_cb(side, mod_id)
+    return results
+
+
+# ---------- 启用/禁用 / 锁定 ----------
+
+def _toggle_path(path: Path, enable: bool) -> Path:
+    name = path.name
+    if enable and name.lower().endswith(".jar.disabled"):
+        return path.with_name(name[:-len(".disabled")])
+    if not enable and name.lower().endswith(".jar"):
+        return path.with_name(name + ".disabled")
+    return path
+
+
+def set_enabled(cfg, db, installed, mod_id: str, side: str, enabled: bool) -> dict:
+    """启用/禁用（.jar ↔ .jar.disabled 重命名）。两端独立。"""
+    f = find_installed_file(cfg, db, side, mod_id)
+    if not f:
+        return {"action": "error", "error": f"{SIDE_LABELS[side]}未找到该mod的文件"}
+    if f.enabled == enabled:
+        return {"action": "unchanged", "file": f.file_name}
+    new_path = _toggle_path(f.path, enabled)
+    try:
+        os.rename(f.path, new_path)
+    except PermissionError:
+        return {"action": "error", "error": f"文件被占用，请先关闭游戏/服务端: {f.file_name}"}
+    installed.set(side, mod_id, file_name=new_path.name, enabled=enabled)
+    entry = db.get(mod_id) or {}
+    name = entry.get("name_en") or mod_id
+    _log_op(cfg, f"{SIDE_LABELS[side]} {'启用' if enabled else '禁用'} {name}（{new_path.name}）")
+    return {"action": "enabled" if enabled else "disabled", "file": new_path.name}
+
+
+def toggle_lock(installed, mod_id: str, side: str) -> dict:
+    """锁定/解锁：锁定的mod跳过检查更新与更新。"""
+    inst = installed.get(side, mod_id)
+    new_locked = not bool((inst or {}).get("locked"))
+    installed.set(side, mod_id, locked=new_locked)
+    return {"action": "locked" if new_locked else "unlocked"}
+
+
+def set_lock(installed, mod_id: str, side: str, locked: bool) -> None:
+    """直接设置某端别锁定状态。"""
+    installed.set(side, mod_id, locked=locked)
+
+
+def exclude_installed(cfg, db, installed, mod_id: str) -> list:
+    """把已安装 mod 从受管列表剔除（其 jar 文件名加入忽略列表，两端都剔除）。
+
+    可随时在「恢复已排除文件」中恢复显示。返回被剔除的文件名列表。
+    """
+    names = []
+    for side in SIDES:
+        for f in find_installed_files(cfg, db, side, mod_id):
+            ignore_unmanaged(cfg, f.file_name)
+            installed.remove(side, mod_id)
+            names.append(f.file_name)
+    entry = db.get(mod_id) or {}
+    _log_op(cfg, f"从列表剔除 {entry.get('name_en') or mod_id}: {', '.join(names) or '无文件'}")
+    return names
+
+
+# ---------- 删除 ----------
+
+def delete_mod(cfg, db, installed, mod_id: str, *, sides: tuple = SIDES) -> dict:
+    """删除mod：jar 移入备份目录并加 .deleted 后缀（可恢复），不直接物理删除。
+
+    返回 {action: deleted/error, deleted: [...], error: str}。
+    """
+    entry = db.get(mod_id) or {}
+    name = entry.get("name_en") or mod_id
+    deleted, errors = [], []
+    for side in sides:
+        files = find_installed_files(cfg, db, side, mod_id)
+        if not files:
+            continue
+        for f in files:
+            dest_dir = cfg.backup_dir / side / mod_id
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / f"{utils.timestamp_str()}_{f.file_name}.deleted"
+            try:
+                shutil.move(str(f.path), str(dest))
+                deleted.append(f"{SIDE_LABELS[side]}: {f.file_name}")
+                _log_op(cfg, f"{SIDE_LABELS[side]} 删除 {name}（{f.file_name} → 备份目录 .deleted）")
+            except PermissionError:
+                errors.append(f"{SIDE_LABELS[side]} 文件被占用，请先关闭游戏/服务端: {f.file_name}")
+            except OSError as e:
+                errors.append(f"{SIDE_LABELS[side]} 删除失败: {e}")
+        if not errors:
+            installed.remove(side, mod_id)
+    if not deleted and not errors:
+        return {"action": "error", "error": "未找到该mod的文件"}
+    return {"action": "deleted" if deleted else "error",
+            "deleted": deleted, "error": "；".join(errors)}
+
+
+# ---------- 备份 ----------
+
+def list_backups(cfg) -> dict:
+    """列出备份：{side: {mod_id: [Path,...]}}。"""
+    out = {}
+    base = cfg.backup_dir
+    if not base.is_dir():
+        return out
+    for side in SIDES:
+        side_dir = base / side
+        if not side_dir.is_dir():
+            continue
+        for mod_dir in sorted(side_dir.iterdir()):
+            if not mod_dir.is_dir():
+                continue
+            files = sorted(list(mod_dir.glob("*.jar")) + list(mod_dir.glob("*.jar.deleted")),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+            if files:
+                out.setdefault(side, {})[mod_dir.name] = files
+    return out
+
+
+def restore_backup(cfg, db, installed, side: str, backup_path: Path) -> dict:
+    """恢复某个备份 jar 到 mods 目录（当前文件先另存备份）。"""
+    folder = cfg.mods_dir(side)
+    if not folder or not folder.is_dir():
+        return {"action": "error", "error": f"{SIDE_LABELS[side]}mods目录未设置或不存在"}
+    mod_id = backup_path.parent.name
+    name = re.sub(r"^\d{8}_\d{6}(?:_\d+)?_", "", backup_path.name)  # 时间戳[_序号]_原文件名
+    if name.endswith(".deleted"):
+        name = name[:-len(".deleted")]  # 删除操作移入的备份，恢复时还原原名
+    old = find_installed_file(cfg, db, side, mod_id)
+    cand = sources.DownloadCandidate(str(backup_path), name)
+    try:
+        dest = downloader.update_with_backup(
+            cand, folder, cfg.backup_dir / side / mod_id,
+            old_file=old.path if old else None, backup_keep=cfg.backup_keep,
+            dl_cache_dir=cfg.cache_dir)
+    except downloader.FileBusyError as e:
+        return {"action": "error", "error": str(e)}
+    except Exception as e:
+        return {"action": "error", "error": f"恢复失败: {e}"}
+    ver = split_mc_mod_version(dest.stem)[2] or ""
+    installed.set(side, mod_id, file_name=dest.name, parsed_version=ver)
+    entry = db.get(mod_id) or {}
+    _log_op(cfg, f"{SIDE_LABELS[side]} 恢复备份 {entry.get('name_en') or mod_id} → {dest.name}")
+    return {"action": "restored", "file": dest.name}
+
+
+# ---------- 未受管 ----------
+
+def register_unmanaged(cfg, db, side: str, file_name: str, *,
+                       name_cn: str = "", side_override: str = "both",
+                       source_type: str = "manual", source: dict = None) -> str:
+    """把未受管 jar 注册为自定义条目（默认 manual 无上游源）。返回新 mod_id。"""
+    name_part, mc, ver = split_mc_mod_version(file_name[:-4])
+    entry = {
+        "name_en": name_part or file_name,
+        "name_cn": name_cn,
+        "side": side_override,
+        "source_type": source_type,
+        "source": source or {},
+        "category": "自定义",
+    }
+    eid = db.add_custom(entry)
+    if name_part:
+        db.add_alias(eid, name_part)
+    _log_op(cfg, f"注册未受管文件 {file_name} 为自定义mod {eid}")
+    return eid
+
+
+def associate_unmanaged(db, mod_id: str, alias: str) -> None:
+    """把未匹配的 jar 文件名前缀关联到已有条目（记住映射）。"""
+    db.add_alias(mod_id, alias)
+
+
+def ignore_unmanaged(cfg, file_name: str) -> None:
+    """忽略某个未受管文件（不再提示）。"""
+    ignored = list(cfg.data.get("ignored_files") or [])
+    if file_name not in ignored:
+        ignored.append(file_name)
+        cfg.data["ignored_files"] = ignored
+        cfg.save()
+
+
+def unignore(cfg, file_name: str) -> None:
+    ignored = list(cfg.data.get("ignored_files") or [])
+    if file_name in ignored:
+        ignored.remove(file_name)
+        cfg.data["ignored_files"] = ignored
+        cfg.save()

@@ -1,0 +1,1035 @@
+{{需要扩展}} 
+[[file:可添加mod.png|center]]
+这里列举了一些我们推荐的可以加入到GTNH整合包的模组。绝大多数都是客户端模组，你并不需要把它们同时安装到服务端里。一些模组之间的功能有重叠，你只需要选择一个安装即可。
+
+*对于额外模组的性质，我们依据官方发布的[[星门#规则列表|星门规则]]将适配模组分为两部分：星门规则模组和非星门规则模组。
+*如果没有你需求的模组，或者你想编写自己的模组，你可以查看这篇文章[[开发]]
+*如果你想了解GTNH已有模组的介绍与内容，请见[[模组列表]]
+
+{{MColor|c|
+'''注意事项'''
+*{{MColor|c|添加模组时，不要将客户端模组添加到服务端}}
+*{{MColor|c|添加模组时，不要随便修改模组名称，这可能会导致模组加载顺序错误导致发生BUG}}
+*{{MColor|c|下载安装前，一定要充分了解下载的模组是什么，不能乱装}}
+*{{MColor|c|一定要下载安装对应版本的模组，有GTNH专用模组的用专用模组}}
+}}
+
+{{Mbox
+|border=primary
+|type=help
+|text=<font color="red">若本页面表格向右显示异常，请注册并登录灰机wiki账号，点击页面标题右侧的刷新！</font>
+}}
+
+== 星门规则模组 ==
+在星门规则体系下允许使用的模组，主要提供辅助功能，不改变游戏进度或整体平衡。
+*相关规则可参考[[星门#星门规则|星门规则]]
+*如条件允许，请始终优先从原作者官方发布渠道下载，以确保版本准确并支持原项目。在访问受限的情况下，可使用 GTNH 新手群提供的非官方镜像作为替代获取方式。该渠道仅用于网络受限情形下的补充下载，不代表官方分发渠道。所有资源的使用与再分发需遵循其原始许可协议
+
+=== 功能增强 ===
+为游戏提供额外功能或提升操作便利性的模组。这些模组通常不会改变游戏核心玩法，但能够在建造、搜索、输入、界面交互或自动化操作等方面提供辅助，使游戏体验更加高效与舒适。
+
+{{可添加MOD表格行/头}}
+{{可添加MOD表格行
+|图标=
+|模组英文名=Inputfix
+|模组中文名=中文输入修复补丁
+|运行环境=客户端
+|简述=修复Minecraft低版本bug，允许你正常输入中文。
+|详细介绍={{label|中文环境必备模组|type=danger}}<br>仅在使用Java8进行游戏时需要安装。
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/inputfix Curseforge]<br>[https://www.mcmod.cn/class/6800.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=NeverEnoughCharacters-Rework
+|模组中文名=NEI拼音搜索－重制版
+|运行环境=客户端
+|简述=支持在NEI中拼音搜索的模组。支持全拼、首字母混合搜索等功能。
+|详细介绍={{label|中文环境必备模组|type=danger}}<br>对非GTNH版本的NEI支持不做保证。<br>其修复了{{Label|2.8.0}}官方仓库出现的部分bug，支持自定义lua脚本，详情请查看github。
+|相关地址=[https://github.com/asdflj/NeverEnoughCharacters-Rework github]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-AE2 Auto Pattern Upload.png
+|模组英文名=AE2 Auto Pattern Upload
+|模组中文名=AE2样板自动上传
+|运行环境=客户端<br>服务端
+|简述=AE2的轻量级附属模组，可一键上传样板。
+|详细介绍=在样板终端中添加上传按钮，可一键将编码好的样板发送到已连接的ME接口，减少后期自动化中的手动搬运。对非GTNH版本的AE支持不做保证。需要{{Label|2.8.1}}
+|相关地址=[https://github.com/GaLicn/AE2-Auto-Pattern-Upload/ github]<br>[https://www.curseforge.com/minecraft/mc-mods/ae2-auto-pattern-upload Curseforge]<br>[https://www.mcmod.cn/class/23207.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Untranslator.jpeg
+|模组英文名=Untranslator
+|模组中文名=未转译者
+|运行环境=客户端
+|简述=专为GTNH设计的双语显示MOD，支持中、英、日任意两种语言，可调整三个显示位置。
+|详细介绍=GTNH{{Label|2.8.0}}及更高版本NEI已内置更好的Untranslator，使用方法：
+*将游戏语言切换为你想要添加的语言，并重启游戏（GT在切换语言时需要重启）；
+*进入单人世界并等待NEI加载（物品会出现在右侧窗口）；
+*运行命令<code>/untranslator dump</code>；
+*切换回原语言并重新启动游戏，Tooltips将包含你转储的语言中的名称。<br>如果坚持使用该Mod或游玩较旧版本，则请按照如下步骤进行：
+*需要在.minecraft目录下放置GregTech_en_US.lang
+*启动GTNH后会在根目录生成GregTech.lang，将其修改成GregTech_en_US.lang即可在语言设置中修改本模组配置。
+*如果发生任务书无法检查合成任务的情况，请在配置文件里将<code>S:location=name</code>改为<code>S:location=tooltip</code>
+|相关地址=[https://github.com/RealSilverMoon/Untranslator github]<br>[https://www.mcmod.cn/class/12644.html mcmod]<br>[https://github.com/GTNewHorizons/NotEnoughItems/pull/719 内置Untranslator - Github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=MouseSideButtonFix
+|模组中文名=侧键修复
+|运行环境=客户端
+|简述=修复鼠标侧键快捷键问题。
+|详细介绍=
+|相关地址=[https://github.com/asdflj/MouseSideButtonFix github]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-WorldEdit.png
+|模组英文名=WorldEdit
+|模组中文名=创世神
+|运行环境=客户端<br>服务端
+|简述=强大的建筑辅助模组。
+|详细介绍={{label|只允许部分功能的模组}}星门规则下允许使用WE进行基地建设。但是严禁使用WE铺设自动化，即使在丢弃对应数量的方块后再进行铺设也不可以。
+*推荐下载GTNH特供版
+|相关地址=[https://github.com/GTNewHorizons/worldedit-gtnh GTNH特供版-github]<br>[https://github.com/enginehub/WorldEdit Github]<br>[https://www.curseforge.com/minecraft/mc-mods/worldedit Curseforge]<br>[https://www.mcmod.cn/class/609.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Omni Ocular.png
+|模组英文名=OmniOcular
+|模组中文名=
+|运行环境=客户端<br>服务端
+|简述=Waila扩展模组。提供了客制化的根据方块NBT信息显示内容的功能。
+|详细介绍={{color|red|不确定是否影响游戏平衡，可能会在星门规则中被禁用}}<br>在GTNH中，本模组主要功能为显示正在运行的机器将产出的物品。本模组主要使用脚本文件（xml）和模组文件（jar），对于服务器来说，服务端必须安装脚本文件和模组文件，而客户端只需要安装模组文件；单人游玩必须同时安装脚本文件和模组文件。<br>默认的OmniOcular并不包含GT5u的方块信息，尤其是GTNH的方块信息，所以请从各个社区寻找可用的GT5U脚本文件。常见的脚本文件，最新版OmniOcular就可运行，对于特制的彩色OO配置文件，需要使用Unofficial-1.5以上版本（客户端与服务端使用的模组版本必须一致）。<br>OmniOcular的配置文件信息为硬编码，可能和GTNH最新版本实际内容不符，此时以游戏内工具提示为准。
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/omni-ocular Curseforge]<br>[https://www.mcmod.cn/class/1016.html mcmod]<br>[https://github.com/wohaopa/OmniOcular-Unofficial github非官方版]<br>[https://github.com/CCYF78/GTNH_OmniOcular OO脚本库]<br>[https://github.com/Taskeren/OmniOcular-Unofficial/releases OO修复版(推荐使用该版)]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Damage Indicators Mod.png
+|模组英文名=Damage Indicators
+|模组中文名=伤害显示
+|运行环境=客户端
+|简述=当玩家准星对准生物时，屏幕左上角（默认）显示生物血量的HUD。
+|详细介绍=可能会与IGI信息重合<br />显示的是多少血量，而非WAILA的多少"心"，你可能要调整WAILA设置。
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/damage-indicators-mod Curseforge]<br />[https://www.mcmod.cn/class/1014.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=NEI-RecipeTree
+|模组中文名=NEI合成树
+|运行环境=客户端
+|简述=NEI-RecipeTree是一个面向Minecraft 1.7.10与NotEnoughItems的合成树模组，用来把NEI的单个配方页扩展成可递归浏览的整棵材料树。
+|详细介绍=
+|相关地址=[https://github.com/XSana/NEI-RecipeTree github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Applied Cooking
+|模组中文名=应用厨房
+|运行环境=客户端（？）<br>服务端（？）
+|简述=这个模组连接了应用能源2与懒人厨房。
+|详细介绍=
+|相关地址=[https://github.com/asdflj/AppliedCooking github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=InputMethodBlocker-GTNH
+|模组中文名=输入法冲突修复
+|运行环境=客户端
+|简述=
+|详细介绍=将原本只支持Java8的模组重置为支持Java17-25的新版本。修复在正常游戏的时候和中文输入法冲突的现象，让你在开着输入法的时候也可以正常进行游戏，操控游戏，不会冲突。还额外支持了GTNH相关的模组的输入。（2.8.x下与旅行地图存在兼容问题，会导致后者无法输入中文）（2.9.0的lwjgl3fy已经内置该功能，仅在使用Java8进行游戏时需要安装。）
+|相关地址=[https://github.com/HOMEFTW/InputMethodBlocker-GTNH/releases github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=JdkJarVersion21Enforcer
+|模组中文名=Java25启动修复
+|运行环境=客户端
+|简述=
+|详细介绍=高版本Java、LWJGL、MemoryUtil、sun.misc.Unsafe、FFM、JIT、MethodHandle等底层机制交织在一起时，旧版Minecraft/Forge/Mod生态里的jar与运行时行为可能出现兼容问题。加入此模组可无需其他方法解决问题。其他最简单的解决办法是：1.在启动器的JVM启动参数上加上-Djdk.util.jar.version=21。2.在相关启动器上打开JavaAgent修复。
+|相关地址=[https://github.com/HOMEFTW/JdkJarVersion21Enforcer github]
+}}
+
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=ModernKeyBinding
+|模组中文名=现代化按键绑定
+|运行环境=客户端
+|简述=
+|详细介绍=GTNH{{Label|2.9.0}}及以上GTNH版本已内置支持组合键录入
+|相关地址=[https://github.com/Nova-Committee/ModernKeyBinding github]<br>[https://www.mcmod.cn/class/7840.html mcmod]<br>
+}}
+
+{{可添加MOD表格行/尾}}
+
+=== 性能优化 ===
+改善游戏性能或底层运行机制的模组。这些模组通常通过优化渲染方式、改进界面处理或增强系统兼容性，以提升游戏的稳定性、运行效率以及整体使用体验。
+{{可添加MOD表格行/头}}
+
+{{可添加MOD表格行
+|图标=Mod-Smooth Font.png
+|模组英文名=Smooth Font<ref>因为装平滑字体崩溃是非常常见的崩溃原因，所以默认放在了第一位</ref>
+|模组中文名=平滑字体
+|运行环境=客户端
+|简述=此模组平滑地绘制所有字体（包括资源包的字体），以提高在所有比例的可读性。
+|详细介绍=<div>{{label|中文环境必备模组|type=danger}}
+*允许玩家使用系统中安装的任意TTF格式字体作为Minecraft的默认字体，更换字体需要重启。同时，本模组可修复字体出现重影的问题。<ref>安装Smooth Font并不是解决字体重影问题的唯一途径：如果使用angelica的字体渲染，可以在angelica的字体配置中将Shadow Offset调整至一个较低的值。</ref>
+*{{label|angelica-2.1.30+}}关闭angelica字体渲染后，可能导致出现黑色矩形。可以通过在游戏内模组设置Smooth Font设置中任意选择一个字体来解决。
+*'''GTNH {{label|2.6.0}}版本及以上'''：加入mod后，请务必修改「根目录/config/angelica-modules.cfg」里的配置，搜索"enableFontRenderer=true"，将"true"改为"false"。 因angelica也修改了字体相关内容，同时修改可能会发生崩溃或其中一个不工作。
+*'''其他GTNH版本'''：<font color="red">'''直接安装会崩溃！请修改配置或删除fastcraft！'''</font><br>需要修改的配置位于「根目录/config/fastcraft.ini」中，搜索"enableFontRendererTweaks=true"，将"true"改为"false"。</div>
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/smooth-font Curseforge]<br>[https://www.mcmod.cn/class/1086.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Qz-UILib
+|模组中文名=Qz-UI库
+|运行环境=客户端
+|简述=一个高性能、跨语种支持的字体渲染引擎，完整支持 Unicode 多语种平面，带来流畅且多样的字体显示体验。
+|详细介绍=
+现在，在 Minecraft 中轻松使用 Emoji 和各种特殊字符！有如功能：
+*全 Unicode 支持，覆盖基本多文种平面及更多辅助平面平滑字体渲染，提供优质显示效果
+*专为 Minecraft 优化，无缝集成 Emoji 和特殊符号
+*跨语言兼容，支持包括中文、英文、日文、韩文及众多其他语言字符
+*无Mixin实现的字体渲染器，理论最高优先级渲染。
+将字体文件放置于.minecraft/fonts文件夹下，可在游戏内进行可视化字体排序。
+*切换渲染字体：在配置项中，FontRender 需置为 true，即可在字体排序中排序想要渲染的字体。
+*字体回滚机制：当某个字体无法渲染特定字符时，渲染器将自动依照排序顺序尝试后续字体，确保字符显示无缝兼容。
+*彩色EMJ相关：如果需要使用彩色EMJ和字符，可以使用JetBrain的JDK来启动游戏。
+|相关地址=[https://github.com/QuanhuZeYu/Qz-UILib github]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-FPS Reducer.png
+|模组英文名=FPS Reducer
+|模组中文名=FPS减速器
+|运行环境=客户端
+|简述=当您在一段时间内不操作Minecraft时，FpsReducer会自动降低帧速率
+|详细介绍=降低一些不必要的GPU和CPU负载。一旦用户实行任何操作，它将返回到原始的帧速率。如果帧率持续没有降低，请确认视频设置中关闭垂直同步。
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/fps-reducer Curseforge]<br />[https://www.mcmod.cn/class/1815.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=Raw Mouse Input.jpg
+|模组英文名=Raw Mouse Input
+|模组中文名=鼠标原始输入修复
+|运行环境=客户端
+|简述=原始输入能使得使用鼠标时整体感觉更加顺滑，还能修复游玩时鼠标输入抖动(Mouse jitering)带来的视角弹跳。
+|详细介绍=Java 8版本包：<br>
+在服务器中使用可能出现无法转动视角的 bug，输入 /rescan 重新识别鼠标即可解决。<br>
+Java 17-25版本包：<br>
+无需安装本模组。在 lwjgl3ify 模组的配置中启用鼠标原始输入功能即可。<br>相关指令:<br>
+<code>/rescan</code>	重新识别鼠标设备<br>
+<code>/rawinput</code>	切换原始输入开关
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/raw-input-1-12-2 Curseforge]<br />[https://www.mcmod.cn/class/8667.html mcmod]<br />[https://github.com/seanld03/RawInputMod-1.12.2-1.7.10 Github]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-NoFog.png
+|模组英文名=NoFog
+|模组中文名=没有雾
+|运行环境=客户端
+|简述=移除了所有雾
+|详细介绍=
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/nofog Curseforge]<br />[https://www.mcmod.cn/class/1820.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-LagGoggles Legacy.png
+|模组英文名=Lag Goggles: Legacy
+|模组中文名=延迟监视
+|运行环境=客户端<br>服务端
+|简述=一个可视化的延迟监视模组，为高版本 LagGoggles 移植到 1.7.10。
+|详细介绍=可以在世界中以可视化方式精确查看每个方块的延迟，也可以像 spark 一样统计各类机器与实体的延迟。
+
+需要安装前置[https://modrinth.com/mod/fplib FalsePatternLib]<br>使用时需要设置按键：打开 GUI 后，可通过滚轮调整测试时间；在世界中点击开始测试，等待测试结束即可查看结果。关闭显示同样需要在 GUI 中操作。
+|相关地址=[https://github.com/FalsePattern/LagGogglesLegacy github]<br>[https://modrinth.com/mod/lglegacy modrinth]
+}}
+
+{{可添加MOD表格行/尾}}
+
+=== 视听增强 ===
+用于改善游戏视觉效果或增强沉浸体验的模组。这类模组通常通过改进环境音效、界面显示、视觉表现或交互反馈，使游戏世界更加生动与富有表现力。
+{{可添加MOD表格行/头}}
+
+{{可添加MOD表格行
+|图标=Mod-Small Phone.jpeg
+|模组英文名=SmallPhone
+|模组中文名=小手机
+|运行环境=客户端<br>服务端
+|简述=添加了一个物品：小手机。
+|详细介绍=右键使用小手机拍照可以获得自身buff，但你的界面看上去像手机拍的一样。
+
+风险，与回报...
+
+服务端不安装也可使用，但是会丢失buff。在官方群中提供由本模组制造的截图，视为拍屏，可能会被禁言。
+|相关地址=[https://github.com/RealSilverMoon/SmallPhone/releases github]<br>[https://www.mcmod.cn/class/23005.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Mineshot.jpg
+|模组英文名=Mineshot
+|模组中文名=高清截图
+|运行环境=客户端
+|简述=模组可以通过拼接多张截图或离屏渲染的方式生成超高分辨率图片，并内置正交相机，用于在游戏内拍摄等距视角截图。
+|详细介绍=适用于制作高质量壁纸、海报、地图概览图以及 Wiki 图片等。
+*请使用GTNH特供版
+*制作wiki图片强烈推荐使用
+|相关地址=[https://github.com/ABKQPO/mineshot GTNH特供版github]<br>[https://github.com/ata4/mineshot 原作github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=MyCTMLib
+|模组中文名=连接纹理库支持
+|运行环境=客户端
+|简述=为资源包提供连接纹理（CTM）支持的库模组。
+|详细介绍=模组分为 {{label|2.7.x}} 与 {{label|2.8.x}} 两个版本，需要选择与整合包版本对应的版本（仅需客户端安装）。
+|相关地址=[https://github.com/ABKQPO/MyCTMLib github]<br />[https://github.com/wohaopa/MyCTMLib 原始模组github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=DarkTextFix
+|模组中文名=暗色文本修复
+|运行环境=客户端
+|简述=可修复使用深色资源包时容器界面文本变暗/不可读的问题。
+|详细介绍=Minecraft将容器GUI标题文字颜色硬编码为0x404040（深灰色）。此设计适用于原版浅色GUI背景，但在深色主题资源包下文字几乎不可见。
+
+'''若使用Modernity-GTNH-Dark-UI暗色UI包可以使用链接2，对部分mod的暗色文本进行了修复，且仅针对Modernity-GTNH-Dark-UI的配色优化不保真与其他材质包是否兼容。且与Smoot Font Mod冲突'''
+DarkTextFix通过ASM字节码操作实现：
+*修改FontRenderer.drawString()——拦截颜色参数并进行亮度校正
+*修改GuiContainer.drawScreen()——仅在drawGuiContainerForegroundLayer()期间设置上下文标志，确保物品耐久度条、堆叠数和工具提示不受影响
+|相关地址=[https://github.com/eudesjuniorr/DarkTextFix github]<br>[https://github.com/AdminXiaoMai/DarkTextFix/releases Modernity-Dark]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-World Tooltips.png
+|模组英文名=World Tooltips
+|模组中文名=
+|运行环境=客户端
+|简述=为掉落在地面的物品添加世界内悬浮提示（tooltip）。
+|详细介绍=玩家无需拾取物品即可直接查看其基本信息。如果同时安装了 NEI 或 Waila，该模组还会在提示中显示这些模组提供的额外信息。
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/world-tooltips Curseforge]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-BakaDanmaku.jpeg
+|模组英文名=BakaDanmaku
+|模组中文名=直播弹幕模组
+|运行环境=客户端
+|简述=显示直播弹幕。
+|详细介绍=如果安装了TabbyChat 2，它将不起作用。
+|相关地址=[https://www.mcmod.cn/class/3120.html mcmod]<br>[https://www.bilibili.com/video/BV1Aa411A7Vv/?share_source=copy_web&vd_source=a658d162f70ee417dd115f5cfbf24cd6 bilibili]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Better Foliage.jpeg
+|模组英文名=Better Foliage
+|模组中文名=更好的树叶
+|运行环境=客户端
+|简述=美化植被。
+|详细介绍=
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/better-foliage Curseforge]<br>[https://www.mcmod.cn/class/1128.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Better Rain
+|模组中文名=更好的雨
+|运行环境=客户端
+|简述=它会根据雨的"强度"改变雨的音量和质感
+|详细介绍=
+|相关地址=[https://www.minecraftforum.net/forums/mapping-and-modding-java-edition/minecraft-mods/2134067-better-rain-v0-15-bug-fixes minecraftforum]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=BetterTooltipBox
+|模组中文名=更好的提示框
+|运行环境=客户端
+|简述=本mod修改了游戏内Tooltip提示框，玩家可以自由按照固定的图片格式修改各种各样精美的贴图
+|详细介绍='''28X修复版'''适配了由于{{label|2.8.x}}产生部分看得见bug，仅限2.8.x使用。后续更新请去正主仓库下催更
+|相关地址=[https://github.com/xiaoxing2005/BetterTooltipBox/releases github]<br>[https://github.com/AdminXiaoMai/BetterTooltipBox 28X修复版-github]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Chat Bubbles.png
+|模组英文名=Chat Bubbles
+|模组中文名=聊天泡泡
+|运行环境=客户端
+|简述=需要安装前置：LiteLoader。此模组可以在玩家头上显示他们发出的信息。
+|详细介绍=如果你在安装了改变聊天方式的插件的服务器中，使用它可能会出现异常。查看此模组主页找到解决方法。
+
+搭配Optifine进入服务器可能会引发异常
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/chat-bubbles Curseforge]<br />[https://www.mcmod.cn/class/976.html mcmod]<br />[https://www.planetminecraft.com/mod/chat-bubbles/ planetminecraft]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Dynamic Surroundings.png
+|模组英文名=Dynamic Surroundings
+|模组中文名=动态环境
+|运行环境=客户端
+|简述=本模组在不影响minecraft原有游戏机制的前提下，改变了游戏的多项视听体验。
+|详细介绍=玩家可对众多特性高度自定义。
+
+已把Better Rain，Aurora Rubealis和Presence Footsteps的功能集成在内。已知与optfine使用时会出现一些方块的渲染问题，详见[https://github.com/GTNewHorizons/GT-New-Horizons-Modpack/issues/8374 issue]
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/dynamic-surroundings Curseforge]<br />[https://www.mcmod.cn/class/1083.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Extra Player Renderer.jpg
+|模组英文名=Extra Player Renderer
+|模组中文名=额外玩家渲染
+|运行环境=客户端
+|简述=安装后可以在你游戏左下角（默认）渲染出一个live2d的皮肤。
+|详细介绍=
+|相关地址=[https://www.mcmod.cn/class/3123.html mcmod]<br />[https://www.bilibili.com/video/BV1nf4y1D7Qo bilibili]<br>[https://www.curseforge.com/minecraft/mc-mods/extra-player-render curseforge]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Fancy Block Particles.png
+|模组英文名=Fancy Block Particles
+|模组中文名=梦幻方块效果
+|运行环境=客户端
+|简述=把普通的2D效果变成一些更多的3D粒子！一样可以高度自定义显示效果。
+|详细介绍=暮色森林冲突，进入暮色森林会崩溃(将 config/FBP/Particle.properties 中的 fancyRain 和 fancy Snow 更改为 false)
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/fancy-block-particles Curseforge]<br />[https://www.mcmod.cn/class/1135.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-ItemPhysic Lite.png
+|模组英文名=ItemPhysic Lite
+|模组中文名=物品掉落物理-轻量版
+|运行环境=客户端<br>服务端
+|简述=该模组为 Minecraft 中原本不符合物理规律的掉落物添加了一些物理效果。
+|详细介绍=轻量版仅提供视觉效果；如需完整功能，请使用完整版：[https://minecraft.curseforge.com/projects/itemphysic Curseforge]。完整版需要同时安装在服务端。
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/itemphysic-lite Curseforge]<br />[https://www.mcmod.cn/class/932.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-MAtmos.png
+|模组英文名=MAtmos
+|模组中文名=真实环境音效
+|运行环境=客户端
+|简述=提供更多环境音效（需要额外安装音效包）。
+|详细介绍=默认按键 F7 与 NEI 的刷怪区域显示按键冲突。
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/matmos Curseforge]<br />[https://www.mcmod.cn/class/1198.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-SkinPort.png
+|模组英文名=SkinPort
+|模组中文名=
+|运行环境=客户端
+|简述=在低版本Minecraft中实现正确的纤细以及双层皮肤，允许自定义皮肤服务器方便联机时显示皮肤。
+|详细介绍=实测使用[https://github.com/RetroForge/SkinPort/releases RetroForge fork - github]版本，配合[https://www.curseforge.com/minecraft/mc-mods/compatibilitylayerforcustomskinloader/files/all?page=1&pageSize=20&showAlphaFiles=show CompatibilityLayerForCustomSkinLoader - CurseForge]和[https://csl.littleservice.cn/latest.json CSL]（选forgeV1的版本）可以正常显示来自皮肤站包括披风在内的皮肤，任务书组队也可以正常显示。（2.9.0中与SimpleSkinBackport冲突，SSB也修复了双层/纤细的显示效果，但如果想用皮肤站皮肤，推荐阅读[https://www.mcmod.cn/post/6210.html mcmod-如何在1.7.10显示纤细皮肤]教程。兼容层与2.9.0的jar冲突，可以通过修改mod内<code>META-INF\MANIFEST.MF</code>删除<code>ModSide: CLIENT</code>这一行保存来启动。）
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/skinport Curseforge]<br>[https://www.mcmod.cn/class/2700.html mcmod]<br>[https://github.com/The-GregTech-Team/SkinPort GTNH早年特供版-github]<br>[https://github.com/RetroForge/SkinPort/releases RetroForge 最新fork版]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Cosmetic Armor Reworked.png
+|模组英文名=Cosmetic Armor Reworked
+|模组中文名=时装盔甲重置版
+|运行环境=客户端<br>服务端
+|简述=这个 Mod 允许你穿两套盔甲，一套用于展示，一套用于防护。
+|详细介绍=也可以隐藏装备显示皮肤。此模组必须在客户端和服务端同时安装。
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/cosmetic-armor-reworked curseforge]<br>[https://www.mcmod.cn/class/2497.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Distant Horizons Standalone.jpeg
+|模组英文名=Distant Horizons Standalone
+|模组中文名=Distant Horizons GTNH版
+|运行环境=客户端<br>服务端
+|简述=高版本Distant Horizons的低版本移植，在不影响游戏性能的情况下渲染数百个区块外的地形。
+|详细介绍=目前低版本移植还在开发中，配置界面和渲染效果接近原模组的较低版本。此模组服务端安装会主动向客户端提供视距外的区块信息
+|相关地址=[https://github.com/DarkShadow44/DistantHorizonsStandalone github]<br>[https://www.mcmod.cn/class/22048.html mcmod]
+}}
+
+{{可添加MOD表格行
+|模组英文名=Better Line Break
+|模组中文名=更好的换行
+|运行环境=客户端
+|简述=MC 的换行算法太糟糕了，此模组修复了这个问题并提供了更好的算法。
+|相关地址=[https://github.com/KatatsumuriPan/BetterLineBreak github]<br>[https://www.mcmod.cn/class/27447.html mcmod]
+}}
+
+{{可添加MOD表格行/尾}}
+
+=== 旧版本限定 ===
+本节收录与整合包版本相关的模组，包括曾在旧版本中需要额外安装、后来被整合进整合包的模组，以及仅适用于特定版本的修复或功能模组。
+*{{color|red|非限定旧版本玩家无需在意此表格，模组表格默认折叠}}
+*{{color|red|功能替代类MOD的兼容性与稳定性无法保证，无特殊需求请用整合包原生MOD}}
+
+{{可添加MOD表格行/头|折叠=1}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Angelica
+|模组中文名=安洁莉卡/天使优化
+|运行环境=客户端
+|简述=GTNH制作组开发的高清修复替代方案，高版本 {{Label|Sodium}} 与 {{Label|Iris}} 的移植版本。<br>目前仍在开发中，可能存在一定不稳定性。<br>在GTNH {{label|2.6.0以后}} 版本正式加入整合包，因此不属于额外安装的模组，最好不要删除，除非需要实现特殊效果。
+|详细介绍={{label|可被替换型模组|type=info}}<br>{{color|red|目前对多数光影兼容性较差，Complementary + Euphoria Patches除外。}}<br>若希望使用其他光影，建议删除Angelica并安装Optifine。<br><br>'''已知暂时不兼容模组：'''
+* Forge Relocation — 目前不是线程安全的，如未使用则安全
+* ProjectRed Frames — 目前不是线程安全的，如未使用则安全
+* EndlessIDs — 计划未来兼容
+* FalseTweaks — 计划未来兼容
+* RPLE — 计划未来兼容<br><br>'''永久不兼容模组：'''
+* Optifine（高清修复）[已禁用，无法修复]
+* Fastcraft（快速工艺）[已禁用，无法修复]
+* LWJGL3ify ≤1.5.4 — 请使用 1.5.7+
+* Archaic Fix ≤0.6.2 — 请使用 0.7.0+
+* Hodgepodge ≤2.4.3 — 请使用 2.4.4+
+* CodeChickenCore / CodeChickenLib <1.2.0 — 线程问题
+* 钕 — 未经测试，基本不兼容（Chunk Meshing 确认不兼容）
+|相关地址=[https://github.com/GTNewHorizons/Angelica/releases Github]<br>[https://www.mcmod.cn/class/13125.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Server Utilities
+|模组中文名=服务器实用工具
+|运行环境=客户端<br>服务端
+|简述=高版本移植模组，在GTNH {{label|2.6.0}} 版本正式加入整合包。<br>提供与 FTB Utilities 相同的主要功能，用于替代原有的 FTB Utilities。
+|详细介绍=在GTNH {{label|2.6.0}} 及以上版本中，部分功能已默认关闭，例如：
+* 区块保护
+* 区块加载
+* 设置 Home 等
+|相关地址=[https://github.com/GTNewHorizons/ServerUtilities github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Advanced Backups
+|模组中文名=高级备份
+|运行环境=客户端<br>服务端
+|简述=强大的备份Mod。
+|详细介绍={{label|替换型模组|type=info}}<br>服务器上使用需要服务端也安装，GTNH自带的ServerUtilities也有备份存档的功能。
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/aromabackup Curseforge]<br />[https://www.mcmod.cn/class/1140.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=AromaBackup
+|模组中文名=存档备份
+|运行环境=客户端<br>服务端
+|简述=自动备份存档。
+|详细介绍=
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/aromabackup Curseforge]
+}}
+
+{{可添加MOD表格行
+|图标=GTNH logo fancy.png
+|模组英文名=Backhand Unofficial
+|模组中文名=副手 非官方版
+|运行环境=客户端
+|简述=在1.7.10中添加副手栏位。
+|详细介绍=需要更新gtnhlib至0.6.5以上<br>{{label|2.8.0}}现已内置该mod。
+|相关地址=[https://github.com/GTNewHorizons/Backhand github]<br />[https://www.mcmod.cn/class/17454.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=ZeroPointBugfix
+|模组中文名=零级BUG修复
+|运行环境=客户端<br>服务端
+|简述=修复GTNH严重Bug。
+|详细介绍=仅适用于{{label|2.6.1}}版本
+|相关地址=[https://github.com/wohaopa/ZeroPointServerBugfix github]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Crafting Tweaks.png
+|模组英文名=Crafting Tweaks
+|模组中文名=合成辅助
+|运行环境=客户端
+|简述=合成界面快捷操作。
+|详细介绍={{label|2.8.0}}已自带该Mod的功能。
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/crafting-tweaks Cruseforge]<br />[https://www.mcmod.cn/class/1501.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Dynamic Lights.png
+|模组英文名=Dynamic Lights
+|模组中文名=动态光源
+|运行环境=客户端
+|简述=允许发光物品在合理情况下提供动态光照，例如：手持或掉落的火把、岩浆桶、燃烧中的怪物、恶魂火焰弹、即将爆炸的苦力怕（爬行者）等。
+|详细介绍=Optifine 与 Angelica 已内置动态光源功能，如果已经安装它们，则无需再安装此模组。
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/dynamic-lights/ Curseforge]<br />[https://www.mcmod.cn/class/295.html mcmod]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Big Chat History
+|模组中文名=更多聊天记录
+|运行环境=客户端
+|简述=把你的聊天记录拓展到10000行。
+|详细介绍=如果安装了TabbyChat 2，它将不起作用。{{label|2.4.0}}（或更早）后，Hodgepodge也有类似的功能，在<code>config/hodgepodge.cfg</code>内搜索I:chatLength并更改其数值即可。
+|相关地址=[https://hypixel.net/threads/modification-1-7-10-1-8-big-chat-history-100x-scrollback.314429/ hypixel]
+}}
+
+{{可添加MOD表格行
+|图标=Mod-Not Enough Characters.jpeg
+|模组英文名=Not Enough Characters
+|模组中文名=NEI 拼音搜索
+|运行环境=客户端
+|简述=另一个支持在NEI中拼音搜索的模组。支持全拼、首字母混合搜索等功能。
+|详细介绍={{label|中文环境必备模组|type=danger}}<br>对非GTNH版本的NEI支持不做保证。
+|相关地址=[https://www.curseforge.com/minecraft/mc-mods/not-enough-characters Curseforge]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Link Info
+|模组中文名=链接信息
+|运行环境=客户端
+|简述=允许在聊天栏中直接点击链接访问网页，并显示网页标题。对于图片和 YouTube 链接，还可以显示更多信息。
+|详细介绍=
+|相关地址=[https://www.minecraftforum.net/forums/mapping-and-modding-java-edition/minecraft-mods/1294637-link-info-0-6-see-basic-info-about-webpages-and minecraftforum]
+}}
+
+{{可添加MOD表格行/尾}}
+
+== 非星门规则模组 ==
+用于修改整合包难度、游戏流程或平衡性的模组，不在星门规则允许范围内。
+*相关规则可参考[[星门#星门规则|星门规则]]
+{{可添加MOD表格行/头}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Twist Space Technology Mod
+|模组中文名=扭曲空间科技
+|运行环境=
+|简述=添加了一系列mega机器与一系列配方，极大地优化了中后期的游戏体验
+|详细介绍={{label|大型流程修改模组，禁止在新手群讨论|type=danger}}
+* GTNH {{label|2.9.0-beta1}} 版本：
+**模组 0.8.0 及以上版本<br>
+{{Accordion|class=primary|旧版本兼容情况（点击标题展开）|
+* GTNH {{label|2.8.0}} 版本：
+**已停止维护
+**0.7.16是最后一个支持GTNH {{label|2.8.0}}的版本
+* GTNH {{label|2.7.0}} 版本：
+**已停止维护
+**0.6.23是最后一个支持GTNH {{label|2.7.0}}的版本
+* GTNH {{label|2.6.0}} 版本：
+**已停止维护
+**0.4.30是最后一个支持GTNH {{label|2.6.0}}的版本
+* GTNH {{label|2.5.1}} 版本：
+**已停止维护
+**0.4.30是最后一个支持GTNH {{label|2.5.1}}的版本
+* GTNH {{label|2.4.0}} 版本：
+**需要升级[https://github.com/GTNewHorizons/GTNH-Lanthanides/releases GTNH-Lanthanides]至 0.11.0+版本或专门适配版本；
+**需要升级[https://github.com/GTNewHorizons/GT5-Unofficial/releases GT5-Unofficial]至 5.09.44.03+版本
+**最后一个适配GTNH {{label|2.4.0}} 的版本 0.3.7
+}}
+|相关地址=[https://github.com/Nxer/Twist-Space-Technology-Mod/releases github]<br />[https://www.mcmod.cn/class/12969.html mcmod]<br />[https://www.bilibili.com/video/BV1RG411e7KR/ bilibili]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Programmable Hatch Mod
+|模组中文名=可编程仓室
+|运行环境=
+|简述=提供自动化更换虚拟电路与不消耗物品的方式，添加多种实用的总成和AE设备，极大地优化了前中期的游戏体验，也在一定程度上改善了中后期游戏体验
+|详细介绍={{label|大型流程修改模组，禁止在新手群讨论|type=danger}}<br>请在Github界面的Releases处下载本Mod。<br>其中你需要注意的是：
+{{tables|class=wikitable mw-collapsible|style=width:auto|模组版本|最低版本|最高版本}}
+{{row|v0.2.0pXX|GTNH {{label|2.9.0 beta 1}} | GTNH {{label|2.9.0 beta 1}}}}
+{{row|v0.1.3pXX | GTNH {{label|2.8.0}} | GTNH {{label|2.8.4}}}}
+{{row|v0.1.2p44 | GTNH {{label|2.7.0}} | GTNH {{label|2.7.4}}}}
+{{row|v0.0.20 | GTNH {{label|未知}} | GTNH {{label|2.6.1}}}}
+{{row|v0.0.18p28 | GTNH {{label|未知}} | GTNH {{label|2.5.1}}}}
+{{tablee}}
+
+之后的版本可能可以在不受支持的版本正常运行，但原则上不再处理仅在不受支持的版本中出现的不兼容问题。
+|相关地址=[https://github.com/reobf/Programmable-Hatches-Mod/releases github]<br />[https://www.bilibili.com/video/BV1Vr421L7RS/ bilibili]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=GT Not Leisure
+|模组中文名=格雷不休闲 & 科技不休闲
+|运行环境=
+|简述=一大堆新机器和奇思妙想
+|详细介绍={{label|大型流程修改模组，禁止在新手群讨论|type=danger}}<br>{{label|会删除部分原版配方！|type=danger}}<br>含有修改GTNH的原版配方，为绝大部分的GTPP机器提供了相应的类GTM机器和后期无线机器，以及GTNH3.0.0的内容<br>现已合并GTNH-Original-Enhancement和Void-Miner-Tweak-Mod模组，兼容280-beta1<br>正式版更新间隔时间较长，构建测试版几乎每天都有更新。<br>推荐玩构建版以体验最新内容，有bug请及时反馈
+|相关地址=[https://github.com/ABKQPO/GT-Not-Leisure github]<br>[https://github.com/ABKQPO/GT-Not-Leisure/releases/tag/dev-build dev-build下载]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Box Plus Plus
+|模组中文名=盒
+|运行环境=
+|简述=任意封装你的产线，玩弄配方于掌心，并为你的基地装饰一个非常炫酷的动画！
+|详细介绍={{label|流程修改型模组，禁止在新手群讨论|type=danger}}<br>≥GTNH2.7.X需要安装Box 1.9及以上
+|相关地址=[https://github.com/RealSilverMoon/BoxPlusPlus Github]<br />[https://www.mcmod.cn/class/12131.html mcmod]<br>[https://www.youtube.com/watch?v=25Rgx-aWPwE Youtube]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=AE2 Thing
+|模组中文名=AE2 Thing
+|运行环境=
+|简述=扩展了AE的一些功能
+|详细介绍={{label|大型流程修改模组，禁止在新手群讨论|type=danger}}<br>无限存储单元，可以不限种类的存储物品。流体<br>源质离散器，注魔接口，炼金接口（TC注魔炼金三件套）<br>鱼大和猫蛋蛋玩偶、比APU更好用的样板自动上传（自动搜索甚至不用点进上传）
+|相关地址=[https://github.com/asdflj/AE2Things github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=EZNuclear
+|模组中文名=核电轻而易举
+|运行环境=
+|简述=在IC2核反应堆和龙堆爆炸时会有奇妙效果~
+|详细介绍=拦截爆炸并且全服通报表扬
+|相关地址=[https://github.com/czqwq/EZNuclear github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=EZMiner
+|模组中文名=轻松连锁
+|运行环境=
+|简述=适用于GTNH {{label|2.8.0}} 以上版本的连锁挖矿。
+|详细介绍=可配置一个连锁按键（默认~）和主模式切换键（默认V）。平替版连锁挖矿，连锁键+滚轮切换子模式，改进了连锁性能，具体说明见Github的Readme，有bug可以第一时间反馈Issue。
+|相关地址=[https://github.com/czqwq/EZMiner github]<br />[https://github.com/czqwq/EZMiner/issues issue反馈]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Bandit-Legacy
+|模组中文名=
+|运行环境=
+|简述=适用于GTNH {{label|2.7.0}} 以上版本的连锁挖矿。详情请移步github下readme文件查看相关特性。
+|详细介绍=需要配置一个快捷键（非shift或ctrl）。快捷键+shift+滚轮指定连锁执行器，快捷键+ctrl+滚轮指定匹配方块。<br><br>GTNH {{label|2.7.X}} 下需要更新 [https://github.com/GTNewHorizons/Forgelin/releases Forgelin] 到 2.0.0-GTNH 以上版本。
+|相关地址=[https://github.com/ElytraServers/Bandit-Legacy github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Qz-Miner
+|模组中文名=爆破连锁
+|运行环境=
+|简述=适用于GTNH {{label|2.7.0}} 以上版本的连锁挖矿。功能繁多，请移步github下readme文件查看相关特性。{{label|2.7.0}}的最后版本为3.0.4，{{label|2.8.0}} 请使用4.0以上版本。
+|详细介绍=连锁挖矿快捷键默认为<kbd>`</kbd>，与任务书冲突。请在快捷键设置中搜索'''爆破连锁'''修改冲突的快捷键。<br>4.3.2版本后需要前置 [https://github.com/QuanhuZeYu/Qz-UILib Qz-UILib]
+|相关地址=[https://github.com/QuanhuZeYu/Qz-Miner github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=123Technology
+|模组中文名=123科技
+|运行环境=
+|简述=为游戏添加了一系列来自社群或网络相关梗的机器，涵盖全游戏阶段，大多偏向整活性质，同时为游戏添加了max+内容。
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}
+|相关地址=[https://github.com/CallmeSHaobe/123Technology github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=EyeOfHarmonyBuffer
+|模组中文名=万宁鸿蒙
+|运行环境=
+|简述=为GTNH大部分机器提供独一无二的增强与机制删除，并提供了一些新奇的大机器，物品，与配方
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>{{label|流程毁灭性模组，不建议正常游玩使用|type=danger}}<br>在代码层面大幅度修改了GTNH中大部分机器，包括但不限于从蒸汽时代的土高炉到前中期的电路装配线，以及终局的诸神之锻炉以及鸿蒙之眼，所有机器拥有可以配置开关以及数值设置的完整的，汉化的配置文件。而且部分机器如鸿蒙之眼拥有非常精细的如产出率设置，成功率设置的定制配置。添加了一些新的大型机器，如大型风力发电机（带动画），大型太阳能，物质重塑仪等。并且为星门合成中所需要的，无法批量生产的物品提供了组装机配方，未来还会添加更多有趣的东西
+|相关地址=[https://github.com/SafariXiu/EyeOfHarmonyBuffer/tree/master github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=GTNN
+|模组中文名=格雷新视野：憋削了！
+|运行环境=
+|简述=GTNH-no-nerf，回退 GTNH 内容的模组，尤其是那些削弱某些机器的改动。现已归档（归档日期2025/10/11）
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>回退了大量GTNH制作组的NERF改动
+* 回退拆解机能力
+* 避雷针铁栅栏不会破坏
+* 大型源质发电机可使用激光
+** 重新加回大型源质发电机 （GTNH {{label|2.7.0}}）
+* 回退超临界灵宝和铿铀削弱
+* 回退火箭燃料修改
+* 量子操纵者的水线
+* 铟蜂窝的简单处理配方
+* 处理阵列
+* 无限大小的 ME 输出仓/输出总线
+|相关地址=[https://github.com/ElytraServers/gtnh-no-nerf github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=NHU
+|模组中文名=格雷新视野：实用工具
+|运行环境=
+|简述=本模组是GTNH整合包的社区模组，修改和添加了一些东西来帮助玩家更好的渡过前中期。
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>加入了时间瓶、暴食魔符、暴食指环、饥饿指环、奥术工业高炉、超级午餐盒、神秘注魔燃料棒（闪耀之光和元始珍珠）、debug维护仓简单合成配方、Kami神环（类似无尽的防御）、法杖核心：航空胶带、净化之戒、更多的无线仓室、更多逆天的魔法能源收集器和龙蛋等，更多详细改动，请看GitHub的README。
+|相关地址=[https://github.com/Keriils/NH-Utilities github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=TakoTech
+|模组中文名=塔可科技
+|运行环境=
+|简述=改善游玩GTNH时遇到的一些小问题，随缘更新各种奇怪的东西。
+|详细介绍={{label|流程修改型模组，禁止在新手群讨论|type=danger}}<br>自带中文输入修正 （InputFix），添加了矿物存储元件和高级工具箱等物品，计划加入AE网页下单功能
+|相关地址=[https://github.com/XSana/TakoTech github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Think Tech
+|模组中文名=俺寻思科技
+|运行环境=
+|简述=GTNH整合包的拓展Mod，致力于将新的产线和机器加入到游戏中以丰富流程 基于俺寻思之力！
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}
+* 聚爆发电机，柴式单晶炉等新的机器
+* 新的前期以及特定机器用的燃料
+* 完善化学合成
+* 增强液态石油气等一系列配方
+* 有趣的新特性
+|相关地址=[https://github.com/Ol925/ThinkTech github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=CheaperVoidMiners
+|模组中文名=更前期的虚空矿机
+|运行环境=
+|简述=已不适用于GTNH {{label|2.8.0}} 以上版本。
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}为LV、HV和IV添加了对应级别的虚空矿机（用LV采矿机、HV进阶采矿机和IV采矿场来无序合成，机器介绍的英文可以参考NH自己虚空采矿）<br /><br />{{label|2.8.0}} 以上可使用 fork 版本 [https://github.com/kuolemax/CheaperVoidMiners github fork]
+|相关地址=[https://github.com/Jonodonozym/CheaperVoidMiners github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=GT-Not-Hard
+|模组中文名=格雷不难
+|运行环境=
+|简述=添加了三种令GTNH更加休闲化的大型机器
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>用电机器Chaos，类似处理阵列，但是可以放入多方块机器；发电机器Origin，类似发电处理阵列，只可以放入单方块发电机；白嫖型机器Singularity，放入GT NEI Ore Plugin的维度物品，每60tick产出该维度可以产出的物品。
+|相关地址=[https://github.com/z1564058782/GT-Not-Hard github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Nyx
+|模组中文名=
+|运行环境=
+|简述=添加了较低电压的激光无线能源仓+简单无线能源仓配方，个别作弊性质的机器，以及简单的材料系统。
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}
+
+终极流程毁灭性模组，红扳手plus，极度不建议使用
+|相关地址=[https://github.com/RhyVis/GTNH-Nyx github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Void-Miner-Tweak-Mod
+|模组中文名=
+|运行环境=
+|简述=允许在虚空采矿机主机放入GT NEI Ore Plugin的维度物品来指定挖掘的维度，建议搭配CheaperVoidMiners来使用，现已合并至GT Not Leisure
+|详细介绍={{label|流程修改型模组，禁止在新手群讨论|type=danger}}<br>需要采矿管道布置下去后，再把维度物品替换采矿管道的那口子。
+|相关地址=[https://github.com/reobf/Void-Miner-Tweak-Mod github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Torcherino-GTNH
+|模组中文名=
+|运行环境=
+|简述=适配GT模组的Torcherino，带有GUI，对特殊机器进行优化处理
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>添加了系列加速火把，时间之瓶等加速物品，对部分机器运行性能进行优化处理
+|相关地址=[https://github.com/czqwq/Torcherino-GTNH github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Time Crystal
+|模组中文名=
+|运行环境=
+|简述=一个带GUI的"加速火把"，支持 GTNH
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>{{label|性能可能存在问题，慎用该模组|type=info}}
+|相关地址=[https://github.com/kuolemax/time-crystal github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=AE2PatternGen
+|模组中文名=AE2PatternGen
+|运行环境=
+|简述=根据自定义规则以及电压等级，批量生成具有重复性的样板，使用说明见readme以及tooltips
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>{{label|性能可能存在问题，慎用该模组|type=info}}<br>添加了样板生成器，基本使用方法见readme或BV12xZiBWEpj
+|相关地址=[https://github.com/Ch4oooooooLL/AE2PatternGen github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=WildcardPattern
+|模组中文名=通配样板
+|运行环境=
+|简述=提供一个可直接右键配置的 通配样板 物品，可根据名称或矿辞规则批量展开 AE2 加工样板，适合 GTNH 中大量同类材料的自动化配置。
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>{{label|模组较新，使用时遇到问题请及时前往项目主页反馈|type=info}}<br>通配样板设置方法可参考[https://www.bilibili.com/video/BV1FNoVB2EBs/ B站视频]
+|相关地址=[https://github.com/clfpwp/WildcardPatternforGTNH-1.7.10 github]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=GTNH Modify
+|模组中文名=万宁NH
+|运行环境=
+|简述=
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>{{label|流程毁灭性模组，不建议正常游玩使用|type=danger}}
+
+提供修改配方时间的功能，有直接1tick和自定义配方时间乘数两种，旧版（只支持2.8.0以前）更加离谱，除上数功能外还有0eu输入1输出64
+|相关地址=新版[https://github.com/ElytraServers/GTNH-CutCorners github]旧版[https://github.com/QuanhuZeYu/GTNHModify-forkBy_wohaopa github]
+}}
+
+{{可添加MOD表格行
+|图标=Portable_Wireless_Network_Monitor.png
+|模组英文名=GT-Simple-Wireless-Network
+|模组中文名=简单无线网络
+|运行环境=
+|简述=
+<big>'''辅助管理/网络控制/可视化'''</big>
+* 在'''不添加额外仓室与覆盖板'''的情况下，提供于LV能够实现的通用无线电网构建手段'''（更为便捷，更节约性能）'''；
+* 提供了'''主视角HUD显示与速率监控'''；
+* '''更全面且简单逻辑控制（容量&速率）'''
+* '''全天候无线EU网络与AE网络监测'''。
+* '''极为便携的AE网络无线连接'''。
+|详细介绍=
+
+{{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>{{label|欢迎反馈问题至项目主页会及时采纳修正|type=info}}
+'''显著增加感知力、成就感；降低布线压力：'''
+* '''链路终端系统'''，无需按时代合成大量的无线覆盖板，本身可以智能匹配对象，彻底免去布线烦恼，并且保持较低的无线电网交互频率，有效降低性能压力。
+* '''网络监视器'''自带逻辑门控制，能够更为有效调控发电系统；'''便携网络监视终端，'''则可以'''常驻HUD'''，实时监测网络状态！
+* '''网络信息屏'''极大增强了对无线电网与ME网络的感知力，并通过'''数据降采样'''与'''时间聚合'''策略，仅仅需要'''不到30kb的内存'''，即可记录单个玩家/物品'''一整年'''的波动（数量与变化量）。
+* '''控制器量子化'''允许将控制器量子化，频道全部通过'''量子节点'''进行'''无线跨维度'''输出。
+
+* 已兼容 {{label|2.9.0-beta-1}} {{label|2.9.0-beta-2}} ;最新对应mod v1.6.12版本。
+|相关地址=[https://github.com/MIAOKATZE/GT-Simple-Wireless-Network github]<br>[https://github.com/MIAOKATZE/GT-Simple-Wireless-Network/issues 问题反馈]<br><br>[https://qm.qq.com/cgi-bin/qm/qr?k=yfb9PX2mI33PhfU0JqHIxSL1HijCUkhl&jump_from=webapi&authKey=CsyKkF4Z7Mk2ZXnRorxozt3lb2qGS9OXTkZbdu30GeQPIdW6giG13bsCpqE47v+f 反馈讨论群]
+}}
+
+{{可添加MOD表格行
+|图标=miao_coin64.png
+|模组英文名=GT-Interesting-Thing
+|模组中文名=有趣事物
+|运行环境=
+|简述=
+<big>'''流程自定义/实用道具'''</big>
+* 添加了一些有趣的道具；
+* 完全重构的Vending Machine，具有'''可视化编辑的：交易、签到、抽奖、邮件'''；
+* 添加了'''可自定义'''的新手礼包。（'''自定义内容可以通过局内指令快速构建，适用于便携自定义游戏流程'''）
+|详细介绍=
+{{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>{{label|欢迎反馈问题至项目主页会及时采纳修正|type=info}}
+'''提供了更多自定义流程系统：'''
+* 独立的货币与交易系统；（更炫酷的Vending Machine）
+* '''签到、抽奖、邮件、节日祝福；（全部都能自定义）'''
+* 新手礼包系统；
+* 实用道具：有代价的飞行/探矿；多效用的指环；
+* mod迁移：从AE2Thing快速兼容的无限存储元件；
+* 已兼容 {{label|2.9.0-beta-1}} {{label|2.9.0-beta-2}} ;最新对应mod v1.7.234版本。
+|相关地址=[https://github.com/MIAOKATZE/GT-Interesting-Thing github]<br>[https://github.com/MIAOKATZE/GT-Interesting-Thing/issues 问题反馈]<br><br>[https://qm.qq.com/cgi-bin/qm/qr?k=yfb9PX2mI33PhfU0JqHIxSL1HijCUkhl&jump_from=webapi&authKey=CsyKkF4Z7Mk2ZXnRorxozt3lb2qGS9OXTkZbdu30GeQPIdW6giG13bsCpqE47v+f 反馈讨论群]
+}}
+
+{{可添加MOD表格行
+|图标=SteamEntangledSingularity.png
+|模组英文名=GT-Steam-Reborn
+|模组中文名=蒸汽重生
+|运行环境=
+|简述= 
+<big>'''资源前置与循环/流程拓展'''</big>
+* 添加了'''基于蒸汽的游戏拓展功能'''（多方块蒸汽机冷凝回收；过热蒸汽兼容；地下流体恢复；蒸汽枢纽），
+* 增加'''基于蒸汽内容的机器'''（哈伯法制氨；西门子马丁炉等），
+* 增加过渡期游戏内容，
+* '''增加/前置部分资源循环途径'''。
+|详细介绍={{label|大型流程修改模组，禁止在新手群讨论|type=danger}}<br>{{label|欢迎反馈问题至项目主页会及时采纳修正|type=info}}
+'''显著改善了至少以下流程：'''
+* 蒸汽与水的'''跨维度运输'''，带有UI管理（存储枢纽-节点系统）
+* 极为便捷的'''跨维度采矿与钻井'''，带有UI管理与快捷传送（钻井枢纽-节点系统）
+* '''硝酸、硫酸'''上游资源循环前置（下界空气收集与离心）
+* 地下流体的'''增加'''手段（地脉热解机）
+* 蒸汽时代的低速虚空采矿（地壳掘进机）
+* 氨的大批量工业合成（制氨工厂）；
+* 蒸汽辅助的'''高并行处理阵列'''（动力加工阵列）
+* 已兼容 {{label|2.9.0-beta-1}} {{label|2.9.0-beta-2}} ;最新对应mod v1.8.13版本。
+|相关地址=[https://github.com/MIAOKATZE/GT-Steam-Reborn github]<br>[https://github.com/MIAOKATZE/GT-Steam-Reborn/issues 问题反馈]<br><br>[https://qm.qq.com/cgi-bin/qm/qr?k=yfb9PX2mI33PhfU0JqHIxSL1HijCUkhl&jump_from=webapi&authKey=CsyKkF4Z7Mk2ZXnRorxozt3lb2qGS9OXTkZbdu30GeQPIdW6giG13bsCpqE47v+f 反馈讨论群]
+}}
+
+{{可添加MOD表格行
+|图标=AE2InfinityCell.png
+|模组英文名=AE2InfinityCell
+|模组中文名=AE2无限存储元件
+|运行环境=
+|简述=添加了'''无限存储元件''',可以无限存储物品，流体，源质在同一个硬盘
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>{{label|欢迎反馈问题至项目主页会及时采纳修正|type=info}}
+
+一个面向 AE2 存储系统的 `Infinity Storage Cell` 物品。支持物品、流体和 Thaumic Energistics 源质通道。
+<br>
+提供 NEI 元件查看页面，按数量预览存储最多的物品、流体和源质条目，而不是把所有类型都塞进 UI。
+
+* 目前兼容{{label|2.9.0-beta-2}};对应当前mod '''1.0.3''' 以上版本。
+* '''1.0.4''' 版本起，在安装了 Applied Energistics: EU Network 之后，会添加EU能源支持
+|相关地址=[https://github.com/DancingSnow0517/AE2InfinityCell/releases Github]<br>[https://www.curseforge.com/minecraft/mc-mods/ae2infinitycell Curseforge]<br>[https://modrinth.com/mod/ae2infinitycell Modrinth]
+}}
+
+{{可添加MOD表格行
+|图标=
+|模组英文名=Applied Energistics: EU Network
+|模组中文名=AE EU 网络
+|运行环境=
+|简述=它将 EU 注册为独立的 AE2 存储类型，使 ME 网络可以直接存储、显示和调度 GregTech 电能。
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>{{label|欢迎反馈问题至项目主页会及时采纳修正|type=info}}
+
+* EU 存储网络：在 ME 驱动器中使用专用 EU 存储单元，并在 AE2 终端中直接查看网络内的 EU。
+* 八档存储单元：提供 1k、4k、16k、64k、256k、1024k、4096k 和 16384k EU 存储组件与存储单元。
+* 电力物品交互：支持在 AE2 终端中通过容器交互为 GregTech 电力物品充电或放电。
+* ME 能源仓：从 ME 网络取出 EU，为 GregTech 多方块机器供能。
+* ME 动力仓：接收 GregTech 多方块机器产生的 EU，并存入 ME 网络。
+
+* 目前兼容{{label|2.9.0-beta-2}};对应当前mod '''1.0.0''' 以上版本。
+|相关地址=[https://github.com/DancingSnow0517/Applied-Energistics-EU-Network/releases Github]
+}}
+
+{{可添加MOD表格行
+|图标=Advanced Memory card.jpg
+|模组英文名=Advanced Memory Card 
+|模组中文名=高级内存卡
+|运行环境=
+|简述=一个 Applied Energistics 2（AE2）扩展模组，为 AE2 内存卡提供批量复制与P2P 通道高级配置两大增强功能。
+|详细介绍={{label|流程修改模组，禁止在新手群讨论|type=danger}}<br>{{label|欢迎反馈问题至项目主页会及时采纳修正|type=info}}
+
+高级内存卡提供了区域批量复制模式（Copy Mode） 与P2P 通道可视化管理等功能
+<br>
+
+* 目前兼容{{label|2.9.0-beta-2}};对应当前mod '''1.0.1-1-7-10-GTNH''' 的版本。<br>''该模组存在高版本，下载时请您注意分辨''。
+|相关地址=[https://github.com/suntide-20210418/AdvancedMemoryCard/releases Github]<br>[https://www.curseforge.com/minecraft/mc-mods/advanced-memory-card Curseforge]<br>
+}}
+
+{{可添加MOD表格行/尾}}
+
+== LiteLoader ==
+Liteloader是一个针对一些模组的轻量级API。
+
+[https://www.mcmod.cn/post/337.html 这里]是安装教程。
+
+Angelica目前并不兼容Liteloader, 需另外安装LiteloaderLoader [https://github.com/Midnight145/LiteloaderLoader [github]]
+== 模组文件夹 ==
+即根目录下.minecraft/mods文件夹
+===HMCL===
+# 打开HMCL
+# 选中你的GTNH整合包
+# 上方出现一个文件夹图标，单击即可打开相应文件夹。
+=== MultiMC/Prism Launcher ===
+# 打开MultiMC/Prism Launcher。
+# 选择你的GTNH整合包
+# 单击右侧的“Minecraft文件夹”即可打开你的Minecraft文件夹。
+{{navbox firstgame}}
+<references />

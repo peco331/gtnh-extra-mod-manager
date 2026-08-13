@@ -1,0 +1,12 @@
+# 个人数据（mods路径、操作日志、备份、缓存）——不上传
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 会话/临时文件
+.claude/
+*.tmp
+*.part
