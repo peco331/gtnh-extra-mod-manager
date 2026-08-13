@@ -35,6 +35,14 @@ def timestamp_str() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
+def fmt_ts(ts: float) -> str:
+    """Unix 时间戳 → "YYYY-MM-DD HH:MM"（列表显示/排序用，ISO 字符串可直接按时间排序）。"""
+    try:
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    except (OSError, ValueError):
+        return ""
+
+
 def atomic_write_json(path: Path, data) -> None:
     """原子写入 JSON：先写 .tmp 再 os.replace，防止半写损坏。"""
     path.parent.mkdir(parents=True, exist_ok=True)

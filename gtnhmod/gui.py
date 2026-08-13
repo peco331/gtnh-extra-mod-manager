@@ -192,9 +192,9 @@ class GuiApp:
         ttk.Checkbutton(bar, text="仅可更新", variable=self.only_update,
                         command=self.refresh_installed).pack(side="left", padx=(8, 0))
 
-        cols = ("name", "cn", "side", "client", "server", "latest", "status")
-        heads = ("名称", "中文名", "安装端别", "客户端", "服务端", "最新版本", "状态")
-        widths = (230, 110, 80, 130, 130, 90, 70)
+        cols = ("name", "cn", "side", "client", "server", "inst_time", "latest", "status")
+        heads = ("名称", "中文名", "安装端别", "客户端", "服务端", "安装时间", "最新版本", "状态")
+        widths = (230, 110, 80, 130, 130, 115, 90, 70)
         tree_frame = ttk.Frame(tab)
         tree_frame.pack(fill="both", expand=True, padx=6)
         self.inst_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
@@ -206,7 +206,7 @@ class GuiApp:
         self.inst_tree.tag_configure("dis", foreground=STATUS_COLORS["disabled"])
         self.inst_tree.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.inst_tree, tree_frame)
-        self._make_sortable(self.inst_tree, desc_first_cols=("ver", "latest"))
+        self._make_sortable(self.inst_tree, desc_first_cols=("latest", "inst_time"))
         self.inst_tree.bind("<Double-1>", self._on_inst_double)
         self.inst_tree.bind("<Button-3>", lambda e: self._popup(self.inst_tree, self._inst_menu, e))
 
@@ -248,19 +248,19 @@ class GuiApp:
         self.btn_refresh_wiki = ttk.Button(bar, text="刷新Wiki数据", command=self.refresh_wiki)
         self.btn_refresh_wiki.pack(side="right")
 
-        cols = ("name", "cn", "side", "cat", "installed", "desc")
-        heads = ("名称", "中文名", "端别", "分类", "已安装", "简介")
+        cols = ("name", "cn", "side", "cat", "installed", "updated", "desc")
+        heads = ("名称", "中文名", "端别", "分类", "已安装", "更新时间", "简介")
         tree_frame = ttk.Frame(tab)
         tree_frame.pack(fill="both", expand=True, padx=6)
         self.add_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                      selectmode="extended")
-        for c, h, w in zip(cols, heads, (250, 110, 70, 90, 80, 380)):
+        for c, h, w in zip(cols, heads, (250, 110, 70, 90, 80, 115, 265)):
             self.add_tree.heading(c, text=h)
             self.add_tree.column(c, width=w, anchor="w")
         self.add_tree.tag_configure("inst", foreground=STATUS_COLORS["update_avail"])
         self.add_tree.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.add_tree, tree_frame)
-        self._make_sortable(self.add_tree)
+        self._make_sortable(self.add_tree, desc_first_cols=("updated",))
         self.add_tree.bind("<Double-1>", lambda e: self.show_addable_detail())
         self.add_tree.bind("<Button-3>", lambda e: self._popup(self.add_tree, self._add_menu, e))
         self.only_uninstalled = tk.BooleanVar(value=False)
@@ -485,6 +485,7 @@ class GuiApp:
                         INSTALL_SIDE_CN.get(m["install_side"], m["install_side"]),
                         side_state_text(m["sides"].get("client")),
                         side_state_text(m["sides"].get("server")),
+                        m["install_time"] or "—",
                         m["latest_version"], STATUS_CN.get(m["status"], m["status"])))
             self.inst_rows[m["mod_id"]] = m
         # 底部状态栏
@@ -1037,7 +1038,10 @@ class GuiApp:
             name_txt = ("✓ " + e["name_en"]) if e["id"] in marks else e["name_en"]
             self.add_tree.insert("", "end", iid=e["id"], tags=(tag,) if tag else (),
                                  values=(name_txt, e["name_cn"], side_txt,
-                                         e["category"], installed_txt, e["desc"][:60]))
+                                         e["category"], installed_txt,
+                                         ((e.get("release_date") or "")
+                                          .replace("T", " "))[:16] or "—",
+                                         e["desc"][:60]))
             self.add_rows[e["id"]] = e
         self._reapply_sort(self.add_tree)
 

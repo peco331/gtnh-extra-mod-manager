@@ -35,6 +35,7 @@ class UpdateInfo:
     release_body: str | None    # 更新日志
     checked_at: str
     note: str = ""
+    published_at: str | None = None   # 最新版发布时间（下载页/发布页）
 
 
 @dataclass
@@ -183,7 +184,8 @@ class GitHubSource(Source):
                 utils.atomic_write_json(cache_file, {"not_found": True, "fetched_at": time.time()})
                 raise
             raise
-        if isinstance(data, dict) and data.get("not_found"):
+        if (isinstance(data, dict) and data.get("not_found")) or data is None:
+            # data=None：not_found 标记缓存（http_get_cached 返回 cache["data"]）
             raise net.HttpError(404, f"{self.owner}/{self.repo} 无 {path}（缓存）")
         return data, src
 
@@ -206,7 +208,8 @@ class GitHubSource(Source):
         if not cands:
             note = "；".join(x for x in (note, "该Release无可用jar资产，需手动下载") if x)
         return UpdateInfo(version or None, cands or None, rel.get("body"),
-                          utils.now_str(), note)
+                          utils.now_str(), note,
+                          rel.get("published_at") or rel.get("created_at"))
 
     def _check_via_tags(self) -> UpdateInfo:
         tags_data, _ = self._api(f"/repos/{self.owner}/{self.repo}/tags", "tags")
@@ -235,18 +238,19 @@ class GitHubSource(Source):
         if self.tag_regex:
             # 仓库混装多版本：releases/latest 可能是不匹配的版本（如其他MC版本），
             # 需按 tag 过滤后取最新
-            return self._check_filtered(force)
+            return self._check_via_releases(force)
         try:
             rel, src = self._api(f"/repos/{self.owner}/{self.repo}/releases/latest", "latest",
                                  force=force)
         except net.HttpError as e:
             if e.code != 404:
                 raise
-            return self._check_via_tags()
+            # releases/latest 404（如仓库只有 prerelease 版本）→ 查 release 列表兜底
+            return self._check_via_releases(force)
         return self._from_release(rel)
 
-    def _check_filtered(self, force: bool = False) -> UpdateInfo:
-        """按 tag_regex 过滤后的最新版本：先查最近30个 release，无匹配再退 tags 列表。"""
+    def _check_via_releases(self, force: bool = False) -> UpdateInfo:
+        """查最近30个 release（优先非 prerelease，按 tag_regex 过滤），无匹配再退 tags 列表。"""
         try:
             releases, _ = self._api(f"/repos/{self.owner}/{self.repo}/releases?per_page=30",
                                     "releases", force=force)
@@ -352,7 +356,12 @@ class LocalFolderSource(Source):
         p = versions[best]
         cand = DownloadCandidate(str(p), p.name, p.stat().st_size)
         note = f"本地目录: {self.path}（共 {len(versions)} 个版本）"
-        return UpdateInfo(best, [cand], None, utils.now_str(), note)
+        # 本地源"最新版发布时间"以最新 jar 文件时间为准
+        try:
+            published = utils.fmt_ts(p.stat().st_mtime) or None
+        except OSError:
+            published = None
+        return UpdateInfo(best, [cand], None, utils.now_str(), note, published)
 
     def list_versions(self, *, force: bool = False) -> list:
         versions = self._scan_versions()

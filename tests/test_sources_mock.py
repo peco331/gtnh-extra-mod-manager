@@ -21,6 +21,7 @@ MAIN_JAR = "FakeMod-1.7.10-0.9.0.jar"
 RELEASE = {
     "tag_name": "0.9.0",
     "body": "更新日志：修了bug",
+    "published_at": "2026-07-23T13:32:36Z",
     "assets": [
         {"name": MAIN_JAR, "browser_download_url": "http://127.0.0.1:PORT/download/main.jar", "size": 100},
         {"name": "FakeMod-1.7.10-0.9.0-sources.jar",
@@ -106,6 +107,7 @@ class TestGitHubSource(unittest.TestCase):
         info = src.check("0.8.0")
         self.assertEqual(info.latest_version, "0.9.0")
         self.assertEqual(info.release_body, "更新日志：修了bug")
+        self.assertEqual(info.published_at, "2026-07-23T13:32:36Z")
         self.assertEqual(info.candidates[0].file_name, MAIN_JAR)  # sources包被排除
         self.assertEqual(len(info.candidates), 1)
 
@@ -155,6 +157,16 @@ class TestGitHubTagsFallback(unittest.TestCase):
         info = src.check("0.8.0")
         self.assertEqual(info.latest_version, "0.9.1")  # dev-build 无法解析被跳过
         self.assertEqual(info.candidates[0].file_name, "FakeMod-1.7.10-0.9.1.jar")
+
+    def test_tags_fallback_second_check_within_ttl(self):
+        # 首次 404 后写入 not_found 标记缓存；ttl 内再次检查不得崩溃，
+        # 应同样走 tags 兜底（回归：标记缓存 data=None 导致 _from_release(None)）
+        src = GitHubSource("owner", "FakeMod", api_base=f"http://127.0.0.1:{self.port}",
+                           cache_dir=self.tmp / "cache_ttl", token="",
+                           ttl_hours=6, exclude_regex="sources")
+        info1 = src.check("0.8.0")
+        info2 = src.check("0.8.0")
+        self.assertEqual(info2.latest_version, info1.latest_version)
 
 
 class TestGitHubTagFilter(unittest.TestCase):

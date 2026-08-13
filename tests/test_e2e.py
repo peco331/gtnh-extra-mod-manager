@@ -90,6 +90,8 @@ class TestE2E(unittest.TestCase):
         st = reg["client"][self.mod_id]
         self.assertEqual(st["status"], "installed")
         self.assertTrue(st["enabled"])
+        # 检查更新时把最新版发布时间缓存进条目（本地源=最新jar文件时间）
+        self.assertTrue(self.db.get(self.mod_id).get("release_date"))
         # 3. 源目录出现 1.1.0 → 检查发现可更新 → 更新
         make_jar(self.src_folder / "TestMod-1.7.10-1.1.0.jar")
         self.step_check("1.1.0")
@@ -116,6 +118,18 @@ class TestE2E(unittest.TestCase):
         found = [r for r in results if r[1] == self.mod_id]
         self.assertEqual(found, [])
         updater.toggle_lock(self.installed, self.mod_id, "client")  # 解锁
+
+    def test_install_time_in_registry(self):
+        import re
+        r = updater.install_mod(self.cfg, self.db, self.installed, self.mod_id, "client")
+        self.assertEqual(r["action"], "installed", r)
+        reg = updater.build_registry(self.cfg, self.db, self.installed)
+        st = reg["client"][self.mod_id]
+        # 安装时间取 jar 文件时间：ISO 字符串，可直接排序
+        self.assertRegex(st["install_time"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+        merged = updater.build_merged_registry(self.cfg, self.db, self.installed)
+        row = next(m for m in merged if m["mod_id"] == self.mod_id)
+        self.assertEqual(row["install_time"], st["install_time"])
 
     def test_install_to_server_and_side_warning(self):
         # 双端mod装到服务端无警告

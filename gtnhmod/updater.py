@@ -100,6 +100,9 @@ def get_available_versions(entry: dict, cfg, db=None, *, force: bool = False) ->
             if o.candidates:
                 _learn_asset_name(db, entry, o.candidates[0].file_name)
                 break
+        # 缓存最新版发布时间（供「可添加MOD」按更新时间排序）
+        if options and options[0].published_at:
+            _touch_release_date(db, entry, options[0].published_at)
     gtnh = (cfg.data.get("gtnh_version") or "").strip()
     compat_rules = entry.get("compat") or []
     result = []
@@ -118,6 +121,7 @@ def get_available_versions(entry: dict, cfg, db=None, *, force: bool = False) ->
             "compat": compat,
             "recommended": False,
             "latest": i == 0,
+            "published_at": o.published_at,
         })
     if not result:
         return []
@@ -192,6 +196,8 @@ def build_registry(cfg, db, installed) -> dict:
                 "locked": bool(inst.get("locked")),
                 "status": status,
                 "latest_version": latest,
+                # 安装时间：jar 文件时间（覆盖所有mod）→ 退回工具记录的安装时间
+                "install_time": _install_time_str(f.path, inst),
             }
             if len(ordered) > 1:
                 st["duplicates"] = [x.file_name for x in ordered[1:]]
@@ -239,9 +245,20 @@ def build_merged_registry(cfg, db, installed) -> list:
         m["locked"] = any(st["locked"] for st in sides.values())
         m["latest_version"] = next(
             (st["latest_version"] for st in sides.values() if st["latest_version"]), "")
+        # 安装时间取两端最新者（ISO 字符串可直接比较排序）
+        m["install_time"] = max(
+            (st["install_time"] for st in sides.values() if st["install_time"]), default="")
         out.append(m)
     out.sort(key=lambda m: m["name_en"].lower())
     return out
+
+
+def _install_time_str(path: Path, inst: dict) -> str:
+    """安装时间字符串：优先 jar 文件时间（覆盖所有mod），退回工具记录的安装时间。"""
+    try:
+        return utils.fmt_ts(path.stat().st_mtime)
+    except OSError:
+        return (inst.get("install_date") or "")[:16]
 
 
 def _sort_files_by_version(files: list) -> list:
@@ -358,6 +375,7 @@ def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
     返回 [(side, mod_id, UpdateInfo|None, error_str|None)]。
     """
     results = []
+    db_dirty = False
     ignored = set(cfg.data.get("ignored_files") or [])
     for side in sides:
         folder = cfg.mods_dir(side)
@@ -385,11 +403,16 @@ def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
                     installed.touch_checked(side, f.mod_id, info.latest_version)
                 if info.candidates:
                     _learn_asset_name(db, entry, info.candidates[0].file_name)
+                if info.published_at and entry.get("release_date") != info.published_at:
+                    entry["release_date"] = info.published_at
+                    db_dirty = True
                 results.append((side, f.mod_id, info, None))
             except Exception as e:  # 单个失败不影响整体
                 results.append((side, f.mod_id, None, str(e)))
             if progress_cb:
                 progress_cb(side, f.mod_id)
+    if db_dirty:
+        db.save()
     return results
 
 
@@ -431,7 +454,8 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
                     "entry": entry, "warning": warn}
         cand = opt["candidates"][0]
         info = UpdateInfo(opt["version"], opt["candidates"], opt["body"],
-                          utils.now_str(), f"已选版本 {version}")
+                          utils.now_str(), f"已选版本 {version}",
+                          opt.get("published_at"))
     else:
         try:
             info = source.check(None, force=True)
@@ -441,6 +465,7 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
             return {"action": "manual", "note": info.note or "该mod无自动下载渠道",
                     "entry": entry, "warning": warn}
         cand = info.candidates[0]
+    _touch_release_date(db, entry, info.published_at)
     old = find_installed_file(cfg, db, side, mod_id)
     try:
         dest = downloader.update_with_backup(
@@ -526,6 +551,14 @@ def _learn_asset_name(db, entry: dict, file_name: str) -> None:
         db.add_alias(entry["id"], name)
 
 
+def _touch_release_date(db, entry: dict, published_at) -> None:
+    """把最新版发布时间缓存进条目（供「可添加MOD」按更新时间排序）。"""
+    if not published_at or entry.get("release_date") == published_at:
+        return
+    entry["release_date"] = published_at
+    db.save()
+
+
 def _cleanup_extras(cfg, db, side: str, mod_id: str, dest: Path) -> None:
     """新文件就位后，把同mod的其他jar备份并移除（防双jar冲突）。"""
     for extra in find_installed_files(cfg, db, side, mod_id):
@@ -563,7 +596,8 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
             return {"action": "manual", "note": f"版本 {version} 无自动下载资产，需手动下载",
                     "entry": entry}
         info = UpdateInfo(opt["version"], opt["candidates"], opt["body"],
-                          utils.now_str(), f"已选版本 {version}")
+                          utils.now_str(), f"已选版本 {version}",
+                          opt.get("published_at"))
     else:
         try:
             info = source.check(old.version, force=True)
@@ -579,6 +613,7 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
                             "note": "已是最新版本"}
             except VersionParseError:
                 pass
+    _touch_release_date(db, entry, info.published_at)
     cand = info.candidates[0]
     try:
         dest = downloader.update_with_backup(
