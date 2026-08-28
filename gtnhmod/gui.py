@@ -697,16 +697,25 @@ class GuiApp:
             status = m["status"]
             base = {"update_avail": "upd", "update_incompat": "incompat",
                     "disabled": "dis"}.get(status, "")
-            # 行样式优先级：可更新(绿) > 可能不兼容(黄) > 锁定(蓝紫) > 隔行(灰)。
-            # 锁定+可更新时保留绿底，锁定用名称里的 🔒 与整行蓝紫字区分
-            if base in ("upd", "incompat"):
-                tags = (base,)
-            elif m["locked"]:
+            # 锁定优先级最高：锁定的 mod 不会被"全部更新"动到，整行蓝紫提示"这个不会动"，
+            # 状态列注明是否恰好有新版
+            if m["locked"]:
                 tags = ("locked",)
+                if status == "update_avail":
+                    status_txt = "可更新（已锁定）"
+                elif status == "update_incompat":
+                    status_txt = "有新版（可能不兼容，已锁定）"
+                else:
+                    status_txt = "已锁定"
+            elif base == "upd":
+                tags, status_txt = ("upd",), STATUS_CN[status]
+            elif base == "incompat":
+                tags, status_txt = ("incompat",), STATUS_CN[status]
             elif base == "dis":
-                tags = ("dis",)
+                tags, status_txt = ("dis",), STATUS_CN["disabled"]
             else:
                 tags = ("odd",) if i % 2 else ()
+                status_txt = STATUS_CN.get(status, status)
             self.inst_tree.insert(
                 "", "end", iid=m["mod_id"], tags=tags,
                 values=(self._name_cell(m),
@@ -714,7 +723,7 @@ class GuiApp:
                         self._version_cell(m),
                         m["install_time"] or "—",
                         self._fmt_ver(m["latest_version"]),
-                        STATUS_CN.get(status, status)))
+                        status_txt))
             self.inst_rows[m["mod_id"]] = m
         # 底部状态栏（路径缩略显示，完整路径见设置页）
         merged = self._merged_registry()
