@@ -78,6 +78,12 @@ class ModsDB:
             eid = f"{base}-{n}"
             n += 1
         github_url = entry.get("github_url")
+        curseforge_url = entry.get("curseforge_url")
+        links = []
+        if github_url:
+            links.append({"url": github_url, "label": "github"})
+        if curseforge_url:
+            links.append({"url": curseforge_url, "label": "curseforge"})
         full = {
             "id": eid,
             "name_en": entry.get("name_en") or "",
@@ -91,9 +97,9 @@ class ModsDB:
             "desc": entry.get("desc") or "",
             "detail": entry.get("detail") or "",
             "compat": list(entry.get("compat") or []),
-            "urls": {"github": github_url or None, "curseforge": None,
+            "urls": {"github": github_url or None, "curseforge": curseforge_url or None,
                      "mcmod": None, "bilibili": None, "other": [],
-                     "links": [{"url": github_url, "label": "github"}] if github_url else []},
+                     "links": links},
             "aliases": list(entry.get("aliases") or []),
             "wiki_removed": False,
             # 用户手填的中文名/源视为覆盖：若日后wiki收录同名mod，刷新时保留用户字段
@@ -143,6 +149,11 @@ class ModsDB:
     # ---- wiki 合并 ----
     def merge_wiki(self, fresh: list) -> list:
         """合并新解析的 wiki 条目。保留用户数据（aliases），返回变更日志。"""
+        if not fresh:
+            # 空结果几乎必然是抓取被反爬拦截或页面结构变更；照常合并会把
+            # 全部 wiki 条目误标记为 wiki_removed，可添加列表直接清空
+            raise ValueError("wiki 解析结果为空，已取消合并（本地数据未改动）。"
+                             "请稍后重试；若反复出现，可能是页面结构变更，需更新解析器")
         changes = []
         old_by_id = {m["id"]: m for m in self.mods}
         fresh_ids = {m["id"] for m in fresh}
@@ -167,6 +178,9 @@ class ModsDB:
                 if old.get("name_cn_override"):
                     fe["name_cn"] = old.get("name_cn") or fe.get("name_cn")
                     fe["name_cn_override"] = True
+                # 下载页最新版发布时间不是wiki字段，刷新wiki时必须保留缓存
+                if old.get("release_date"):
+                    fe["release_date"] = old["release_date"]
                 # 同名自定义源与 wiki 新收录条目合并 → 明确提示（用户字段已保留）
                 if old.get("group") == "自定义":
                     changes.append(f'自定义源 {old.get("name_en") or old["id"]} 已被 wiki 收录，'

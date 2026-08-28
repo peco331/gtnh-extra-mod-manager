@@ -14,7 +14,7 @@ import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import SIDES, SIDE_LABELS, __version__, updater, utils
+from . import SIDES, SIDE_LABELS, __version__, updater, utils, cookies
 from . import wiki as wikimod
 from .config import Config
 from .db import ModsDB
@@ -193,7 +193,7 @@ class GuiApp:
                         command=self.refresh_installed).pack(side="left", padx=(8, 0))
 
         cols = ("name", "cn", "side", "client", "server", "inst_time", "latest", "status")
-        heads = ("名称", "中文名", "安装端别", "客户端", "服务端", "安装时间", "最新版本", "状态")
+        heads = ("名称", "中文名", "安装端别", "客户端", "服务端", "本地更新时间", "最新版本", "状态")
         widths = (230, 110, 80, 130, 130, 115, 90, 70)
         tree_frame = ttk.Frame(tab)
         tree_frame.pack(fill="both", expand=True, padx=6)
@@ -320,7 +320,7 @@ class GuiApp:
         btns = ttk.Frame(tab)
         btns.pack(fill="x", padx=6, pady=4)
         ttk.Button(btns, text="添加", command=self.add_custom_dialog).pack(side="left", padx=2)
-        ttk.Button(btns, text="编辑端别", command=self.edit_custom_side).pack(side="left", padx=2)
+        ttk.Button(btns, text="编辑", command=self.edit_custom_dialog).pack(side="left", padx=2)
         ttk.Button(btns, text="删除", command=self.remove_custom).pack(side="left", padx=2)
 
     def _build_settings_tab(self, tab):
@@ -361,6 +361,30 @@ class GuiApp:
 
         ttk.Button(f, text="打开操作日志", command=self._open_log_file).grid(row=7, column=1, padx=(110, 0), sticky="w", pady=10)
         f.columnconfigure(1, weight=1)
+
+        # ---- Wiki 反爬 Cookie（站点开启 Cloudflare 人机验证后使用）----
+        wf = ttk.LabelFrame(tab, text="Wiki 反爬 Cookie（Cloudflare 人机验证）")
+        wf.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Label(wf, text="Wiki Cookie").grid(row=0, column=0, sticky="w", pady=4)
+        self.wiki_cookie_entry = ttk.Entry(wf, width=60)
+        self.wiki_cookie_entry.grid(row=0, column=1, sticky="we", padx=6)
+        ttk.Label(wf, text="配套 User-Agent").grid(row=1, column=0, sticky="w", pady=4)
+        self.wiki_ua_entry = ttk.Entry(wf, width=60)
+        self.wiki_ua_entry.grid(row=1, column=1, sticky="we", padx=6)
+        wbtns = ttk.Frame(wf)
+        wbtns.grid(row=2, column=0, columnspan=2, sticky="w", padx=2, pady=4)
+        ttk.Button(wbtns, text="从剪贴板导入 cURL", command=self.import_wiki_curl).pack(side="left")
+        ttk.Button(wbtns, text="测试抓取", command=self.test_wiki_fetch).pack(side="left", padx=6)
+        ttk.Button(wbtns, text="清除", command=self.clear_wiki_cookie).pack(side="left")
+        ttk.Label(wf, text="获取方法：浏览器打开 wiki 并通过人机验证 → F12 → Network → 刷新页面 → "
+                           "点第一个文档请求 → 右键 Copy → Copy as cURL → 点「从剪贴板导入 cURL」。"
+                           "cf_clearance 与浏览器 UA/出口 IP 绑定：若上面配了代理，浏览器需走同一出口；"
+                           "Cookie 过期后重新导入即可。",
+                  wraplength=780, foreground="#666", justify="left").grid(
+            row=3, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 6))
+        wf.columnconfigure(1, weight=1)
+        self.wiki_cookie_entry.insert(0, self.cfg.wiki_cookie)
+        self.wiki_ua_entry.insert(0, self.cfg.wiki_ua)
 
         self.client_entry.insert(0, str(self.cfg.client_mods_dir or ""))
         self.server_entry.insert(0, str(self.cfg.server_mods_dir or ""))
@@ -639,6 +663,9 @@ class GuiApp:
                 self._log(f"{label} {name}: {r.get('note') or '需手动下载'}")
             else:
                 self._log(f"[错误] {label} {name}: {r.get('error')}")
+            if r.get("leftover"):
+                self._log(f"[提示] {label} 旧版本文件被占用未能移除: {'、'.join(r['leftover'])}"
+                          "（请关闭游戏/服务端后右键「清理重复jar」）")
         self._log(f"完成：成功更新 {n_ok} 个")
         self.refresh_all()
 
@@ -767,6 +794,12 @@ class GuiApp:
         else:
             menu.add_command(label="更新...", command=lambda: self._start_single_update(m))
         if multi:
+            menu.add_command(label=f"回滚到更新前版本{tag}",
+                             command=lambda: self._rollback_mods(list(sel)))
+        else:
+            menu.add_command(label="回滚到更新前版本...",
+                             command=lambda: self._rollback_mods([m]))
+        if multi:
             # 多选时批量操作（与单选同菜单，按选中数标注）
             menu.add_command(label=f"启用/禁用{tag}", command=self.toggle_selected)
             menu.add_command(label=f"锁定/解锁{tag}", command=self.lock_selected)
@@ -818,11 +851,13 @@ class GuiApp:
             st = m["sides"].get(side)
             if not st:
                 continue
-            lines.append(f"\n{SIDE_LABELS[side]}版本: v{st.get('version')}  [{st.get('file_name')}]")
+            dups = list(st.get("duplicates") or [])
+            lines.append(f"\n{SIDE_LABELS[side]}绑定的jar（{1 + len(dups)}个）:")
+            lines.append(f"  ● {st.get('file_name')}（当前使用 v{st.get('version')}）")
+            for d in dups:
+                lines.append(f"  ○ {d}（重复，建议清理）")
             if st.get("latest_version"):
                 lines.append(f"  远端最新: v{st['latest_version']}")
-            if st.get("duplicates"):
-                lines.append(f"  重复jar: {'、'.join(st['duplicates'])}")
         if e.get("desc"):
             lines.append(f"\n简介:\n{e['desc']}")
         if e.get("detail"):
@@ -839,15 +874,24 @@ class GuiApp:
         self._attach_scrollbar(t, frame)
 
     def _cleanup_dups(self, m):
-        if not messagebox.askyesno("确认", f"清理 {m['name_en']} 的重复jar？\n"
-                                   "（保留版本最高者，其余备份到 data/backup 后移除）"):
+        dups = []
+        for side, names in (m.get("duplicates") or {}).items():
+            dups += [f"{SIDE_LABELS[side]}: {n}" for n in names]
+        msg = (f"清理 {m['name_en']} 的重复jar？\n"
+               "（保留最近一次安装/回滚的版本，其余备份到 data/backup 后移除）\n\n"
+               f"将清理:\n  " + ("\n  ".join(dups) or "无"))
+        if not messagebox.askyesno("确认", msg):
             return
         r = updater.cleanup_duplicates(self.cfg, self.db, self.installed, m["mod_id"])
+        for k in r.get("kept") or []:
+            self._log(f"保留 {k}")
         if r["action"] == "cleaned":
             for c in r["cleaned"]:
                 self._log(f"已清理重复jar {c}")
         else:
             self._log(f"{m['name_en']} 没有需要清理的重复jar")
+        for s in r.get("skipped") or []:
+            self._log(f"[提示] {s} 未能移除（文件被占用？请关闭游戏/服务端后重试）")
         self.refresh_all()
 
     def _start_single_update(self, m):
@@ -856,6 +900,44 @@ class GuiApp:
         if not messagebox.askyesno("确认", f"更新 {m['name_en']}（所有已装端别）？"):
             return
         self._start_update_flow([m])
+
+    def _rollback_mods(self, mods):
+        """一键回滚：恢复每端最近一次更新/替换前的备份 jar。"""
+        if self.busy:
+            return
+        names = "、".join(m["name_en"] for m in mods)
+        if not messagebox.askyesno("确认", f"回滚 {names} 到更新前版本？\n"
+                                   "（取两端最近一次更新/替换前的备份；"
+                                   "双端会恢复到同一版本，当前版本会先备份）"):
+            return
+        self._set_busy(True)
+        self._log(f"开始回滚 {names} ...")
+
+        def job():
+            out = []
+            for m in mods:
+                for r in updater.rollback_mod(self.cfg, self.db, self.installed,
+                                              m["mod_id"]):
+                    r["mod_id"], r["name"] = m["mod_id"], m["name_en"]
+                    out.append(r)
+            return out
+
+        def done(rs):
+            self._set_busy(False)
+            for r in rs or []:
+                label = SIDE_LABELS.get(r.get("side", "?"), "?")
+                if r["action"] == "restored":
+                    self._log(f"已回滚 {label} {r['name']} → {r['file']}")
+                    if r.get("leftover"):
+                        self._log(f"[提示] {label} 旧版本文件被占用未能移除: "
+                                  f"{'、'.join(r['leftover'])}"
+                                  "（请关闭游戏/服务端后右键「清理重复jar」）")
+                elif r["action"] == "nobackup":
+                    self._log(f"{label} {r['name']}: 没有可回滚的备份")
+                else:
+                    self._log(f"[错误] {label} {r['name']}: {r.get('error')}")
+            self.refresh_all()
+        self._run_async(job, on_done=done)
 
     def _add_menu(self, menu, iid):
         e = self.add_rows.get(iid)
@@ -997,8 +1079,7 @@ class GuiApp:
         if not e:
             menu.add_command(label="（未选中条目）", state="disabled")
             return
-        menu.add_command(label="编辑中文名...", command=lambda: self._edit_name_cn(e))
-        menu.add_command(label="编辑端别", command=self.edit_custom_side)
+        menu.add_command(label="编辑", command=lambda: self._custom_source_dialog(e))
         menu.add_command(label="删除", command=self.remove_custom)
 
     # ---------- 可添加页 ----------
@@ -1145,6 +1226,9 @@ class GuiApp:
                 self._log(f"[错误] {label} {r['name']}: {r.get('error')}")
                 if r.get("warning"):
                     self._log(f"  [端别提示] {r['warning']}")
+            if r.get("leftover"):
+                self._log(f"[提示] {label} 旧版本文件被占用未能移除: {'、'.join(r['leftover'])}"
+                          "（请关闭游戏/服务端后右键「清理重复jar」）")
         self.refresh_all()
 
     def _version_picker(self, options, current=None, title="选择版本"):
@@ -1224,16 +1308,34 @@ class GuiApp:
             on_done=lambda r: self._on_wiki_done(r))
 
     def _on_wiki_done(self, r):
-        self._set_busy(False)
         if r is None:
+            self._set_busy(False)
             return
         mods, warnings = r[0]
         for w in warnings:
             self._log(f"[警告] {w}")
-        changes = self.db.merge_wiki(mods)
+        try:
+            changes = self.db.merge_wiki(mods)
+        except Exception as e:
+            self._log(f"[错误] {e}")
+            messagebox.showerror("刷新Wiki失败", str(e))
+            self._set_busy(False)
+            return
         self._log(f"wiki 数据已更新，共 {len(self.db.wiki_mods())} 个mod，{len(changes)} 处变化")
         for c in changes[:30]:
             self._log(f"  - {c}")
+        self.refresh_addable()
+        # Wiki刷新不只更新条目，也同步刷新下载页最新版发布时间。
+        self._log("正在更新下载页最新版发布时间...")
+        self._run_async(
+            lambda: updater.refresh_release_dates(self.cfg, self.db),
+            on_done=self._on_release_dates_done)
+
+    def _on_release_dates_done(self, result):
+        self._set_busy(False)
+        result = result or {}
+        self._log(f"下载页发布时间已更新：{result.get('updated', 0)} 个，"
+                  f"{result.get('failed', 0)} 个失败")
         self.refresh_addable()
 
     # ---------- 未受管页 ----------
@@ -1377,6 +1479,7 @@ class GuiApp:
         for e in self.db.custom_mods():
             src = e.get("source") or {}
             src_txt = (f"{src.get('owner', '')}/{src.get('repo', '')}" if e["source_type"] == "github"
+                       else (e.get("urls") or {}).get("curseforge", "") if e["source_type"] == "curseforge"
                        else src.get("path", "") if e["source_type"] == "local_folder" else "")
             self.cust_tree.insert("", "end", iid=e["id"],
                                   values=(e["name_en"] or e["id"], e["name_cn"],
@@ -1386,27 +1489,51 @@ class GuiApp:
         self._reapply_sort(self.cust_tree)
 
     def add_custom_dialog(self):
+        self._custom_source_dialog()
+
+    def edit_custom_dialog(self):
+        sel = self.cust_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先选中条目")
+            return
+        e = self.db.get(sel[0])
+        if e:
+            self._custom_source_dialog(e)
+
+    def _custom_source_dialog(self, existing=None):
+        editing = existing is not None
         top = tk.Toplevel(self.root)
-        top.title("添加自定义源")
-        top.geometry("460x330")
+        top.title("编辑自定义源" if editing else "添加自定义源")
+        top.geometry("500x360")
         f = ttk.Frame(top)
         f.pack(fill="both", expand=True, padx=10, pady=10)
         ttk.Label(f, text="类型:").grid(row=0, column=0, sticky="w", pady=4)
-        kind = tk.StringVar(value="github")
+        initial_type = (existing or {}).get("source_type") or "github"
+        kind = tk.StringVar(value=initial_type)
         ttk.Combobox(f, textvariable=kind, state="readonly", width=22,
-                     values=("github", "local_folder", "manual")).grid(row=0, column=1, sticky="w")
+                     values=("github", "curseforge", "local_folder", "manual")).grid(row=0, column=1, sticky="w")
         ttk.Label(f, text="英文名(匹配jar用):").grid(row=1, column=0, sticky="w", pady=4)
         en = ttk.Entry(f, width=30)
+        en.insert(0, (existing or {}).get("name_en") or "")
         en.grid(row=1, column=1, sticky="w")
         ttk.Label(f, text="中文名(可选):").grid(row=2, column=0, sticky="w", pady=4)
         cn = ttk.Entry(f, width=30)
+        cn.insert(0, (existing or {}).get("name_cn") or "")
         cn.grid(row=2, column=1, sticky="w")
         ttk.Label(f, text="端别:").grid(row=3, column=0, sticky="w", pady=4)
-        side = tk.StringVar(value="both")
+        side = tk.StringVar(value=(existing or {}).get("side") or "both")
         ttk.Combobox(f, textvariable=side, state="readonly", width=22,
                      values=("client", "server", "both")).grid(row=3, column=1, sticky="w")
-        ttk.Label(f, text="GitHub owner/repo 或 本地目录:").grid(row=4, column=0, sticky="w", pady=4)
+        ttk.Label(f, text="GitHub owner/repo、CurseForge URL 或本地目录:").grid(row=4, column=0, sticky="w", pady=4)
         src = ttk.Entry(f, width=40)
+        old_src = (existing or {}).get("source") or {}
+        old_urls = (existing or {}).get("urls") or {}
+        if initial_type == "github":
+            src.insert(0, f"{old_src.get('owner', '')}/{old_src.get('repo', '')}")
+        elif initial_type == "curseforge":
+            src.insert(0, old_urls.get("curseforge") or "")
+        elif initial_type == "local_folder":
+            src.insert(0, old_src.get("path") or "")
         src.grid(row=4, column=1, sticky="w")
 
         def ok():
@@ -1415,52 +1542,50 @@ class GuiApp:
             if not name_en:
                 messagebox.showwarning("提示", "英文名不能为空", parent=top)
                 return
+            fields = {"name_en": name_en, "name_cn": cn.get().strip(), "side": side.get(),
+                      "source_type": k, "source": {}, "urls": {
+                          "github": None, "curseforge": None, "mcmod": None,
+                          "bilibili": None, "other": [], "links": []},
+                      "source_override": True}
             if k == "github":
                 parts = src.get().strip().replace("https://github.com/", "").split("/")
                 if len(parts) < 2 or not parts[0] or not parts[1]:
                     messagebox.showwarning("提示", "GitHub源需填 owner/repo", parent=top)
                     return
-                entry = {"name_en": name_en, "name_cn": cn.get().strip(), "side": side.get(),
-                         "source_type": "github",
-                         "source": {"owner": parts[0], "repo": parts[1], "asset_regex": "",
-                                    "exclude_regex": wikimod.DEFAULT_EXCLUDE_REGEX}}
+                url = f"https://github.com/{parts[0]}/{parts[1]}"
+                fields["source"] = {"owner": parts[0], "repo": parts[1],
+                                     "asset_regex": "", "exclude_regex": wikimod.DEFAULT_EXCLUDE_REGEX}
+                fields["urls"].update(github=url, links=[{"url": url, "label": "github"}])
+            elif k == "curseforge":
+                url = src.get().strip()
+                if not url or "curseforge.com" not in url.lower():
+                    messagebox.showwarning("提示", "CurseForge源需填写 curseforge.com 页面链接", parent=top)
+                    return
+                fields["urls"].update(curseforge=url, links=[{"url": url, "label": "curseforge"}])
             elif k == "local_folder":
                 p = src.get().strip()
                 if not p:
                     messagebox.showwarning("提示", "请填写本地目录路径", parent=top)
                     return
-                entry = {"name_en": name_en, "name_cn": cn.get().strip(), "side": side.get(),
-                         "source_type": "local_folder",
-                         "source": {"path": p, "name_regex": ""}}
+                fields["source"] = {"path": p, "name_regex": ""}
+            if editing:
+                self.db.update_custom(existing["id"], fields)
+                self._log(f"已编辑自定义源: {existing['id']}")
             else:
-                entry = {"name_en": name_en, "name_cn": cn.get().strip(), "side": side.get(),
-                         "source_type": "manual"}
-            eid = self.db.add_custom(entry)
-            self._log(f"已添加自定义源: {eid}")
+                # add_custom 通过 github_url/curseforge_url 写入链接
+                if k == "github":
+                    fields["github_url"] = fields["urls"]["github"]
+                elif k == "curseforge":
+                    fields["curseforge_url"] = fields["urls"]["curseforge"]
+                self.db.add_custom(fields)
+                self._log(f"已添加自定义源: {name_en}")
             top.destroy()
-            self.refresh_custom()
-        ttk.Button(f, text="添加", command=ok).grid(row=5, column=1, sticky="w", pady=10)
+            self.refresh_all()
 
-    def edit_custom_side(self):
-        sel = self.cust_tree.selection()
-        if not sel:
-            messagebox.showinfo("提示", "请先选中条目")
-            return
-        e = self.db.get(sel[0])
-        if not e:
-            return
-        top = tk.Toplevel(self.root)
-        top.title(f"编辑端别: {e['name_en']}")
-        side = tk.StringVar(value=e.get("side") or "both")
-        ttk.Radiobutton(top, text="客户端", variable=side, value="client").pack(anchor="w", padx=20)
-        ttk.Radiobutton(top, text="服务端", variable=side, value="server").pack(anchor="w", padx=20)
-        ttk.Radiobutton(top, text="双端", variable=side, value="both").pack(anchor="w", padx=20)
-
-        def ok():
-            self.db.update_custom(e["id"], {"side": side.get()})
-            top.destroy()
-            self.refresh_custom()
-        ttk.Button(top, text="保存", command=ok).pack(pady=8)
+        ttk.Button(f, text="保存" if editing else "添加", command=ok).grid(row=5, column=1, sticky="w", pady=10)
+        ttk.Button(f, text="取消", command=top.destroy).grid(row=5, column=1, sticky="e", pady=10)
+        top.transient(self.root)
+        top.grab_set()
 
     def remove_custom(self):
         sel = self.cust_tree.selection()
@@ -1473,6 +1598,60 @@ class GuiApp:
             self.refresh_custom()
 
     # ---------- 设置页 ----------
+    def _save_wiki_cookie_from_ui(self):
+        self.cfg.set_wiki_cookie(self.wiki_cookie_entry.get().strip(),
+                                 self.wiki_ua_entry.get().strip())
+
+    def import_wiki_curl(self):
+        try:
+            text = self.root.clipboard_get()
+        except tk.TclError:
+            messagebox.showerror("错误", "剪贴板为空，请先在浏览器 DevTools 里 Copy as cURL")
+            return
+        cookie, ua = cookies.parse_paste(text)
+        if not cookie and not ua:
+            messagebox.showerror(
+                "错误", "未能从剪贴板解析出 Cookie/User-Agent。\n"
+                        "请复制「Copy as cURL」内容，或直接粘贴 Cookie 请求头的值。")
+            return
+        self.wiki_cookie_entry.delete(0, "end")
+        if cookie:
+            self.wiki_cookie_entry.insert(0, cookie)
+        self.wiki_ua_entry.delete(0, "end")
+        if ua:
+            self.wiki_ua_entry.insert(0, ua)
+        self._save_wiki_cookie_from_ui()
+        self._log(f"Wiki Cookie 已导入并保存"
+                  f"（{len(cookie.split(';')) if cookie else 0} 个cookie，UA{'已' if ua else '未'}导入）")
+
+    def clear_wiki_cookie(self):
+        self.wiki_cookie_entry.delete(0, "end")
+        self.wiki_ua_entry.delete(0, "end")
+        self.cfg.set_wiki_cookie("", "")
+        self._log("Wiki Cookie 已清除")
+
+    def test_wiki_fetch(self):
+        if self.busy:
+            return
+        self._save_wiki_cookie_from_ui()
+        self._set_busy(True)
+        self._log("正在测试 wiki 抓取...")
+        self._run_async(lambda: (wikimod.fetch_and_parse(self.cfg), ),
+                        on_done=lambda r: self._on_wiki_test_done(r))
+
+    def _on_wiki_test_done(self, r):
+        self._set_busy(False)
+        if r is None:
+            return
+        mods, warnings = r[0]
+        if mods:
+            msg = f"抓取成功，解析到 {len(mods)} 个mod"
+            self._log(f"[OK] {msg}" + (f"（警告：{'；'.join(warnings)}）" if warnings else ""))
+            messagebox.showinfo("测试成功", msg)
+        else:
+            self._log("[失败] 抓取到内容但解析不到mod（Cookie 可能已过期，或页面结构变更）")
+            messagebox.showwarning("测试失败", "抓取内容解析不到mod，请重新导入有效的 Cookie")
+
     def save_settings(self):
         self.cfg.set_mods_dir("client", self.client_entry.get().strip())
         self.cfg.set_mods_dir("server", self.server_entry.get().strip())
@@ -1493,6 +1672,7 @@ class GuiApp:
             messagebox.showerror("错误", "缓存时长/备份数必须是数字")
             return
         self.cfg.data["gtnh_version"] = self.gtnh_entry.get().strip()
+        self._save_wiki_cookie_from_ui()
         self.cfg.save()
         self._log("设置已保存")
         messagebox.showinfo("已保存", "设置已保存，列表即将刷新")

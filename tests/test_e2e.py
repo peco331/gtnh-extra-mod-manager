@@ -119,17 +119,144 @@ class TestE2E(unittest.TestCase):
         self.assertEqual(found, [])
         updater.toggle_lock(self.installed, self.mod_id, "client")  # 解锁
 
+    def test_config_instances_independent(self):
+        # 两个 Config 实例互不污染（回归：DEFAULTS 浅拷贝共享 mods_folders dict）
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_cfg_"))
+        try:
+            a = Config(tmp / "a")
+            b = Config(tmp / "b")
+            a.set_mods_dir("client", tmp / "mods_a")
+            self.assertEqual(str(a.mods_dir("client")), str(tmp / "mods_a"))
+            self.assertIsNone(b.mods_dir("client"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_cleanup_duplicates_locked_file(self):
+        # 旧版本文件被占用（unlink 失败）→ 备份成功但报告 skipped，文件保留
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_lock_"))
+        try:
+            mods = tmp / "mods"
+            mods.mkdir()
+            make_jar(mods / "TestMod-1.7.10-1.0.0.jar")
+            make_jar(mods / "TestMod-1.7.10-1.1.0.jar")
+            cfg = Config(tmp / "data")
+            cfg.set_mods_dir("client", mods)
+            db = ModsDB(tmp / "data" / "mods_db.json")
+            db.add_custom({"name_en": "TestMod", "source_type": "manual"})
+            installed = InstalledDB(tmp / "data" / "installed.json")
+            from unittest.mock import patch
+            with patch.object(Path, "unlink", side_effect=PermissionError("locked")):
+                r = updater.cleanup_duplicates(cfg, db, installed, "testmod")
+            self.assertEqual(r["action"], "none")
+            self.assertEqual(len(r["skipped"]), 1)
+            self.assertIn("TestMod-1.7.10-1.0.0.jar", r["skipped"][0])
+            # 文件仍在（占用中未删成），但已备份
+            self.assertTrue((mods / "TestMod-1.7.10-1.0.0.jar").exists())
+            self.assertEqual(len(list((cfg.backup_dir / "client" / "testmod").glob("*.jar"))), 1)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_install_time_in_registry(self):
         import re
         r = updater.install_mod(self.cfg, self.db, self.installed, self.mod_id, "client")
         self.assertEqual(r["action"], "installed", r)
         reg = updater.build_registry(self.cfg, self.db, self.installed)
         st = reg["client"][self.mod_id]
-        # 安装时间取 jar 文件时间：ISO 字符串，可直接排序
+        # 本地更新时间取 jar 文件时间与工具记录时间较新者：ISO 字符串，可直接排序
         self.assertRegex(st["install_time"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+        # 安装/更新会记录工具本地更新时间
+        self.assertTrue(self.installed.get("client", self.mod_id).get("updated_at"))
         merged = updater.build_merged_registry(self.cfg, self.db, self.installed)
         row = next(m for m in merged if m["mod_id"] == self.mod_id)
         self.assertEqual(row["install_time"], st["install_time"])
+
+    def test_rollback_syncs_both_sides(self):
+        # 双端mod回滚后两端必须同版本：取两端备份中全局最新的一份，两端各恢复同一份
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_rs_"))
+        try:
+            cmods = tmp / "cmods"
+            cmods.mkdir()
+            smods = tmp / "smods"
+            smods.mkdir()
+            src = tmp / "src"
+            src.mkdir()
+            make_jar(src / "TestMod-1.7.10-1.0.0.jar")
+            cfg = Config(tmp / "data")
+            cfg.set_mods_dir("client", cmods)
+            cfg.set_mods_dir("server", smods)
+            db = ModsDB(tmp / "data" / "mods_db.json")
+            mid = db.add_custom({"name_en": "TestMod", "source_type": "local_folder",
+                                 "source": {"path": str(src), "name_regex": "^TestMod"}})
+            installed = InstalledDB(tmp / "data" / "installed.json")
+            updater.install_mod(cfg, db, installed, mid, "client")
+            updater.install_mod(cfg, db, installed, mid, "server")
+            make_jar(src / "TestMod-1.7.10-1.1.0.jar")
+            updater.update_mod(cfg, db, installed, mid, "client")
+            updater.update_mod(cfg, db, installed, mid, "server")
+            self.assertEqual([p.name for p in cmods.glob("*.jar")],
+                             ["TestMod-1.7.10-1.1.0.jar"])
+            # 回滚（默认两端）→ 两端都恢复到同一个版本 1.0.0
+            rs = updater.rollback_mod(cfg, db, installed, mid)
+            actions = {r["side"]: r["action"] for r in rs}
+            self.assertEqual(actions, {"client": "restored", "server": "restored"})
+            self.assertEqual([p.name for p in cmods.glob("*.jar")],
+                             ["TestMod-1.7.10-1.0.0.jar"])
+            self.assertEqual([p.name for p in smods.glob("*.jar")],
+                             ["TestMod-1.7.10-1.0.0.jar"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_rollback_to_previous_version(self):
+        # 独立环境：安装1.0.0 → 更新1.1.0 → 回滚恢复1.0.0 → 再回滚恢复1.1.0
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_rb_"))
+        try:
+            mods = tmp / "mods"
+            mods.mkdir()
+            src = tmp / "src"
+            src.mkdir()
+            make_jar(src / "TestMod-1.7.10-1.0.0.jar")
+            cfg = Config(tmp / "data")
+            cfg.set_mods_dir("client", mods)
+            db = ModsDB(tmp / "data" / "mods_db.json")
+            mid = db.add_custom({"name_en": "TestMod", "source_type": "local_folder",
+                                 "source": {"path": str(src), "name_regex": "^TestMod"}})
+            installed = InstalledDB(tmp / "data" / "installed.json")
+            r = updater.install_mod(cfg, db, installed, mid, "client")
+            self.assertEqual(r["action"], "installed", r)
+            make_jar(src / "TestMod-1.7.10-1.1.0.jar")
+            r = updater.update_mod(cfg, db, installed, mid, "client")
+            self.assertEqual(r["action"], "updated", r)
+            self.assertEqual([p.name for p in mods.glob("*.jar")],
+                             ["TestMod-1.7.10-1.1.0.jar"])
+            # 回滚 → 恢复更新前的 1.0.0
+            rs = updater.rollback_mod(cfg, db, installed, mid, sides=("client",))
+            self.assertEqual(rs[0]["action"], "restored", rs)
+            self.assertEqual([p.name for p in mods.glob("*.jar")],
+                             ["TestMod-1.7.10-1.0.0.jar"])
+            # 回滚会记录本地更新时间
+            self.assertTrue(installed.get("client", mid).get("updated_at"))
+            # 再次回滚 → 恢复到 1.1.0（回滚前当前版本会先备份）
+            rs = updater.rollback_mod(cfg, db, installed, mid, sides=("client",))
+            self.assertEqual(rs[0]["action"], "restored", rs)
+            self.assertEqual([p.name for p in mods.glob("*.jar")],
+                             ["TestMod-1.7.10-1.1.0.jar"])
+            # 回滚时旧文件被占用 → 报告 leftover，不静默残留双jar
+            from unittest.mock import patch
+            with patch.object(Path, "unlink", side_effect=PermissionError("locked")):
+                rs = updater.rollback_mod(cfg, db, installed, mid, sides=("client",))
+            self.assertEqual(rs[0]["action"], "restored", rs)
+            self.assertIn("TestMod-1.7.10-1.1.0.jar", rs[0].get("leftover", []))
+            self.assertTrue((mods / "TestMod-1.7.10-1.1.0.jar").exists())
+            # 清理重复jar：保留最近一次回滚的版本（1.0.0），移除残留的 1.1.0
+            r = updater.cleanup_duplicates(cfg, db, installed, mid)
+            self.assertIn("客户端: TestMod-1.7.10-1.0.0.jar", r["kept"])
+            self.assertEqual([p.name for p in mods.glob("*.jar")],
+                             ["TestMod-1.7.10-1.0.0.jar"])
+            # 无备份的端别 → nobackup
+            rs = updater.rollback_mod(cfg, db, installed, mid, sides=("server",))
+            self.assertEqual(rs[0]["action"], "nobackup", rs)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_install_to_server_and_side_warning(self):
         # 双端mod装到服务端无警告

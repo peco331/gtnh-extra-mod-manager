@@ -15,6 +15,8 @@ DEFAULTS = {
     "gtnh_version": "",           # 预留：当前整合包版本（兼容性提示用）
     "ignored_files": [],          # 未受管且主动忽略的 jar 文件名
     "core_mod_confirm": True,     # 禁用 mod 前二次确认
+    "wiki_cookie": "",            # Cloudflare 反爬：浏览器通过验证后的 Cookie（cf_clearance）
+    "wiki_ua": "",                # 与 cookie 配套的浏览器 User-Agent（cf_clearance 与 UA 绑定）
 }
 
 
@@ -32,10 +34,15 @@ class Config:
         merged = dict(DEFAULTS)
         if saved:
             merged.update(saved)
-        if not isinstance(merged.get("mods_folders"), dict):
-            merged["mods_folders"] = dict(DEFAULTS["mods_folders"])
+        # 可变容器必须独立拷贝：dict(DEFAULTS) 是浅拷贝，共享的 dict/list
+        # 会被其他 Config 实例的修改污染（set_mods_dir 就地改 mods_folders）
+        merged["mods_folders"] = dict(merged.get("mods_folders") or {})
+        merged["mods_folders"].setdefault("client", "")
+        merged["mods_folders"].setdefault("server", "")
         if not isinstance(merged.get("ignored_files"), list):
             merged["ignored_files"] = []
+        else:
+            merged["ignored_files"] = list(merged["ignored_files"])
         self.data = merged
 
     def save(self):
@@ -71,6 +78,20 @@ class Config:
     @property
     def wiki_page(self) -> str:
         return self.data.get("wiki_page") or DEFAULTS["wiki_page"]
+
+    @property
+    def wiki_cookie(self) -> str:
+        return (self.data.get("wiki_cookie") or "").strip()
+
+    @property
+    def wiki_ua(self) -> str:
+        return (self.data.get("wiki_ua") or "").strip()
+
+    def set_wiki_cookie(self, cookie: str, ua: str) -> None:
+        """保存 wiki 反爬 Cookie 与配套 UA（传空串即清除）。"""
+        self.data["wiki_cookie"] = (cookie or "").strip()
+        self.data["wiki_ua"] = (ua or "").strip()
+        self.save()
 
     @property
     def github_token(self) -> str:

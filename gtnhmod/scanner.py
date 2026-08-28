@@ -161,6 +161,7 @@ def reconcile(scan_by_side: dict, installed: "InstalledDB") -> dict:
                           parsed_version=f.version or "",
                           enabled=f.enabled,
                           install_date=inst.get("install_date") or None,
+                          updated_at=inst.get("updated_at") or None,
                           locked=bool(inst.get("locked")))
         # 清理已不存在于磁盘的记录
         for mod_id in installed.all_ids(side):

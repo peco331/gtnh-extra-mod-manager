@@ -305,14 +305,39 @@ class TestVerifyAndUpdate(unittest.TestCase):
             new_jar = dl / "SomeMod-1.7.10-1.1.0.jar"
             new_jar.write_bytes(JAR_BYTES)
             cand = DownloadCandidate(new_jar.as_uri(), new_jar.name)
-            result = update_with_backup(cand, mods, tmp / "backup",
-                                        old_file=old, backup_keep=2,
-                                        dl_cache_dir=tmp / "dlcache")
+            result, failed = update_with_backup(cand, mods, tmp / "backup",
+                                                old_file=old, backup_keep=2,
+                                                dl_cache_dir=tmp / "dlcache")
             self.assertTrue(result.exists())
+            self.assertEqual(failed, [])
             self.assertFalse(old.exists())  # 旧文件已移除（防双jar）
             backups = list((tmp / "backup").glob("*"))
             self.assertEqual(len(backups), 1)
             self.assertTrue(backups[0].name.endswith("SomeMod-1.7.10-1.0.0.jar"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_update_with_backup_locked_old_file(self):
+        # 旧文件被占用（unlink 失败）→ 新文件就位，旧文件残留并报告（防静默双jar）
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_lk_"))
+        try:
+            mods = tmp / "mods"
+            mods.mkdir()
+            old = mods / "SomeMod-1.7.10-1.0.0.jar"
+            old.write_bytes(b"PK\x03\x04old")
+            dl = tmp / "dl"
+            dl.mkdir()
+            new_jar = dl / "SomeMod-1.7.10-1.1.0.jar"
+            new_jar.write_bytes(JAR_BYTES)
+            cand = DownloadCandidate(new_jar.as_uri(), new_jar.name)
+            from unittest.mock import patch
+            with patch.object(Path, "unlink", side_effect=PermissionError("locked")):
+                dest, failed = update_with_backup(cand, mods, tmp / "backup",
+                                                  old_file=old,
+                                                  dl_cache_dir=tmp / "dlcache")
+            self.assertTrue(dest.exists())
+            self.assertTrue(old.exists())  # 占用中未删成
+            self.assertEqual(failed, ["SomeMod-1.7.10-1.0.0.jar"])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

@@ -16,6 +16,11 @@ wiki 没有的 mod 可通过**自定义源**（GitHub 仓库 / 本地文件夹 /
 
 要求：Windows + Python 3.10+（安装时勾选 py 启动器）。**不需要 pip 安装任何包。**
 
+推荐（可选）：`py -m pip install --user curl_cffi`。wiki 站开启 Cloudflare 人机验证后，
+程序直连会按 TLS 指纹被拦截；装了 curl_cffi 后刷新会模拟浏览器指纹直连（首选通道，
+无需人工过验证）。未安装时依次尝试 api.php / 系统 curl / 原始通道，均被拦截则回退
+本地缓存；也可在设置里导入浏览器 Cookie（cf_clearance + 配套 UA）绕过，见下方「Wiki 反爬」。
+
 非交互模式（可配合 Windows 任务计划每日自动检查）：
 
 ```
@@ -92,6 +97,19 @@ py -m gtnhmod cli --update-all   # 直接更新全部可更新的mod
 - `backup/` — 更新前旧版本备份（菜单 9 可恢复）
 - `logs/operations.log` — **操作日志**：安装/更新/恢复备份/启用禁用/锁定/剔除/注册等
   全部落盘记录（超过 2MB 自动轮转为 .old）；CLI 菜单 10 / GUI 设置页有"打开操作日志"入口
+
+## Wiki 反爬（Cloudflare）
+
+wiki 站开启 Cloudflare 人机验证后，程序直连会收到"请稍候…"验证页或 403。三层应对：
+
+1. **curl_cffi 通道（推荐）**：`py -m pip install --user curl_cffi`，刷新时模拟浏览器
+   TLS 指纹直连，实测无需人工过验证。
+2. **浏览器 Cookie 导入**：在浏览器里打开 wiki 并通过一次验证 → F12 → Network →
+   刷新页面 → 点第一个文档请求 → 右键 Copy → Copy as cURL → GUI 设置页
+   「从剪贴板导入 cURL」（CLI 菜单 10 → Wiki反爬Cookie）。cf_clearance 与浏览器的
+   User-Agent/出口 IP 绑定，过期后重新导入即可。
+3. **本地缓存兜底**：全部通道失败时自动使用最近一次成功抓取的数据，并在刷新时提示。
+   解析结果为空时刷新会直接中止合并，绝不误删本地条目。
 
 ## 已知限制与风险提示
 

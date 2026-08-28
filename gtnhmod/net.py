@@ -42,7 +42,8 @@ def _opener_for(proxy_cfg):
 
 def _note_rate_limit(headers: dict) -> None:
     global rate_remaining
-    v = headers.get("X-RateLimit-Remaining")
+    v = next((value for key, value in headers.items()
+              if key.lower() == "x-ratelimit-remaining"), None)
     if v is not None:
         try:
             rate_remaining = int(v)

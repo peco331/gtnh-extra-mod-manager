@@ -284,6 +284,12 @@ class TestMergeCustomCollision(unittest.TestCase):
                                       "asset_regex": "", "exclude_regex": ""}})
             self.assertIsNotNone(db.get("worldedit"))
             changes = db.merge_wiki(self._fresh())
+            # 下载页发布时间不是wiki字段，刷新wiki后仍保留
+            e = db.get("worldedit")
+            e["release_date"] = "2026-08-17T12:00:00Z"
+            db.save()
+            db.merge_wiki(self._fresh())
+            self.assertEqual(db.get("worldedit")["release_date"], "2026-08-17T12:00:00Z")
             # 无重复id；自定义被合并进wiki条目；用户字段（中文名/源）保留
             ids = [m["id"] for m in db.mods]
             self.assertEqual(len(ids), len(set(ids)))
@@ -317,6 +323,52 @@ class TestMergeCustomCollision(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestEmptyFreshGuard(unittest.TestCase):
+    """wiki 解析结果为空时必须中止合并（Cloudflare 验证页事故防护）。"""
+
+    def _fresh(self):
+        mods, _ = parse_wikitext(FIXTURE.read_text(encoding="utf-8"))
+        return mods
+
+    def test_empty_fresh_aborts_merge(self):
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_ef_"))
+        try:
+            from gtnhmod.db import ModsDB
+            db = ModsDB(tmp / "mods_db.json")
+            db.merge_wiki(self._fresh())
+            before = (tmp / "mods_db.json").read_text(encoding="utf-8")
+            with self.assertRaises(ValueError):
+                db.merge_wiki([])
+            # 合并被取消：磁盘文件与内存条目都不能有任何改动
+            self.assertEqual((tmp / "mods_db.json").read_text(encoding="utf-8"), before)
+            self.assertFalse(any(m.get("wiki_removed") for m in db.mods))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestRefreshReleaseDates(unittest.TestCase):
+    def test_refreshes_github_dates_without_downloading(self):
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_release_date_"))
+        try:
+            from types import SimpleNamespace
+            from unittest.mock import patch
+            from gtnhmod.config import Config
+            from gtnhmod.db import ModsDB
+            db = ModsDB(tmp / "mods_db.json")
+            db.add_custom({"name_en": "GithubMod", "source_type": "github",
+                           "source": {"owner": "o", "repo": "r"}})
+            db.add_custom({"name_en": "ManualMod", "source_type": "manual"})
+            fake = SimpleNamespace(published_at="2026-08-17T12:00:00Z")
+            with patch("gtnhmod.updater.Source.from_entry") as factory:
+                factory.return_value.check.return_value = fake
+                result = updater.refresh_release_dates(Config(tmp / "data"), db)
+            self.assertEqual(result, {"updated": 1, "failed": 0})
+            self.assertEqual(db.get("githubmod")["release_date"], fake.published_at)
+            self.assertNotIn("release_date", db.get("manualmod"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestBindSource(unittest.TestCase):
     """多下载链接mod绑定下载源。"""
 
@@ -324,6 +376,30 @@ class TestBindSource(unittest.TestCase):
     def setUpClass(cls):
         mods, _ = parse_wikitext(FIXTURE.read_text(encoding="utf-8"))
         cls.wiki_mods = mods
+
+    def test_add_custom_curseforge(self):
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_cf_custom_"))
+        try:
+            from gtnhmod.db import ModsDB
+            db = ModsDB(tmp / "mods_db.json")
+            mid = db.add_custom({
+                "name_en": "CustomCF", "source_type": "curseforge",
+                "curseforge_url": "https://www.curseforge.com/minecraft/mc-mods/custom-cf",
+            })
+            e = db.get(mid)
+            self.assertEqual(e["source_type"], "curseforge")
+            self.assertEqual(e["urls"]["curseforge"],
+                             "https://www.curseforge.com/minecraft/mc-mods/custom-cf")
+            self.assertEqual(e["urls"]["links"][0]["label"], "curseforge")
+            db.update_custom(mid, {"name_en": "EditedCF", "side": "client",
+                                   "source_type": "manual", "source": {},
+                                   "urls": {"curseforge": None, "links": []}})
+            edited = db.get(mid)
+            self.assertEqual(edited["name_en"], "EditedCF")
+            self.assertEqual(edited["side"], "client")
+            self.assertEqual(edited["source_type"], "manual")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_bind_github(self):
         tmp = Path(tempfile.mkdtemp(prefix="gtnh_bind_"))

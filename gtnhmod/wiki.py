@@ -45,12 +45,61 @@ def _referer(cfg) -> str:
     return f"{base}/wiki/{urllib.parse.quote(cfg.wiki_page)}"
 
 
+def _wiki_headers(cfg) -> dict:
+    """请求头：Referer 必带；配置了反爬 Cookie 时带上（cf_clearance 与 UA/IP 绑定）。"""
+    headers = {"Referer": _referer(cfg)}
+    cookie = getattr(cfg, "wiki_cookie", "") or ""
+    ua = getattr(cfg, "wiki_ua", "") or ""
+    if cookie:
+        headers["Cookie"] = cookie
+    if ua:
+        headers["User-Agent"] = ua
+    return headers
+
+
+def _cffi_proxies(cfg):
+    p = cfg.proxy
+    if p and p.get("host"):
+        auth = f'{p["user"]}:{p.get("pass", "")}@' if p.get("user") else ""
+        url = f'http://{auth}{p["host"]}:{p.get("port", 8080)}'
+        return {"http": url, "https": url}
+    return None
+
+
+def _fetch_impersonate_wikitext(cfg) -> str:
+    """通道0（首选）：curl_cffi 模拟浏览器 TLS 指纹。
+
+    Cloudflare 按客户端 TLS 指纹拦截（实测 urllib/curl 一律 403），模拟浏览
+    器指纹可直接通过，无需人工过验证。curl_cffi 为可选依赖
+    （py -m pip install --user curl_cffi），未安装时走后续通道。
+    """
+    try:
+        from curl_cffi import requests as cffi_requests
+    except ImportError:
+        raise net.HttpError(-4, "未安装 curl_cffi")
+    base = cfg.wiki_url.rsplit("/api.php", 1)[0]
+    url = f'{base}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw'
+    try:
+        kw = {"impersonate": "chrome", "timeout": 30, "headers": _wiki_headers(cfg)}
+        proxies = _cffi_proxies(cfg)
+        if proxies:
+            kw["proxies"] = proxies
+        r = cffi_requests.get(url, **kw)
+    except net.HttpError:
+        raise
+    except Exception as e:
+        raise net.HttpError(-1, f"curl_cffi 请求失败: {e}")
+    if r.status_code != 200:
+        raise net.HttpError(r.status_code if r.status_code < 500 else -1,
+                            f"{url} -> HTTP {r.status_code}")
+    return r.text
+
+
 def _fetch_api_wikitext(cfg) -> str:
     """通道1：MediaWiki API（action=parse，带 Referer，UA 必需否则 403）。"""
     url = (f'{cfg.wiki_url}?action=parse&page={urllib.parse.quote(cfg.wiki_page)}'
            f'&format=json&prop=wikitext')
-    raw = net.http_get(url, retries=0, proxy=cfg.proxy,
-                       headers={"Referer": _referer(cfg)})
+    raw = net.http_get(url, retries=0, proxy=cfg.proxy, headers=_wiki_headers(cfg))
     return json.loads(raw)["parse"]["wikitext"]["*"]
 
 
@@ -58,8 +107,7 @@ def _fetch_raw_wikitext(cfg) -> str:
     """通道2（备用）：action=raw 直接返回 wikitext，api.php 被临时限流时可用。"""
     base = cfg.wiki_url.rsplit("/api.php", 1)[0]
     url = f'{base}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw'
-    return net.http_get(url, retries=0, proxy=cfg.proxy,
-                        headers={"Referer": _referer(cfg)})
+    return net.http_get(url, retries=0, proxy=cfg.proxy, headers=_wiki_headers(cfg))
 
 
 def _fetch_curl_wikitext(cfg) -> str:
@@ -75,7 +123,11 @@ def _fetch_curl_wikitext(cfg) -> str:
         raise net.HttpError(-1, "系统无 curl")
     base = cfg.wiki_url.rsplit("/api.php", 1)[0]
     url = f'{base}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw'
-    cmd = [curl, "-sS", "-m", "30", "-A", net.USER_AGENT, "-e", _referer(cfg)]
+    ua = getattr(cfg, "wiki_ua", "") or net.USER_AGENT
+    cmd = [curl, "-sS", "-f", "-m", "30", "-A", ua, "-e", _referer(cfg)]
+    cookie = getattr(cfg, "wiki_cookie", "") or ""
+    if cookie:
+        cmd += ["-b", cookie]
     proxy = cfg.proxy
     if proxy and proxy.get("host"):
         auth = f'{proxy["user"]}:{proxy["pass"]}@' if proxy.get("user") else ""
@@ -94,17 +146,36 @@ def _wiki_cache_file(cfg):
     return cfg.data_dir / "cache" / "wiki_wikitext.txt"
 
 
+def _validate_wikitext(text: str) -> None:
+    """校验抓到的确实是页面 wikitext，不是验证页/错误页。
+
+    站点启用 Cloudflare 人机验证后，验证页以 HTTP 200 返回（curl 不加 -f 时
+    退出码也是 0），会被各通道当成抓取成功——曾导致验证页覆盖本地缓存、
+    解析结果为空、刷新时全部条目被误标记为 wiki 已删除。
+    """
+    if "Just a moment" in text or "_cf_chl_opt" in text:
+        raise net.HttpError(-3, "wiki 站点要求 Cloudflare 人机验证，暂时无法抓取")
+    if TEMPLATE_NAME not in text:
+        raise net.HttpError(-3, "返回内容不是页面 wikitext（缺少模板「可添加MOD表格行」），"
+                                "可能被反爬拦截或页面结构变更")
+
+
 def fetch_wikitext(cfg):
     """抓取页面 wikitext，返回 (wikitext, 缓存说明|None)。
 
-    依次尝试 api.php → curl+action=raw → urllib+action=raw，带 4s/8s 退避
-    （该站对连续请求限流敏感）；全部失败时回退到最近一次成功抓取的本地缓存。
+    依次尝试 curl_cffi(浏览器TLS指纹) → api.php → curl+action=raw →
+    urllib+action=raw，带 4s/8s 退避（该站对连续请求限流敏感）；
+    全部失败时回退到最近一次成功抓取的本地缓存。
+    内容先经 _validate_wikitext 校验，未通过不写缓存、继续换下一通道。
     """
-    fetchers = (_fetch_api_wikitext, _fetch_curl_wikitext, _fetch_raw_wikitext)
+    fetchers = (_fetch_impersonate_wikitext, _fetch_api_wikitext,
+                _fetch_curl_wikitext, _fetch_raw_wikitext)
     errors = []
+    code = None
     for i, fn in enumerate(fetchers):
         try:
             text = fn(cfg)
+            _validate_wikitext(text)
             try:  # 成功后写本地缓存（失败兜底用）
                 cache_file = _wiki_cache_file(cfg)
                 cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -113,13 +184,14 @@ def fetch_wikitext(cfg):
                 pass
             return text, None
         except net.HttpError as e:
-            if e.code not in (403, 429, -1):
+            if e.code not in (403, 404, 429, -1, -3, -4):
                 raise
-            errors.append(f"HTTP {e.code}")
+            code = e.code
+            errors.append(str(e))
         except (ValueError, KeyError) as e:
             errors.append(str(e))
-        if i < len(fetchers) - 1:
-            time.sleep(4 + i * 4)  # 4s、8s 退避（该站限流对连续请求敏感）
+        if i < len(fetchers) - 1 and code != -4:  # 未装可选依赖时不退避
+            time.sleep(4 + i * 4)  # 4s、8s、12s 退避（该站限流对连续请求敏感）
     # 全部失败 → 最近一次成功抓取的本地缓存兜底
     cache_file = _wiki_cache_file(cfg)
     if cache_file.exists():

@@ -196,8 +196,8 @@ def build_registry(cfg, db, installed) -> dict:
                 "locked": bool(inst.get("locked")),
                 "status": status,
                 "latest_version": latest,
-                # 安装时间：jar 文件时间（覆盖所有mod）→ 退回工具记录的安装时间
-                "install_time": _install_time_str(f.path, inst),
+                # 本地更新时间：jar 文件时间与工具记录时间取较新者
+                "install_time": _local_update_str(f.path, inst),
             }
             if len(ordered) > 1:
                 st["duplicates"] = [x.file_name for x in ordered[1:]]
@@ -253,12 +253,18 @@ def build_merged_registry(cfg, db, installed) -> list:
     return out
 
 
-def _install_time_str(path: Path, inst: dict) -> str:
-    """安装时间字符串：优先 jar 文件时间（覆盖所有mod），退回工具记录的安装时间。"""
+def _local_update_str(path: Path, inst: dict) -> str:
+    """本地更新时间：jar 文件时间与工具记录时间取较新者（ISO 字符串可直接比较）。
+
+    文件时间覆盖手动替换的场景；工具记录（updated_at/install_date）覆盖
+    restore/回滚等 copy2 保留旧 mtime 的场景。
+    """
     try:
-        return utils.fmt_ts(path.stat().st_mtime)
+        mtime = utils.fmt_ts(path.stat().st_mtime)
     except OSError:
-        return (inst.get("install_date") or "")[:16]
+        mtime = ""
+    rec = (inst.get("updated_at") or inst.get("install_date") or "")[:16]
+    return max((x for x in (mtime, rec) if x), default="")
 
 
 def _sort_files_by_version(files: list) -> list:
@@ -296,19 +302,41 @@ def backup_and_remove_extra(cfg, db, side: str, mod_id: str, extra) -> bool:
         extra.path.unlink()
         _log_op(cfg, f"{SIDE_LABELS[side]} 清理重复jar {extra.file_name}（已备份）")
         return True
-    except OSError:
+    except PermissionError:
+        _log_op(cfg, f"{SIDE_LABELS[side]} 清理重复jar失败（文件被占用，请关闭游戏/服务端后重试）: {extra.file_name}")
+        return False
+    except OSError as e:
+        _log_op(cfg, f"{SIDE_LABELS[side]} 清理重复jar失败: {extra.file_name}（{e}）")
         return False
 
 
 def cleanup_duplicates(cfg, db, installed, mod_id: str) -> dict:
-    """清理某mod在所有端别的重复jar（只保留版本最高者）。返回结果dict。"""
-    cleaned = []
+    """清理某mod在所有端别的重复jar。返回结果dict。
+
+    保留文件：优先工具记录（installed.json file_name，回滚后的版本意图），
+    记录缺失/文件不在磁盘时退回版本最高者。
+    """
+    cleaned, skipped, kept = [], [], []
     for side in SIDES:
         hits = find_installed_files(cfg, db, side, mod_id)
-        for extra in hits[1:]:
+        if not hits:
+            continue
+        keep = hits[0]  # 版本最高者
+        rec_name = (installed.get(side, mod_id) or {}).get("file_name")
+        for h in hits:
+            if h.file_name == rec_name:
+                keep = h
+                break
+        kept.append(f"{SIDE_LABELS[side]}: {keep.file_name}")
+        for extra in hits:
+            if extra is keep:
+                continue
             if backup_and_remove_extra(cfg, db, side, mod_id, extra):
                 cleaned.append(f"{SIDE_LABELS[side]}: {extra.file_name}")
-    return {"action": "cleaned" if cleaned else "none", "cleaned": cleaned}
+            else:
+                skipped.append(f"{SIDE_LABELS[side]}: {extra.file_name}")
+    return {"action": "cleaned" if cleaned else "none",
+            "cleaned": cleaned, "skipped": skipped, "kept": kept}
 
 
 def auto_install_sides(entry: dict, cfg) -> tuple:
@@ -367,6 +395,32 @@ def _side_warning(entry: dict, side: str) -> str:
 
 
 # ---------- 检查更新 ----------
+
+def refresh_release_dates(cfg, db, *, progress_cb=None) -> dict:
+    """刷新所有 GitHub 源的最新版发布时间，供可添加列表排序。
+
+    force=False，优先使用 GitHub 缓存，只有缓存过期/不存在时才请求网络。
+    返回 {updated, failed} 数量。
+    """
+    updated = failed = 0
+    for entry in db.all():
+        if entry.get("source_type") != "github":
+            continue
+        try:
+            info = Source.from_entry(entry, cfg).check(None, force=False)
+            if info.published_at and entry.get("release_date") != info.published_at:
+                entry["release_date"] = info.published_at
+                updated += 1
+            if progress_cb:
+                progress_cb(entry.get("id"), info.published_at)
+        except Exception:
+            failed += 1
+            if progress_cb:
+                progress_cb(entry.get("id"), None)
+    if updated:
+        db.save()
+    return {"updated": updated, "failed": failed}
+
 
 def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
                   progress_cb=None, only=None) -> list:
@@ -468,7 +522,7 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
     _touch_release_date(db, entry, info.published_at)
     old = find_installed_file(cfg, db, side, mod_id)
     try:
-        dest = downloader.update_with_backup(
+        dest, unremoved = downloader.update_with_backup(
             cand, folder, cfg.backup_dir / side / mod_id,
             old_file=old.path if old else None, backup_keep=cfg.backup_keep,
             progress_cb=progress_cb, proxy=cfg.proxy, dl_cache_dir=cfg.cache_dir)
@@ -480,13 +534,16 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
         return {"action": "error", "error": f"下载/安装失败: {e}"}
     ver = split_mc_mod_version(dest.stem)[2] or info.latest_version or "?"
     installed.set(side, mod_id, file_name=dest.name, parsed_version=ver,
-                  install_date=utils.now_str(), last_remote_version=info.latest_version,
-                  last_checked=utils.now_str())
+                  install_date=utils.now_str(), updated_at=utils.now_str(),
+                  last_remote_version=info.latest_version, last_checked=utils.now_str())
     _learn_asset_name(db, entry, dest.name)
     _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {entry.get('name_en') or mod_id} v{ver}（{dest.name}）")
-    _cleanup_extras(cfg, db, side, mod_id, dest)
-    return {"action": "installed", "file": dest.name, "version": ver,
-            "warning": warn, "note": info.note, "body": info.release_body}
+    leftover = _cleanup_extras(cfg, db, side, mod_id, dest, unremoved)
+    result = {"action": "installed", "file": dest.name, "version": ver,
+              "warning": warn, "note": info.note, "body": info.release_body}
+    if leftover:
+        result["leftover"] = leftover
+    return result
 
 
 def current_source_url(entry: dict) -> str:
@@ -559,12 +616,23 @@ def _touch_release_date(db, entry: dict, published_at) -> None:
     db.save()
 
 
-def _cleanup_extras(cfg, db, side: str, mod_id: str, dest: Path) -> None:
-    """新文件就位后，把同mod的其他jar备份并移除（防双jar冲突）。"""
+def _cleanup_extras(cfg, db, side: str, mod_id: str, dest: Path,
+                    failed: list = None) -> list:
+    """新文件就位后，把同mod的其他jar备份并移除（防双jar冲突）。
+
+    failed 传入已知未能移除的文件名（重试成功的会从中移除）。
+    返回最终未能移除的文件名列表（文件被占用等）。
+    """
+    failed = list(failed or [])
     for extra in find_installed_files(cfg, db, side, mod_id):
         if extra.path.resolve() == dest.resolve():
             continue
-        backup_and_remove_extra(cfg, db, side, mod_id, extra)
+        if backup_and_remove_extra(cfg, db, side, mod_id, extra):
+            if extra.file_name in failed:
+                failed.remove(extra.file_name)
+        elif extra.file_name not in failed:
+            failed.append(extra.file_name)
+    return failed
 
 
 def update_mod(cfg, db, installed, mod_id: str, side: str, *,
@@ -616,7 +684,7 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
     _touch_release_date(db, entry, info.published_at)
     cand = info.candidates[0]
     try:
-        dest = downloader.update_with_backup(
+        dest, unremoved = downloader.update_with_backup(
             cand, folder, cfg.backup_dir / side / mod_id,
             old_file=old.path, backup_keep=cfg.backup_keep,
             progress_cb=progress_cb, proxy=cfg.proxy, dl_cache_dir=cfg.cache_dir)
@@ -628,13 +696,17 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
         return {"action": "error", "error": f"下载/更新失败: {e}"}
     ver = split_mc_mod_version(dest.stem)[2] or info.latest_version or "?"
     installed.set(side, mod_id, file_name=dest.name, parsed_version=ver,
+                  updated_at=utils.now_str(),
                   last_remote_version=info.latest_version, last_checked=utils.now_str())
     _learn_asset_name(db, entry, dest.name)
     _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id}: "
                  f"v{old.version or '?'} → v{ver}（{dest.name}）")
-    _cleanup_extras(cfg, db, side, mod_id, dest)
-    return {"action": "updated", "from": old.version or "?", "to": ver,
-            "file": dest.name, "note": info.note, "body": info.release_body}
+    leftover = _cleanup_extras(cfg, db, side, mod_id, dest, unremoved)
+    result = {"action": "updated", "from": old.version or "?", "to": ver,
+              "file": dest.name, "note": info.note, "body": info.release_body}
+    if leftover:
+        result["leftover"] = leftover
+    return result
 
 
 def update_all(cfg, db, installed, *, sides=SIDES, progress_cb=None) -> list:
@@ -780,7 +852,7 @@ def restore_backup(cfg, db, installed, side: str, backup_path: Path) -> dict:
     old = find_installed_file(cfg, db, side, mod_id)
     cand = sources.DownloadCandidate(str(backup_path), name)
     try:
-        dest = downloader.update_with_backup(
+        dest, unremoved = downloader.update_with_backup(
             cand, folder, cfg.backup_dir / side / mod_id,
             old_file=old.path if old else None, backup_keep=cfg.backup_keep,
             dl_cache_dir=cfg.cache_dir)
@@ -789,10 +861,49 @@ def restore_backup(cfg, db, installed, side: str, backup_path: Path) -> dict:
     except Exception as e:
         return {"action": "error", "error": f"恢复失败: {e}"}
     ver = split_mc_mod_version(dest.stem)[2] or ""
-    installed.set(side, mod_id, file_name=dest.name, parsed_version=ver)
+    installed.set(side, mod_id, file_name=dest.name, parsed_version=ver,
+                  updated_at=utils.now_str())
     entry = db.get(mod_id) or {}
     _log_op(cfg, f"{SIDE_LABELS[side]} 恢复备份 {entry.get('name_en') or mod_id} → {dest.name}")
-    return {"action": "restored", "file": dest.name}
+    result = {"action": "restored", "file": dest.name}
+    # 回滚后同样清理旧版本残留（占用失败会报告，防静默双jar）
+    leftover = _cleanup_extras(cfg, db, side, mod_id, dest, unremoved)
+    if leftover:
+        result["leftover"] = leftover
+    return result
+
+
+def rollback_mod(cfg, db, installed, mod_id: str, *, sides: tuple = SIDES) -> list:
+    """一键回滚到更新前版本，双端版本保持一致。
+
+    取所有端别备份中最新的一份作为目标版本，在已安装该mod的每个端别上恢复
+    同一份备份（本端无该备份时直接复用），保证双端同版本。
+    返回 [{side, action(restored/nobackup/error), ...}]。
+    """
+    # 最新备份取文件创建时间：同秒内多次备份时，文件名字典序
+    # （_1_ 序号 < 字母）不能反映先后；copy2 保留源 mtime 也不可用
+    def backup_key(p):
+        try:
+            return (p.stat().st_ctime_ns, p.name)
+        except OSError:
+            return (0, p.name)
+
+    all_jars = []
+    for side in sides:
+        bak_dir = cfg.backup_dir / side / mod_id
+        if bak_dir.is_dir():
+            all_jars += [p for p in bak_dir.glob("*.jar") if p.is_file()]
+    if not all_jars:
+        return [{"side": side, "action": "nobackup"} for side in sides]
+    src = max(all_jars, key=backup_key)
+    results = []
+    for side in sides:
+        if not find_installed_file(cfg, db, side, mod_id):
+            continue  # 该端别未安装，跳过（只回滚已安装的端别）
+        r = restore_backup(cfg, db, installed, side, src)
+        r["side"], r["backup_file"] = side, src.name
+        results.append(r)
+    return results
 
 
 # ---------- 未受管 ----------

@@ -7,11 +7,30 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from gtnhmod import net  # noqa: E402
 from gtnhmod.wiki import (  # noqa: E402
     parse_side, parse_urls, parse_wikitext, strip_markup, github_repo_from_url, make_id,
+    _validate_wikitext,
 )
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "wiki_sample.txt"
+
+
+class TestWikitextValidation(unittest.TestCase):
+    """抓取内容校验：Cloudflare 验证页/错误页不得被当成抓取成功。"""
+
+    def test_rejects_cloudflare_challenge_page(self):
+        html = ('<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title>'
+                '</head><script>window._cf_chl_opt = {cRay: "abc"};</script></html>')
+        with self.assertRaises(net.HttpError):
+            _validate_wikitext(html)
+
+    def test_rejects_other_non_wikitext(self):
+        with self.assertRaises(net.HttpError):
+            _validate_wikitext("<html>500 Internal Server Error</html>")
+
+    def test_accepts_real_wikitext(self):
+        _validate_wikitext(FIXTURE.read_text(encoding="utf-8"))
 
 
 class TestWikiParse(unittest.TestCase):
@@ -123,10 +142,32 @@ class TestFetchFallback(unittest.TestCase):
 
     @staticmethod
     def _no_curl():
-        """测试中禁用真实 curl 通道（避免打到真实网络）。"""
+        """测试中禁用 curl_cffi/curl 通道（避免打到真实网络）。"""
         import gtnhmod.wiki as W
-        return mock.patch.object(W, "_fetch_curl_wikitext",
-                                 side_effect=W.net.HttpError(-1, "no curl"))
+        return mock.patch.multiple(
+            W,
+            _fetch_impersonate_wikitext=mock.MagicMock(
+                side_effect=W.net.HttpError(-4, "no curl_cffi")),
+            _fetch_curl_wikitext=mock.MagicMock(
+                side_effect=W.net.HttpError(-1, "no curl")))
+
+    def test_impersonate_channel_tried_first(self):
+        """curl_cffi 模拟指纹通道排在最前：它成功时不触发退避、不打其他通道。"""
+        from contextlib import ExitStack
+        import gtnhmod.wiki as W
+        good = "== 星门规则模组 ==\n{{可添加MOD表格行|模组英文名=X}}"
+        with ExitStack() as es:
+            ch = es.enter_context(mock.patch.object(
+                W, "_fetch_impersonate_wikitext", return_value=good))
+            slept = es.enter_context(mock.patch.object(W.time, "sleep"))
+            for name in ("_fetch_api_wikitext", "_fetch_curl_wikitext", "_fetch_raw_wikitext"):
+                es.enter_context(mock.patch.object(
+                    W, name, side_effect=AssertionError("不应回退到后续通道")))
+            text, cached = W.fetch_wikitext(self._cfg())
+        self.assertEqual(text, good)
+        self.assertIsNone(cached)
+        self.assertEqual(slept.call_count, 0)  # 首通道即成功，无退避
+        self.assertEqual(ch.call_count, 1)
 
     def test_fallback_to_raw_on_403(self):
         import gtnhmod.wiki as W
@@ -136,12 +177,12 @@ class TestFetchFallback(unittest.TestCase):
             calls.append(url)
             if "api.php" in url:
                 raise W.net.HttpError(403, "Forbidden")
-            return "== 星门规则模组 ==\nok"
+            return "== 星门规则模组 ==\n{{可添加MOD表格行|模组英文名=X}}"
 
         with mock.patch.object(W.net, "http_get", side_effect=fake_get), \
                 mock.patch.object(W.time, "sleep"), self._no_curl():
             text, cached = W.fetch_wikitext(self._cfg())
-        self.assertEqual(text, "== 星门规则模组 ==\nok")
+        self.assertEqual(text, "== 星门规则模组 ==\n{{可添加MOD表格行|模组英文名=X}}")
         self.assertIsNone(cached)
         self.assertTrue(any("action=raw" in c for c in calls))
 
@@ -153,12 +194,12 @@ class TestFetchFallback(unittest.TestCase):
             calls.append(url)
             if "api.php" in url:
                 return "<html>blocked page</html>"  # 200但非JSON
-            return "raw content"
+            return "{{可添加MOD表格行|模组英文名=X}}"
 
         with mock.patch.object(W.net, "http_get", side_effect=fake_get), \
                 mock.patch.object(W.time, "sleep"), self._no_curl():
             text, cached = W.fetch_wikitext(self._cfg())
-        self.assertEqual(text, "raw content")
+        self.assertEqual(text, "{{可添加MOD表格行|模组英文名=X}}")
 
     def test_all_fail_uses_cache(self):
         import gtnhmod.wiki as W
@@ -187,6 +228,69 @@ class TestFetchFallback(unittest.TestCase):
             with self.assertRaises(W.net.HttpError) as ctx:
                 W.fetch_wikitext(self._cfg())
         self.assertIn("限流", str(ctx.exception))
+
+    def test_challenge_page_rejected_uses_cache(self):
+        """Cloudflare 验证页(HTTP 200)不得被当成成功：不覆盖缓存、回退旧缓存。"""
+        import gtnhmod.wiki as W
+        cfg = self._cfg()
+        cache = W._wiki_cache_file(cfg)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        good = "cached {{可添加MOD表格行}} wikitext"
+        cache.write_text(good, encoding="utf-8")
+        challenge = ('<html><title>Just a moment...</title>'
+                     '<script>window._cf_chl_opt = {cRay: "abc"};</script></html>')
+
+        def fake_get(url, *, headers=None, timeout=30, retries=2, binary=False, proxy=None):
+            return challenge  # 各通道都"成功"返回验证页
+
+        with mock.patch.object(W.net, "http_get", side_effect=fake_get), \
+                mock.patch.object(W.time, "sleep"), self._no_curl():
+            text, cached = W.fetch_wikitext(cfg)
+        self.assertEqual(text, good)
+        self.assertIn("限流", cached)
+        self.assertEqual(cache.read_text(encoding="utf-8"), good)  # 缓存未被验证页覆盖
+
+    def test_challenge_page_no_cache_raises(self):
+        """无缓存兜底时，验证页必须显式报错而不是返回空解析结果。"""
+        import gtnhmod.wiki as W
+        challenge = '<html><title>Just a moment...</title></html>'
+
+        def fake_get(url, *, headers=None, timeout=30, retries=2, binary=False, proxy=None):
+            return challenge
+
+        with mock.patch.object(W.net, "http_get", side_effect=fake_get), \
+                mock.patch.object(W.time, "sleep"), self._no_curl():
+            with self.assertRaises(W.net.HttpError):
+                W.fetch_wikitext(self._cfg())
+
+
+class TestWikiHeaders(unittest.TestCase):
+    """反爬 Cookie/UA 应合并进各通道请求头（未配置时不添加）。"""
+
+    @staticmethod
+    def _cfg(**kw):
+        import tempfile
+        from types import SimpleNamespace
+        base = dict(proxy=None,
+                    wiki_url="https://gtnh.huijiwiki.com/api.php",
+                    wiki_page="可添加MOD",
+                    data_dir=Path(tempfile.mkdtemp(prefix="gtnh_hd_")))
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_headers_without_cookie(self):
+        import gtnhmod.wiki as W
+        h = W._wiki_headers(self._cfg())
+        self.assertIn("Referer", h)
+        self.assertNotIn("Cookie", h)
+        self.assertNotIn("User-Agent", h)
+
+    def test_headers_with_cookie_and_ua(self):
+        import gtnhmod.wiki as W
+        h = W._wiki_headers(self._cfg(wiki_cookie="cf_clearance=abc",
+                                      wiki_ua="Mozilla/5.0 Test"))
+        self.assertEqual(h["Cookie"], "cf_clearance=abc")
+        self.assertEqual(h["User-Agent"], "Mozilla/5.0 Test")
 
 
 class TestHelpers(unittest.TestCase):

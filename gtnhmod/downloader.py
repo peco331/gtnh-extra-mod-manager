@@ -88,12 +88,12 @@ def _prune_backups(backup_dir: Path, file_name: str, keep: int) -> None:
 
 def update_with_backup(cand, dest_dir: Path, backup_dir: Path, *,
                        old_file: Path = None, backup_keep: int = 3,
-                       progress_cb=None, proxy=None, dl_cache_dir: Path = None) -> Path:
+                       progress_cb=None, proxy=None, dl_cache_dir: Path = None) -> tuple:
     """下载候选并替换安装（旧文件先备份，再移除）。
 
     - cand: DownloadCandidate
     - old_file: 当前已安装的旧 jar（文件名可能与新资产不同，需移除避免双jar冲突）
-    返回新文件 Path。
+    返回 (新文件 Path, 未能移除的旧文件名列表[文件被占用等])。
     """
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -125,12 +125,13 @@ def update_with_backup(cand, dest_dir: Path, backup_dir: Path, *,
         atomic_replace(tmp, target)
     except PermissionError:
         raise FileBusyError(f"文件被占用，请先关闭游戏/服务端: {target.name}")
-    # 新文件就位后移除旧文件（已备份）
+    # 新文件就位后移除旧文件（已备份）；占用失败时报告给调用方，避免静默双jar
+    failed = []
     for v in victims:
         if v.resolve() != target.resolve():
             try:
                 v.unlink()
             except OSError:
-                pass
+                failed.append(v.name)
     _prune_backups(backup_dir, target.name, backup_keep)
-    return target
+    return target, failed

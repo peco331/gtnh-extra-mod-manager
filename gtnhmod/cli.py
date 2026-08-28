@@ -81,7 +81,11 @@ class CliApp:
         except Exception as e:
             self.ui.error(f"抓取失败: {e}")
             return
-        changes = self.db.merge_wiki(mods)
+        try:
+            changes = self.db.merge_wiki(mods)
+        except Exception as e:
+            self.ui.error(f"合并失败: {e}")
+            return
         for w in warnings:
             self.ui.warn(w)
         if not changes:
@@ -666,6 +670,7 @@ class CliApp:
                 f"检查结果缓存时长: {self.cfg.check_interval_hours} 小时",
                 f"每mod保留备份数: {self.cfg.backup_keep}",
                 f"GTNH整合包版本（预留）: {self.cfg.data.get('gtnh_version') or '（未设置）'}",
+                f"Wiki反爬Cookie: {'已配置' if self.cfg.wiki_cookie else '（未配置，站点开启Cloudflare验证时需要）'}",
                 "恢复已排除/忽略的文件（重新显示）",
                 "打开操作日志文件",
             ]
@@ -721,6 +726,8 @@ class CliApp:
                 self.cfg.save()
                 self.ui.ok("已保存")
             elif idx == 7:
+                self.do_wiki_cookie()
+            elif idx == 8:
                 ignored = self.cfg.data.get("ignored_files") or []
                 if not ignored:
                     self.ui.info("没有被剔除/忽略的文件")
@@ -729,13 +736,52 @@ class CliApp:
                 if sel is not None:
                     updater.unignore(self.cfg, ignored[sel])
                     self.ui.ok("已取消忽略")
-            elif idx == 8:
+            elif idx == 9:
                 log_path = utils.log_file_path(self.cfg.data_dir)
                 if log_path.exists():
                     os.startfile(log_path)  # 用默认编辑器打开
                     self.ui.ok(f"已打开日志: {log_path}")
                 else:
                     self.ui.info("暂无操作日志（执行过安装/更新/开关等操作后生成）")
+
+    def do_wiki_cookie(self):
+        """wiki 站点开启 Cloudflare 人机验证时，导入浏览器验证后的 Cookie。"""
+        while True:
+            cur = self.cfg.wiki_cookie
+            options = [
+                f"设置/更新 Cookie（当前: {'已配置' if cur else '未配置'}）",
+                "测试抓取",
+                "清除",
+                "返回",
+            ]
+            idx = self.ui.choose("Wiki反爬Cookie（cf_clearance 与浏览器 UA/出口IP 绑定）:", options)
+            if idx in (None, 3):
+                return
+            if idx == 0:
+                self.ui.info("获取：浏览器打开 wiki 通过验证 → F12 → Network → 刷新 → 第一个文档请求 →"
+                             " Request Headers")
+                cookie = self.ui.input_text("粘贴 Cookie 整行（留空取消）", "")
+                if not cookie:
+                    continue
+                ua = self.ui.input_text("粘贴同一请求的 User-Agent 整行", "")
+                self.cfg.set_wiki_cookie(cookie, ua)
+                self.ui.ok("已保存")
+            elif idx == 1:
+                self.ui.info("正在测试 wiki 抓取...")
+                try:
+                    mods, warnings = wikimod.fetch_and_parse(self.cfg)
+                except Exception as e:
+                    self.ui.error(f"抓取失败: {e}")
+                    continue
+                for w in warnings:
+                    self.ui.warn(w)
+                if mods:
+                    self.ui.ok(f"成功：解析到 {len(mods)} 个mod")
+                else:
+                    self.ui.warn("抓取到内容但解析不到mod（Cookie 可能已过期或页面结构变更）")
+            elif idx == 2:
+                self.cfg.set_wiki_cookie("", "")
+                self.ui.ok("已清除")
 
     def _check_dirs(self) -> bool:
         if not self.cfg.client_mods_dir and not self.cfg.server_mods_dir:
