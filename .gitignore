@@ -15,3 +15,5 @@ __pycache__/
 # PyInstaller 构建产物
 build/
 dist/
+GTNHModManager.exe
+gtnh-cli.exe
