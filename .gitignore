@@ -17,3 +17,4 @@ build/
 dist/
 GTNHModManager.exe
 gtnh-cli.exe
+*.spec
