@@ -1,12 +1,60 @@
-"""通用工具：数据目录定位、JSON 原子读写、时间戳。"""
+"""通用工具：数据目录定位、JSON 原子读写、时间戳、跨进程文件锁。"""
+import contextlib
 import json
+import msvcrt
 import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
+
+_locks_guard = threading.Lock()
+_thread_locks: dict = {}   # 锁路径 → 线程级 RLock（同进程多线程互斥）
+_process_held: set = set() # 本进程已持有文件锁的路径（同线程嵌套直接放行）
+
+
+@contextlib.contextmanager
+def file_lock(path: Path, timeout: float = 10.0):
+    """跨进程写锁：GUI 与计划任务（cli --check）同时保存同一 JSON 时串行化。
+
+    线程安全（同路径线程互斥）且可重入（同线程嵌套调用不自杀）。
+    锁文件为 path + ".lock"（空文件，长期保留）；超时抛 TimeoutError。
+    Windows-only（msvcrt）。
+    """
+    key = str(Path(str(path) + ".lock").resolve())
+    with _locks_guard:
+        thread_lock = _thread_locks.setdefault(key, threading.RLock())
+    deadline = time.time() + timeout
+    with thread_lock:
+        need_file_lock = key not in _process_held
+        fd = None
+        if need_file_lock:
+            lock_path = Path(key)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+            while True:
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.time() >= deadline:
+                        os.close(fd)
+                        raise TimeoutError(f"获取文件锁超时: {lock_path}")
+                    time.sleep(0.05)
+            _process_held.add(key)
+        try:
+            yield
+        finally:
+            if need_file_lock:
+                _process_held.discard(key)
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+                os.close(fd)
 
 
 def clean_orphan_tmp(root: Path, keep_seconds: float = 86400) -> int:
@@ -79,13 +127,14 @@ def fmt_ts(ts: float) -> str:
 
 
 def atomic_write_json(path: Path, data) -> None:
-    """原子写入 JSON：先写 .tmp 再 os.replace，防止半写损坏。"""
+    """JSON 原子写：先写临时文件再 os.replace，并持跨进程锁防写交错。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
+        with file_lock(path):
+            os.replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)

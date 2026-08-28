@@ -175,7 +175,9 @@ def split_mc_mod_version(stem: str):
             break
     if mc_idx is None:
         for i, p in enumerate(parts[:-1]):
-            if MC_VERSION_RE.match(p):
+            # 通用锚点要求 MC 段之后是 ASCII 版本段："dualhotbar-1.61-超长快捷栏"
+            # 的 1.61 不是 MC 版本，后面跟着的中文描述也不是版本号
+            if MC_VERSION_RE.match(p) and parts[i + 1].isascii():
                 mc_idx = i
                 break
     if mc_idx is not None:
@@ -200,6 +202,13 @@ def split_mc_mod_version(stem: str):
             continue
         if re.match(r"^[vV]?\d", p):
             suffix = "-".join(parts[i:])
-            if re.match(r"^[vV]?\d[\w.+]*(-[A-Za-z0-9.+]+)*$", suffix):
+            # 版本段只认 ASCII（\w 会把中文算进去，导致"dualhotbar-1.61-超长快捷栏"
+            # 整段被当成版本号）。ASCII 判定用显式字符集（含下划线），不用 \w。
+            if re.match(r"^[vV]?[0-9][\w.+-]*(-[\w.+-]+)*$", suffix) and suffix.isascii():
                 return ("-".join(parts[:i]) or None, None, suffix)
+            if not suffix.isascii():
+                # 版本段后跟着中文描述（"1.61-超长快捷栏"）→ 截取开头的 ASCII 版本
+                m = re.match(r"^[vV]?[0-9][A-Za-z0-9_.+-]*", suffix)
+                if m:
+                    return ("-".join(parts[:i]) or None, None, m.group(0).rstrip("-_.+"))
     return (stem or None, None, None)

@@ -102,17 +102,24 @@ def prune_backups(backup_dir: Path, keep: int) -> int:
 
     按整个备份目录清理而非按文件名匹配：备份保存的是旧 jar 的文件名，
     更新后文件名随版本号变化，按新文件名 glob 永远匹配不到旧备份，
-    会导致备份无限累积。.deleted 备份（删除操作移入）一并计入保留数。
+    会导致备份无限累积。
+    普通备份与 .deleted（删除mod移入）分成两个池各自保留 keep 份：
+    删除的 jar 不会因同 mod 之后几次更新而被挤掉，"删除可恢复"才成立。
     """
     files = backup_files(backup_dir)
-    excess = files[:max(0, len(files) - max(0, keep))]
+    pools = (
+        [p for p in files if not p.name.endswith(".deleted")],
+        [p for p in files if p.name.endswith(".deleted")],
+    )
     removed = 0
-    for p in excess:
-        try:
-            p.unlink()
-            removed += 1
-        except OSError:
-            pass
+    for pool in pools:
+        excess = pool[:max(0, len(pool) - max(0, keep))]
+        for p in excess:
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
     return removed
 
 

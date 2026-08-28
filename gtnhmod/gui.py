@@ -73,7 +73,10 @@ class GuiApp:
             t.bind("<Control-a>", lambda _e, tree=t: tree.selection_set(tree.get_children("")))
 
     def _on_close(self):
-        """退出前记忆窗口尺寸/位置。"""
+        """退出前取消挂起的防抖定时器（避免对已销毁控件的回调）并记忆窗口状态。"""
+        for attr in ("_inst_search_after", "_add_search_after", "_um_search_after"):
+            if getattr(self, attr, None):
+                self.root.after_cancel(getattr(self, attr))
         try:
             self.cfg.data["window_geometry"] = self.root.geometry()
             self.cfg.save()
@@ -104,6 +107,8 @@ class GuiApp:
         self.inst_search_entry.focus_set()
 
     def _refresh_current_tab(self):
+        if self.busy:
+            return  # 后台任务进行中，避免并发扫描/重绘
         (self.refresh_installed, self.refresh_addable,
          self.refresh_unmanaged, self.refresh_custom, lambda: None)[self.nb.index("current")]()
 
@@ -128,7 +133,7 @@ class GuiApp:
         self.nb.add(tab1, text="已安装MOD")
         self._build_installed_tab(tab1)
         tab2 = ttk.Frame(self.nb)
-        self.nb.add(tab2, text="可添加MOD列表")
+        self.nb.add(tab2, text="可添加MOD")
         self._build_addable_tab(tab2)
         tab3 = ttk.Frame(self.nb)
         self.nb.add(tab3, text="未受管MOD")
@@ -141,7 +146,7 @@ class GuiApp:
         self._build_settings_tab(tab5)
 
         bottom = ttk.Frame(main_pane)
-        main_pane.add(bottom, stretch="never", minsize=110)
+        main_pane.add(bottom, stretch="never", minsize=56)
         self.progress = ttk.Progressbar(bottom, mode="determinate")
         self.progress.pack(fill="x", side="top", padx=6, pady=(4, 0))
         log_bar = ttk.Frame(bottom)
@@ -149,16 +154,40 @@ class GuiApp:
         ttk.Label(log_bar, text="操作日志:").pack(side="left")
         ttk.Button(log_bar, text="清空", command=self.clear_log).pack(side="left", padx=4)
         ttk.Button(log_bar, text="打开日志文件", command=self._open_log_file).pack(side="left", padx=2)
+        # 日志区可折叠：浏览列表时收起省空间，状态存入配置
+        self.log_expanded = bool(self.cfg.data.get("log_expanded", True))
+        self.log_toggle_btn = ttk.Button(log_bar, text="收起日志 ▴",
+                                         command=self._toggle_log)
+        self.log_toggle_btn.pack(side="right")
         log_frame = ttk.Frame(bottom)
-        log_frame.pack(fill="both", expand=True, padx=6)
         self.log = tk.Text(log_frame, height=8, font=("Consolas", 9),
                            state="disabled", wrap="word")
         self.log.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.log, log_frame)
+        self.log_frame = log_frame
+        self._apply_log_layout()
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(bottom, textvariable=self.status_var, font=FONT,
                   anchor="w").pack(fill="x", padx=8, pady=(2, 4))
-        self._log("就绪。首次使用请先到「设置」配置两端 mods 目录；mod 数据请点「可添加列表」页的刷新按钮获取。")
+        if not self.cfg.client_mods_dir and not self.cfg.server_mods_dir:
+            self._log("就绪。首次使用请先到「设置」配置两端 mods 目录；"
+                      "mod 数据请点「可添加MOD」页的刷新按钮获取。")
+        else:
+            self._log("就绪。")
+
+    def _toggle_log(self):
+        self.log_expanded = not self.log_expanded
+        self.cfg.data["log_expanded"] = self.log_expanded
+        self.cfg.save()
+        self._apply_log_layout()
+
+    def _apply_log_layout(self):
+        if self.log_expanded:
+            self.log_frame.pack(fill="both", expand=True, padx=6)
+            self.log_toggle_btn.configure(text="收起日志 ▴")
+        else:
+            self.log_frame.pack_forget()
+            self.log_toggle_btn.configure(text="展开日志 ▾")
 
     def _attach_scrollbar(self, widget, parent):
         sb = ttk.Scrollbar(parent, orient="vertical", command=widget.yview)
@@ -234,42 +263,16 @@ class GuiApp:
                            ("server", "仅服务端"), ("both", "双端")):
             ttk.Radiobutton(bar, text=label, value=val, variable=self.side_filter,
                             command=self.refresh_installed).pack(side="left")
-        ttk.Label(bar, text="搜索:").pack(side="left", padx=(16, 2))
+        ttk.Label(bar, text="搜索:").pack(side="left", padx=(12, 2))
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *a: self._debounce_inst_search())
-        self.inst_search_entry = ttk.Entry(bar, textvariable=self.search_var, width=22)
+        self.inst_search_entry = ttk.Entry(bar, textvariable=self.search_var, width=18)
         self.inst_search_entry.pack(side="left")
         self.only_update = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="仅可更新", variable=self.only_update,
-                        command=self.refresh_installed).pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="刷新", command=self.refresh_installed).pack(side="right")
-
-        cols = ("name", "cn", "side", "client", "server", "inst_time", "latest", "status")
-        heads = ("名称", "中文名", "安装端别", "客户端", "服务端", "本地更新时间", "最新版本", "状态")
-        widths = (230, 110, 80, 130, 130, 115, 90, 70)
-        tree_frame = ttk.Frame(tab)
-        tree_frame.pack(fill="both", expand=True, padx=6)
-        self.inst_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
-                                      selectmode="extended")
-        for c, h, w in zip(cols, heads, widths):
-            self.inst_tree.heading(c, text=h)
-            self.inst_tree.column(c, width=w, anchor="w")
-        self.inst_tree.tag_configure("upd", foreground=STATUS_COLORS["update_avail"])
-        self.inst_tree.tag_configure("dis", foreground=STATUS_COLORS["disabled"])
-        self.inst_tree.pack(side="left", fill="both", expand=True)
-        self._attach_scrollbar(self.inst_tree, tree_frame)
-        self._make_sortable(self.inst_tree, desc_first_cols=("latest", "inst_time"))
-        self.inst_tree.bind("<Double-1>", self._on_inst_double)
-        self.inst_tree.bind("<Button-3>", lambda e: self._popup(self.inst_tree, self._inst_menu, e))
-
-        # 单个mod操作走右键菜单；下方只留全局/批量操作按钮
-        btns = ttk.Frame(tab)
-        btns.pack(fill="x", padx=6, pady=4)
-        self.btn_check = ttk.Button(btns, text="检查更新", command=self.check_updates)
-        self.btn_update = ttk.Button(btns, text="更新选中", command=self.update_selected)
-        self.btn_update_all = ttk.Button(btns, text="全部更新", command=self.update_all)
-        # 打开mods目录（下拉选择端别）
-        self.btn_dirs = ttk.Menubutton(btns, text="打开mods目录")
+                        command=self.refresh_installed).pack(side="left", padx=(6, 0))
+        # 全局操作按钮放顶部（与过滤器同一行，列表下方不再重复）
+        self.btn_dirs = ttk.Menubutton(bar, text="打开mods目录 ▾")
         dir_menu = tk.Menu(self.btn_dirs, tearoff=0)
         has_dir = False
         for s in SIDES:
@@ -281,8 +284,45 @@ class GuiApp:
         if not has_dir:
             dir_menu.add_command(label="（未设置目录）", state="disabled")
         self.btn_dirs["menu"] = dir_menu
-        for b in (self.btn_check, self.btn_update, self.btn_update_all, self.btn_dirs):
-            b.pack(side="left", padx=2)
+        self.btn_dirs.pack(side="right", padx=(4, 0))
+        self.btn_update_all = ttk.Button(bar, text="全部更新", command=self.update_all)
+        self.btn_update_all.pack(side="right", padx=4)
+        self.btn_update = ttk.Button(bar, text="更新选中", command=self.update_selected)
+        self.btn_update.pack(side="right", padx=4)
+        self.btn_check = ttk.Button(bar, text="检查更新", command=self.check_updates)
+        self.btn_check.pack(side="right", padx=4)
+        ttk.Button(bar, text="刷新", command=self.refresh_installed).pack(side="right", padx=4)
+
+        # 新手引导（两端目录都未配置时显示，完成后自动隐藏）
+        self.guide = ttk.LabelFrame(tab, text="三步上手")
+        gf = ttk.Frame(self.guide)
+        gf.pack(fill="x", padx=8, pady=4)
+        ttk.Label(gf, text="① 到「设置」页配置客户端/服务端 mods 目录   →   "
+                           "② 回到「可添加MOD」页点「刷新Wiki数据」获取可安装列表   →   "
+                           "③ 勾选想装的 mod 批量安装",
+                  font=FONT).pack(side="left")
+        ttk.Button(gf, text="去设置页", command=lambda: self.nb.select(4)).pack(side="right")
+        self.guide.pack(fill="x", padx=6, pady=(0, 4))
+        self.guide.pack_forget()  # 默认隐藏，两端目录均未配置时显示
+
+        cols = ("name", "side", "version", "latest", "status")
+        heads = ("名称", "安装端别", "已装版本（✗=该端已禁用）", "最新版本", "状态")
+        widths = (330, 90, 240, 130, 70)
+        tree_frame = ttk.Frame(tab)
+        tree_frame.pack(fill="both", expand=True, padx=6)
+        self.inst_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
+                                      selectmode="extended")
+        for c, h, w in zip(cols, heads, widths):
+            self.inst_tree.heading(c, text=h)
+            self.inst_tree.column(c, width=w, anchor="w")
+        self.inst_tree.tag_configure("upd", background=STATUS_COLORS.get("upd_bg", "#e5f5ea"))
+        self.inst_tree.tag_configure("dis", foreground=STATUS_COLORS["disabled"])
+        self.inst_tree.tag_configure("odd", background="#f4f5f7")
+        self.inst_tree.pack(side="left", fill="both", expand=True)
+        self._attach_scrollbar(self.inst_tree, tree_frame)
+        self._make_sortable(self.inst_tree, desc_first_cols=("latest",))
+        self.inst_tree.bind("<Double-1>", self._on_inst_double)
+        self.inst_tree.bind("<Button-3>", lambda e: self._popup(self.inst_tree, self._inst_menu, e))
         self.busy_buttons = (self.btn_check, self.btn_update, self.btn_update_all)
 
     def _build_addable_tab(self, tab):
@@ -311,6 +351,7 @@ class GuiApp:
             self.add_tree.heading(c, text=h)
             self.add_tree.column(c, width=w, anchor="w")
         self.add_tree.tag_configure("inst", foreground=STATUS_COLORS["update_avail"])
+        self.add_tree.tag_configure("odd", background="#f4f5f7")
         self.add_tree.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.add_tree, tree_frame)
         self._make_sortable(self.add_tree, desc_first_cols=("updated",))
@@ -575,7 +616,9 @@ class GuiApp:
         self._debounce("_um_search_after", self.refresh_unmanaged)
 
     def _debounce(self, attr, fn):
-        """搜索防抖：200ms 内连续输入只触发最后一次刷新。"""
+        """搜索防抖：200ms 内连续输入只触发最后一次刷新；busy 时跳过重扫。"""
+        if self.busy:
+            return
         if getattr(self, attr, None):
             self.root.after_cancel(getattr(self, attr))
         setattr(self, attr, self.root.after(200, fn))
@@ -603,31 +646,70 @@ class GuiApp:
         self._merged_cache = None  # 磁盘/数据库可能已变化
         self._render_installed()
 
+    @staticmethod
+    def _name_cell(m) -> str:
+        """名称列：中文名为主（括号附英文名），无中文名用英文名。"""
+        cn, en = (m.get("name_cn") or "").strip(), m.get("name_en") or m["mod_id"]
+        base = f"{cn}（{en}）" if cn and cn != en else en
+        lock = "🔒" if m["locked"] else ""
+        dup = " ⚠重复jar" if m.get("duplicates") else ""
+        return base + lock + dup
+
+    @staticmethod
+    def _version_cell(m) -> str:
+        """已装版本列：双端一致只显示一份；不一致或部分禁用时分别标注（✗=禁用）。"""
+        def cell(side):
+            st = m["sides"].get(side)
+            if not st:
+                return None
+            return f"v{st.get('version') or '?'}" + ("" if st["enabled"] else "✗")
+        c, s = cell("client"), cell("server")
+        if c and s:
+            return c if c == s else f"客 {c} / 服 {s}"
+        return c or s or "—"
+
     def _render_installed(self):
         """用（缓存的）注册表重绘已安装列表，不改选中以外的状态。"""
         self.inst_tree.delete(*self.inst_tree.get_children())
         self.inst_rows = {}
-        for m in self._inst_rows():
-            lock = "🔒" if m["locked"] else ""
-            dup = " ⚠重复jar" if m.get("duplicates") else ""
-            tag = "upd" if m["status"] == "update_avail" else ("dis" if m["status"] == "disabled" else "")
+        # 新手引导：两端目录均未配置时显示
+        if not self.cfg.client_mods_dir and not self.cfg.server_mods_dir:
+            self.guide.pack(fill="x", padx=6, pady=(0, 4))
+        else:
+            self.guide.pack_forget()
+        for i, m in enumerate(self._inst_rows()):
+            status = m["status"]
+            base = "upd" if status == "update_avail" else ("dis" if status == "disabled" else "")
+            # upd 行用绿色底、隔行用灰底；两者同是背景色，只取其一避免优先级歧义
+            odd = "" if base == "upd" else ("odd" if i % 2 else "")
+            tags = tuple(t for t in (base, odd) if t)
             self.inst_tree.insert(
-                "", "end", iid=m["mod_id"], tags=(tag,) if tag else (),
-                values=(m["name_en"] + lock + dup, m["name_cn"],
+                "", "end", iid=m["mod_id"], tags=tags,
+                values=(self._name_cell(m),
                         INSTALL_SIDE_CN.get(m["install_side"], m["install_side"]),
-                        side_state_text(m["sides"].get("client")),
-                        side_state_text(m["sides"].get("server")),
-                        m["install_time"] or "—",
-                        m["latest_version"], STATUS_CN.get(m["status"], m["status"])))
+                        self._version_cell(m),
+                        m["latest_version"] or "",
+                        STATUS_CN.get(status, status)))
             self.inst_rows[m["mod_id"]] = m
-        # 底部状态栏
+        # 底部状态栏（路径缩略显示，完整路径见设置页）
         merged = self._merged_registry()
-        client = self.cfg.client_mods_dir or "未设置"
-        server = self.cfg.server_mods_dir or "未设置"
+        client = self._short_path(str(self.cfg.client_mods_dir or "未设置"))
+        server = self._short_path(str(self.cfg.server_mods_dir or "未设置"))
         self.status_var.set(f"客户端: {client}   服务端: {server}   "
                             f"已装受管mod: {len(merged)} 个"
                             f"（显示 {len(self.inst_rows)} 个）")
         self._reapply_sort(self.inst_tree)
+
+    @staticmethod
+    def _short_path(p: str, max_parts: int = 2) -> str:
+        """状态栏用的路径缩略：保留盘符与最后两级目录（F:\…\instance\mods）。"""
+        if not p or p == "未设置":
+            return p
+        path = Path(p)
+        parts = path.parts
+        if len(parts) <= max_parts + 1:
+            return p
+        return str(path.drive + "\\…\\" + "\\".join(parts[-max_parts:]))
 
     def _selected_inst(self):
         sel = self.inst_tree.selection()
@@ -760,22 +842,20 @@ class GuiApp:
     def update_all(self):
         if self.busy:
             return
-        if not messagebox.askyesno("确认", "更新所有已安装且未锁定、启用的mod？\n旧版本会自动备份。"):
+        if not messagebox.askyesno(
+                "确认", "更新所有已安装且未锁定、启用的mod？\n"
+                       "只更新有新版本的（已最新/禁用/锁定的跳过），一律装最新兼容版，\n"
+                       "旧版本会自动备份。"):
             return
         self._set_busy(True)
 
         def job():
             reg = updater.build_registry(self.cfg, self.db, self.installed)
-            todo = [(side, mid, st["name_en"]) for side in SIDES
-                    for mid, st in reg[side].items() if st["enabled"] and not st["locked"]]
-            state = {"done": 0}
 
-            def cb(side, mod_id):
-                state["done"] += 1
-                self._push_progress(state["done"], len(todo),
-                                    f"全部更新 {state['done']}/{len(todo)}")
-            results = updater.update_all(self.cfg, self.db, self.installed, progress_cb=cb)
-            return results
+            def cb(done, total, name):
+                self._push_progress(done, total, f"全部更新 {done}/{total}: {name}")
+            return updater.update_all(self.cfg, self.db, self.installed,
+                                      progress_cb=cb, registry=reg)
 
         self._run_async(job, on_done=lambda rs: self._on_update_done(rs or []))
 
@@ -795,6 +875,8 @@ class GuiApp:
             if r["action"] == "updated":
                 n_ok += 1
                 self._log(f"已更新 {label} {name}: v{r['from']} → v{r['to']}")
+                if r.get("warning"):
+                    self._log(f"  [端别提示] {r['warning']}")
             elif r["action"] == "uptodate":
                 self._log(f"{label} {name}: 已是最新")
             elif r["action"] == "manual":
@@ -805,6 +887,8 @@ class GuiApp:
                 self._log(f"[跳过] {label} {name}: {r.get('note')}")
             else:
                 self._log(f"[错误] {label} {name}: {r.get('error')}")
+                if r.get("warning"):
+                    self._log(f"  [端别提示] {r['warning']}")
             if r.get("leftover"):
                 self._log(f"[提示] {label} 旧版本文件被占用未能移除: {'、'.join(r['leftover'])}"
                           "（请关闭游戏/服务端后右键「清理重复jar」）")
@@ -1103,6 +1187,10 @@ class GuiApp:
             return side, Path(path)
 
         def do_restore():
+            # 对话框可能开着时后台开始了更新（如"全部更新"），恢复必须避开并发
+            if self.busy:
+                messagebox.showinfo("提示", "有更新/安装正在进行，请等它完成后再恢复")
+                return
             got = selected()
             if not got:
                 return
@@ -1371,16 +1459,22 @@ class GuiApp:
         kw = self.add_search.get().strip().lower()
         marks = self._installed_marks()
         self.add_rows = {}
-        for e in sorted(groups.get(cur, []), key=lambda x: x["id"]):
+        for i, e in enumerate(sorted(groups.get(cur, []), key=lambda x: x["id"])):
             if kw and kw not in e["name_en"].lower() and kw not in (e["name_cn"] or "").lower():
                 continue
             if self.only_uninstalled.get() and e["id"] in marks:
                 continue
             side_txt = SIDE_LABELS.get(e["side"], e["side"]) + ("?" if e["side_uncertain"] else "")
             installed_txt = INSTALL_SIDE_CN.get(marks.get(e["id"]), "")
-            tag = "inst" if e["id"] in marks else ""
+            # 已安装用绿色前景；斑马纹只在未安装行上（避免两种背景色冲突）
+            if e["id"] in marks:
+                tags = ("inst",)
+            elif i % 2:
+                tags = ("odd",)
+            else:
+                tags = ()
             name_txt = ("✓ " + e["name_en"]) if e["id"] in marks else e["name_en"]
-            self.add_tree.insert("", "end", iid=e["id"], tags=(tag,) if tag else (),
+            self.add_tree.insert("", "end", iid=e["id"], tags=tags,
                                  values=(name_txt, e["name_cn"], side_txt,
                                          e["category"], installed_txt,
                                          ((e.get("release_date") or "")

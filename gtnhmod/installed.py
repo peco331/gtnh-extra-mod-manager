@@ -34,8 +34,28 @@ class InstalledDB:
             self.data.setdefault(side, {})
 
     def save(self):
-        utils.backup_file(self.path)
-        utils.atomic_write_json(self.path, {"version": 1, "installed": self.data})
+        """整文件保存。
+
+        先与磁盘合并远端检查缓存：计划任务（cli --check）可能在本进程加载后
+        更新过 last_checked/last_remote_*，直接覆盖会把新检查结果抹掉。
+        整个"读盘合并+写"持跨进程锁，与 GUI/其他进程串行。
+        """
+        with utils.file_lock(self.path):
+            utils.backup_file(self.path)
+            disk = utils.load_json(self.path, None)
+            if isinstance(disk, dict):
+                disk_inst = disk.get("installed") or {}
+                for side in ("client", "server"):
+                    mine = (self.data.get(side) or {})
+                    for mod_id, rec in (disk_inst.get(side) or {}).items():
+                        local = mine.get(mod_id)
+                        if not isinstance(rec, dict) or not isinstance(local, dict):
+                            continue
+                        if str(rec.get("last_checked") or "") > str(local.get("last_checked") or ""):
+                            for k in ("last_checked", "last_remote_version", "last_remote_date"):
+                                if rec.get(k):
+                                    local[k] = rec[k]
+            utils.atomic_write_json(self.path, {"version": 1, "installed": self.data})
 
     # ---- 访问 ----
     def get(self, side: str, mod_id: str):

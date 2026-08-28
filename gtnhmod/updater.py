@@ -749,14 +749,17 @@ def _cleanup_extras(cfg, db, side: str, mod_id: str, dest: Path,
 
 
 def update_mod(cfg, db, installed, mod_id: str, side: str, *,
-               version: str = None, progress_cb=None) -> dict:
+               version: str = None, progress_cb=None, prefetched=None) -> dict:
     """更新已安装 mod。version 指定时更新到该版本（否则最新兼容版）。
 
-    返回结果 dict（action: updated/uptodate/manual/skipped_incompatible/error）。
+    prefetched: (options, err) 预取的版本列表——update_all 逐mod复用一次查询，
+    双端不再各查一遍。返回结果 dict（action: updated/uptodate/manual/
+    skipped_incompatible/error）。
     """
     entry = db.get(mod_id)
     if not entry:
         return {"action": "error", "error": f"未知mod: {mod_id}"}
+    warn = _side_warning(entry, side)
     folder = cfg.mods_dir(side)
     if not folder or not folder.is_dir():
         return {"action": "error",
@@ -765,20 +768,24 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
     if not old:
         return {"action": "error", "error": f"{SIDE_LABELS[side]}未找到已安装文件"}
     gtnh = (cfg.data.get("gtnh_version") or "").strip()
-    options, err = list_install_options(entry, cfg, db, force=True)
+    if prefetched is not None:
+        options, err = prefetched
+    else:
+        options, err = list_install_options(entry, cfg, db, force=True)
     if err:
         _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id} 失败: {err}")
-        return {"action": "error", "error": f"查询版本列表失败: {err}"}
+        return {"action": "error", "error": f"查询版本列表失败: {err}", "warning": warn}
     if version is not None:
         if old.version and version == old.version:
             return {"action": "uptodate", "version": old.version, "note": "已是指定版本"}
         opt = next((o for o in options if o["version"] == version), None)
         if not opt:
             _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id} 失败: 版本 {version} 不可用")
-            return {"action": "error", "error": f"版本 {version} 不可用（列表可能已过期，请重试）"}
+            return {"action": "error", "error": f"版本 {version} 不可用（列表可能已过期，请重试）",
+                    "warning": warn}
         if not opt["candidates"]:
             return {"action": "manual", "note": f"版本 {version} 无自动下载资产，需手动下载",
-                    "entry": entry}
+                    "entry": entry, "warning": warn}
         info = UpdateInfo(opt["version"], opt["candidates"], opt["body"],
                           utils.now_str(), f"已选版本 {version}",
                           opt.get("published_at"))
@@ -789,14 +796,15 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
             except Exception:
                 info0 = None
             note = (info0.note if info0 and info0.note else "") or "该mod无自动下载渠道"
-            return {"action": "manual", "note": note, "entry": entry}
+            return {"action": "manual", "note": note, "entry": entry, "warning": warn}
         latest = options[0]
         chosen, note = _pick_default_option(options)
         if chosen is None:
             msg = (f"现有版本均与 GTNH {gtnh} 不兼容，未自动更新"
                    f"（最新版 {latest['version']}），可在版本列表中手动选择")
             _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id}: {msg}")
-            return {"action": "skipped_incompatible", "note": msg, "entry": entry}
+            return {"action": "skipped_incompatible", "note": msg, "entry": entry,
+                    "warning": warn}
         if old.version:
             try:
                 if compare(chosen["version"], old.version) <= 0:
@@ -806,7 +814,7 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
                 pass
         if not chosen["candidates"]:
             return {"action": "manual", "note": note or "该版本无自动下载资产，需手动下载",
-                    "entry": entry}
+                    "entry": entry, "warning": warn}
         info = UpdateInfo(chosen["version"], chosen["candidates"], chosen["body"],
                           utils.now_str(), note, chosen.get("published_at"))
     cand = info.candidates[0]
@@ -820,7 +828,7 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
         return {"action": "error", "error": str(e)}
     except Exception as e:
         _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id} 失败: {e}")
-        return {"action": "error", "error": f"下载/更新失败: {e}"}
+        return {"action": "error", "error": f"下载/更新失败: {e}", "warning": warn}
     ver = split_mc_mod_version(dest.stem)[2] or info.latest_version or "?"
     installed.set(side, mod_id, file_name=dest.name, parsed_version=ver,
                   updated_at=utils.now_str(),
@@ -830,29 +838,45 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
                  f"v{old.version or '?'} → v{ver}（{dest.name}）")
     leftover = _cleanup_extras(cfg, db, side, mod_id, dest, unremoved)
     result = {"action": "updated", "from": old.version or "?", "to": ver,
-              "file": dest.name, "note": info.note, "body": info.release_body}
+              "file": dest.name, "note": info.note, "body": info.release_body,
+              "warning": warn}
     if leftover:
         result["leftover"] = leftover
     return result
 
 
-def update_all(cfg, db, installed, *, sides=SIDES, progress_cb=None) -> list:
-    """逐端更新所有可更新的 mod；单个失败不中断。返回结果列表。
+def update_all(cfg, db, installed, *, sides=SIDES, progress_cb=None,
+               registry=None) -> list:
+    """逐mod更新所有可更新的 mod；单个失败不中断。返回结果列表。
 
-    progress_cb(side, mod_id) 在每个 mod 处理完后调用（mod 级进度）。
-    注意不透传给 update_mod——那里的回调是下载字节级语义，两者不同。
+    每个 mod 只查询一次最新版（双端复用同一份版本列表，请求量减半），
+    progress_cb(done, total, name) 按 mod 计数（双端不重复计数）。
+    registry 可传入已构建好的 build_registry 结果，避免重复扫描磁盘。
     """
-    results = []
+    reg = registry if registry is not None else build_registry(cfg, db, installed)
+    order: list = []  # [mod_id, name, [sides]]——跨端去重，保持端别顺序
     for side in sides:
-        reg = build_registry(cfg, db, installed).get(side, {})
-        for mod_id, st in reg.items():
+        for mod_id, st in reg.get(side, {}).items():
             if not st["enabled"] or st["locked"]:
                 continue
-            r = update_mod(cfg, db, installed, mod_id, side)
-            r["side"], r["mod_id"], r["name"] = side, mod_id, st["name_en"]
+            hit = next((x for x in order if x[0] == mod_id), None)
+            if hit is None:
+                order.append([mod_id, st["name_en"], [side]])
+            else:
+                hit[2].append(side)
+    results = []
+    total = len(order)
+    for done, (mod_id, name, mod_sides) in enumerate(order, 1):
+        if progress_cb:
+            progress_cb(done, total, name)
+        options, err = list_install_options(db.get(mod_id) or {}, cfg, db, force=True)
+        for side in mod_sides:
+            try:
+                r = update_mod(cfg, db, installed, mod_id, side, prefetched=(options, err))
+            except Exception as e:  # 单个失败不中断
+                r = {"action": "error", "error": str(e)}
+            r["side"], r["mod_id"], r["name"] = side, mod_id, name
             results.append(r)
-            if progress_cb:
-                progress_cb(side, mod_id)
     return results
 
 

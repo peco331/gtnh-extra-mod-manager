@@ -312,7 +312,7 @@ class CliApp:
                    "从列表剔除", "删除mod", "打开下载页面"]
         has_dup = bool(m.get("duplicates"))
         if has_dup:
-            actions.append("清理重复jar（保留版本最高者）")
+            actions.append("清理重复jar（保留最近一次安装/回滚的版本）")
         a = self.ui.choose(f"操作 {m['name_en']}（{m['name_cn']}）:", actions)
         if a is None:
             return
@@ -383,7 +383,7 @@ class CliApp:
                 self.ui.info(f"已打开 {m['name_en']} 下载页")
         elif a == 6 and has_dup:
             if self.ui.confirm(f"清理 {m['name_en']} 的重复jar？"
-                               "（保留版本最高者，其余备份到 data/backup 后移除）"):
+                               "（保留最近一次安装/回滚的版本，其余备份到 data/backup 后移除）"):
                 r = updater.cleanup_duplicates(self.cfg, self.db, self.installed, m["mod_id"])
                 if r["action"] == "cleaned":
                     for c in r["cleaned"]:
@@ -488,6 +488,8 @@ class CliApp:
         self._print_update_result(r, side, st["name_en"])
 
     def _print_update_result(self, r, side, name):
+        if r.get("warning"):
+            self.ui.warn(r["warning"])
         if r["action"] == "updated":
             self.ui.ok(f"已更新 {SIDE_LABELS[side]} {name}: v{r['from']} → v{r['to']}（{r['file']}）")
             if r.get("body"):

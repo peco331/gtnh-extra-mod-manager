@@ -444,14 +444,19 @@ class TestPruneBackups(unittest.TestCase):
         self.assertEqual(len(remaining), 2)
         self.assertTrue(all(n.endswith(("1.1.0.jar", "1.2.0.jar")) for n in remaining))
 
-    def test_deleted_counts_toward_keep(self):
+    def test_deleted_pool_independent(self):
+        # .deleted（删除mod移入）与普通备份各自保留 keep 份：
+        # 之后同mod几次更新不会把删除的 jar 备份挤掉
         self._mkjar("20250101_000000_FakeMod-1.7.10-0.9.0.jar.deleted", 1000)
         self._mkjar("20250102_000000_FakeMod-1.7.10-1.0.0.jar", 2000)
         removed = prune_backups(self.d, 1)
+        self.assertEqual(removed, 0)  # 两个池各只有1份，都不超限
+        # 各池超出部分才被裁剪
+        self._mkjar("20250103_000000_FakeMod-1.7.10-1.1.0.jar", 3000)
+        removed = prune_backups(self.d, 1)
         self.assertEqual(removed, 1)
-        remaining = list(self.d.glob("*.jar*"))
-        self.assertEqual(len(remaining), 1)
-        self.assertTrue(remaining[0].name.endswith("1.0.0.jar"))
+        self.assertEqual(len(list(self.d.glob("*.jar.deleted"))), 1)  # .deleted 仍在
+        self.assertEqual(len(list(self.d.glob("*.jar"))), 1)
 
     def test_mtime_order_not_name_order(self):
         # 按备份时间从旧到新删除：0.9.0 的备份时间更早，先被裁剪

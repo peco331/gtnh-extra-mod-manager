@@ -491,5 +491,65 @@ class TestInstalledBakRecovery(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestSaveMerge(unittest.TestCase):
+    """save 与磁盘合并：别处（计划任务）新写的检查结果不被本进程的旧状态覆盖。"""
+
+    def test_save_keeps_newer_check_cache_from_disk(self):
+        import json
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_merge_"))
+        try:
+            p = tmp / "installed.json"
+            disk = {"version": 1, "installed": {"client": {"m1": {
+                "file_name": "M-1.0.0.jar",
+                "last_checked": "2026-08-29 10:00:00",
+                "last_remote_version": "2.0.0",
+                "last_remote_date": "2026-08-28T00:00:00Z"}}}}
+            p.write_text(json.dumps(disk), encoding="utf-8")
+            db = InstalledDB(p)  # 加载后磁盘被别的进程更新
+            db.set("client", "m1", file_name="M-1.0.0.jar", save=False)
+            db.save()
+            on_disk = json.loads(p.read_text(encoding="utf-8"))
+            rec = on_disk["installed"]["client"]["m1"]
+            # 本进程没查过（last_checked 为空）→ 磁盘上更新的检查结果保留
+            self.assertEqual(rec["last_checked"], "2026-08-29 10:00:00")
+            self.assertEqual(rec["last_remote_version"], "2.0.0")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestUpdateSideWarning(unittest.TestCase):
+    """更新到端别标注不符的端时要有警告（对齐安装流程）。"""
+
+    def test_update_warns_on_side_mismatch(self):
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_sw_"))
+        try:
+            src = tmp / "src"
+            src.mkdir()
+            mods = tmp / "mods"
+            mods.mkdir()
+            import io
+            import zipfile
+            for v in ("1.0.0", "1.1.0"):
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+                    z.writestr(f"SidedMod-{v}.txt", v)
+                (src / f"SidedMod-1.7.10-{v}.jar").write_bytes(buf.getvalue())
+            cfg = Config(tmp)
+            cfg.set_mods_dir("server", mods)
+            db = ModsDB(tmp / "mods_db.json")
+            inst = InstalledDB(tmp / "installed.json")
+            mid = db.add_custom({"name_en": "SidedMod", "side": "client",
+                                 "source_type": "local_folder",
+                                 "source": {"path": str(src), "name_regex": "^SidedMod"}})
+            r = updater.install_mod(cfg, db, inst, mid, "server", version="1.0.0")
+            self.assertEqual(r["action"], "installed", r)
+            self.assertTrue(r.get("warning"))  # 安装时有端别警告
+            r = updater.update_mod(cfg, db, inst, mid, "server")
+            self.assertEqual(r["action"], "updated", r)
+            self.assertTrue(r.get("warning"))  # 更新时也要有
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

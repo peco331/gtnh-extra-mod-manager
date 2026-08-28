@@ -150,6 +150,12 @@ class TestCompareTieBreak(unittest.TestCase):
         self.assertEqual(compare("0.2.0p05", "0.2.0p5"), 0)
         self.assertEqual(compare("1.0.0+build.10", "1.0.0+build.9"), 1)
 
+    def test_cjk_suffix_not_part_of_version(self):
+        # 版本段后跟中文描述（真实案例 dualhotbar-1.61-超长快捷栏.jar）：
+        # 中文不得混入版本号
+        self.assertEqual(split_mc_mod_version("dualhotbar-1.61-超长快捷栏"),
+                         ("dualhotbar", None, "1.61"))
+
     def test_max_version_uses_tie_break(self):
         self.assertEqual(max_version(["1.2.3s", "1.2.3t"]), "1.2.3t")
 
