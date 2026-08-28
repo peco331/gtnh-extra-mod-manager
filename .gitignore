@@ -11,3 +11,7 @@ __pycache__/
 *.tmp
 *.part
 .zcode/
+
+# PyInstaller 构建产物
+build/
+dist/

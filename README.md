@@ -16,6 +16,14 @@ wiki 没有的 mod 可通过**自定义源**（GitHub 仓库 / 本地文件夹 /
 
 要求：Windows + Python 3.10+（安装时勾选 py 启动器）。**不需要 pip 安装任何包。**
 
+### 免安装版（exe）
+
+不想装 Python 可直接到 [Releases](https://github.com/peco331/gtnh-extra-mod-manager/releases)
+下载 `GTNHModManager-<版本>-win64.zip`：解压后 `GTNHModManager.exe` 是图形界面、
+`gtnh-cli.exe` 是命令行（参数同下）。数据目录在 exe 旁的 `data/`
+（可用环境变量 `GTNHMOD_DATA_DIR` 指到别处）。push tag `v*` 时 CI 自动构建发布；
+本地打包：`scripts\build_exe.bat`（需 `py -m pip install pyinstaller curl_cffi`）。
+
 推荐（可选）：`py -m pip install --user curl_cffi`。wiki 站开启 Cloudflare 人机验证后，
 程序直连会按 TLS 指纹被拦截；装了 curl_cffi 后刷新会模拟浏览器指纹直连（首选通道，
 无需人工过验证）。未安装时依次尝试 api.php / 系统 curl / 原始通道，均被拦截则回退

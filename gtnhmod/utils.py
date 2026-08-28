@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+import sys
 import tempfile
 import time
 from datetime import datetime
@@ -35,11 +36,18 @@ def clean_orphan_tmp(root: Path, keep_seconds: float = 86400) -> int:
 
 
 def resolve_data_dir() -> Path:
-    """确定数据目录：环境变量 GTNHMOD_DATA_DIR > 工具目录 data/ > %APPDATA% 回退。"""
+    """确定数据目录：环境变量 GTNHMOD_DATA_DIR > 工具目录 data/ > %APPDATA% 回退。
+
+    PyInstaller 打包（frozen）时 __file__ 位于每次运行都新建的临时解压目录，
+    数据必须放 exe 旁边，否则退出即丢。
+    """
     env = os.environ.get("GTNHMOD_DATA_DIR")
     if env:
         return Path(env)
-    local = Path(__file__).resolve().parent.parent / "data"
+    if getattr(sys, "frozen", False):
+        local = Path(sys.executable).resolve().parent / "data"
+    else:
+        local = Path(__file__).resolve().parent.parent / "data"
     try:
         local.mkdir(parents=True, exist_ok=True)
         probe = local / ".write_test"
