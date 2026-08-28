@@ -795,14 +795,18 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
 
 
 def update_all(cfg, db, installed, *, sides=SIDES, progress_cb=None) -> list:
-    """逐端更新所有可更新的 mod；单个失败不中断。返回结果列表。"""
+    """逐端更新所有可更新的 mod；单个失败不中断。返回结果列表。
+
+    progress_cb(side, mod_id) 在每个 mod 处理完后调用（mod 级进度）。
+    注意不透传给 update_mod——那里的回调是下载字节级语义，两者不同。
+    """
     results = []
     for side in sides:
         reg = build_registry(cfg, db, installed).get(side, {})
         for mod_id, st in reg.items():
             if not st["enabled"] or st["locked"]:
                 continue
-            r = update_mod(cfg, db, installed, mod_id, side, progress_cb=progress_cb)
+            r = update_mod(cfg, db, installed, mod_id, side)
             r["side"], r["mod_id"], r["name"] = side, mod_id, st["name_en"]
             results.append(r)
             if progress_cb:

@@ -53,8 +53,12 @@ class GuiApp:
 
         self.root = tk.Tk()
         self.root.title(f"GTNH 额外MOD管理工具 v{__version__}")
-        self.root.geometry("1120x720")
+        self.root.geometry(self.cfg.data.get("window_geometry") or "1120x720")
         self.root.minsize(980, 640)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.report_callback_exception = self._report_cb_exc
+        self._merged_cache = None      # build_merged_registry 结果缓存（一次刷新内复用）
+        self._search_after = None      # 搜索防抖定时器
         self._build_ui()
         self.root.after(100, self._poll_queue)
         # 启动时刷新全部页签（否则自定义源/未受管页首次是空的）
@@ -64,6 +68,48 @@ class GuiApp:
         self.refresh_custom()
         # 切换页签时自动刷新对应页
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        # 全局快捷键：Ctrl+F 聚焦搜索、F5 刷新当前页
+        self.root.bind_all("<Control-f>", lambda e: self._focus_search())
+        self.root.bind_all("<Control-F>", lambda e: self._focus_search())
+        self.root.bind_all("<F5>", lambda e: self._refresh_current_tab())
+        # 树全选（Ctrl+A）
+        for t in (self.inst_tree, self.add_tree, self.um_tree, self.cust_tree):
+            t.bind("<Control-a>", lambda _e, tree=t: tree.selection_set(tree.get_children("")))
+
+    def _on_close(self):
+        """退出前记忆窗口尺寸/位置。"""
+        try:
+            self.cfg.data["window_geometry"] = self.root.geometry()
+            self.cfg.save()
+        except OSError:
+            pass
+        self.root.destroy()
+
+    def _report_cb_exc(self, exc, val, tb):
+        """Tk 回调异常落盘（pyw 无控制台，否则无声丢失）+ 写日志区。"""
+        import traceback
+        try:
+            err_file = self.cfg.data_dir / "logs" / "gui_error.log"
+            err_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(err_file, "a", encoding="utf-8") as f:
+                f.write(f"[{utils.now_str()}] Tk回调异常\n{traceback.format_exc()}\n")
+        except OSError:
+            pass
+        self._log(f"[错误] 界面回调异常: {val}")
+
+    def _focus_search(self):
+        """Ctrl+F：聚焦当前页的搜索框。"""
+        for attr in ("inst_search_entry", "add_search_entry", "um_search_entry"):
+            e = getattr(self, attr, None)
+            if e is not None and e.winfo_ismapped():
+                e.focus_set()
+                return
+        self.nb.select(0)
+        self.inst_search_entry.focus_set()
+
+    def _refresh_current_tab(self):
+        (self.refresh_installed, self.refresh_addable,
+         self.refresh_unmanaged, self.refresh_custom, lambda: None)[self.nb.index("current")]()
 
     # ---------- UI 构建 ----------
     def _build_ui(self):
@@ -156,7 +202,9 @@ class GuiApp:
             self._sort_tree(tree, tree._sort_col, tree._sort_rev)
 
     def _popup(self, tree, build, event):
-        """右键菜单：自动选中目标行后弹出。"""
+        """右键菜单：自动选中目标行后弹出；busy 期间不弹（防并发操作）。"""
+        if self.busy:
+            return
         iid = tree.identify_row(event.y)
         if iid and iid not in tree.selection():
             tree.selection_set(iid)
@@ -192,11 +240,13 @@ class GuiApp:
                             command=self.refresh_installed).pack(side="left")
         ttk.Label(bar, text="搜索:").pack(side="left", padx=(16, 2))
         self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *a: self.refresh_installed())
-        ttk.Entry(bar, textvariable=self.search_var, width=22).pack(side="left")
+        self.search_var.trace_add("write", lambda *a: self._debounce_inst_search())
+        self.inst_search_entry = ttk.Entry(bar, textvariable=self.search_var, width=22)
+        self.inst_search_entry.pack(side="left")
         self.only_update = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="仅可更新", variable=self.only_update,
                         command=self.refresh_installed).pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="刷新", command=self.refresh_installed).pack(side="right")
 
         cols = ("name", "cn", "side", "client", "server", "inst_time", "latest", "status")
         heads = ("名称", "中文名", "安装端别", "客户端", "服务端", "本地更新时间", "最新版本", "状态")
@@ -249,8 +299,9 @@ class GuiApp:
         self.cat_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_addable())
         ttk.Label(bar, text="搜索:").pack(side="left")
         self.add_search = tk.StringVar()
-        self.add_search.trace_add("write", lambda *a: self.refresh_addable())
-        ttk.Entry(bar, textvariable=self.add_search, width=22).pack(side="left", padx=(2, 8))
+        self.add_search.trace_add("write", lambda *a: self._debounce_add_search())
+        self.add_search_entry = ttk.Entry(bar, textvariable=self.add_search, width=22)
+        self.add_search_entry.pack(side="left", padx=(2, 8))
         self.btn_refresh_wiki = ttk.Button(bar, text="刷新Wiki数据", command=self.refresh_wiki)
         self.btn_refresh_wiki.pack(side="right")
 
@@ -286,8 +337,9 @@ class GuiApp:
         bar.pack(fill="x", padx=6, pady=2)
         ttk.Label(bar, text="搜索:").pack(side="left")
         self.um_search = tk.StringVar()
-        self.um_search.trace_add("write", lambda *a: self.refresh_unmanaged())
-        ttk.Entry(bar, textvariable=self.um_search, width=26).pack(side="left", padx=(2, 0))
+        self.um_search.trace_add("write", lambda *a: self._debounce_um_search())
+        self.um_search_entry = ttk.Entry(bar, textvariable=self.um_search, width=26)
+        self.um_search_entry.pack(side="left", padx=(2, 0))
         cols = ("side", "file", "ver", "mtime", "size")
         heads = ("端别", "文件名", "识别版本", "修改时间", "大小(KB)")
         tree_frame = ttk.Frame(tab)
@@ -435,6 +487,32 @@ class GuiApp:
             self.progress.stop()
             self.progress.configure(mode="determinate", value=0)
 
+    def _push_progress(self, done, total, label):
+        """后台线程推送进度事件。"""
+        self.queue.put(("_progress", None, (done, total, label)))
+
+    def _on_progress(self, payload):
+        done, total, label = payload
+        if total:
+            self.progress.configure(mode="determinate", maximum=100, value=0)
+            self.progress.stop()
+            self.progress.configure(value=min(100.0, done * 100.0 / total))
+        self.status_var.set(label)
+
+    def _download_progress_cb(self, label):
+        """单文件下载的字节级进度回调（按百分比节流）。"""
+        state = {"last_pct": -1}
+
+        def cb(done, total):
+            if not total:
+                return
+            pct = int(done * 100 / total)
+            if pct != state["last_pct"]:
+                state["last_pct"] = pct
+                self._push_progress(done, total,
+                                    f"{label} {done / 1048576:.1f}/{total / 1048576:.1f} MB")
+        return cb
+
     def _run_async(self, fn, on_done=None):
         """在后台线程执行 fn()；完成后在主线程回调 on_done(result)。"""
 
@@ -466,6 +544,8 @@ class GuiApp:
                 elif kind == "_done":
                     if payload[0]:
                         payload[0](payload[1])
+                elif kind == "_progress":
+                    self._on_progress(payload[1])
                 elif kind == "_error":
                     msg = payload[1]
                     if payload[0]:
@@ -483,9 +563,30 @@ class GuiApp:
         self.refresh_custom()
 
     # ---------- 已安装页 ----------
+    def _merged_registry(self):
+        """build_merged_registry 结果缓存：一次刷新内复用，搜索/状态栏不再重复扫盘。"""
+        if self._merged_cache is None:
+            self._merged_cache = updater.build_merged_registry(self.cfg, self.db, self.installed)
+        return self._merged_cache
+
+    def _debounce_inst_search(self):
+        self._debounce("_inst_search_after", self._render_installed)
+
+    def _debounce_add_search(self):
+        self._debounce("_add_search_after", self.refresh_addable)
+
+    def _debounce_um_search(self):
+        self._debounce("_um_search_after", self.refresh_unmanaged)
+
+    def _debounce(self, attr, fn):
+        """搜索防抖：200ms 内连续输入只触发最后一次刷新。"""
+        if getattr(self, attr, None):
+            self.root.after_cancel(getattr(self, attr))
+        setattr(self, attr, self.root.after(200, fn))
+
     def _inst_rows(self):
         """合并注册表 + 端别过滤 + 搜索 + 仅可更新过滤。"""
-        merged = updater.build_merged_registry(self.cfg, self.db, self.installed)
+        merged = self._merged_registry()
         filt = self.side_filter.get()
         kw = self.search_var.get().strip().lower()
         only_upd = self.only_update.get()
@@ -503,6 +604,11 @@ class GuiApp:
     def refresh_installed(self):
         if not hasattr(self, "inst_tree"):
             return
+        self._merged_cache = None  # 磁盘/数据库可能已变化
+        self._render_installed()
+
+    def _render_installed(self):
+        """用（缓存的）注册表重绘已安装列表，不改选中以外的状态。"""
         self.inst_tree.delete(*self.inst_tree.get_children())
         self.inst_rows = {}
         for m in self._inst_rows():
@@ -519,7 +625,7 @@ class GuiApp:
                         m["latest_version"], STATUS_CN.get(m["status"], m["status"])))
             self.inst_rows[m["mod_id"]] = m
         # 底部状态栏
-        merged = updater.build_merged_registry(self.cfg, self.db, self.installed)
+        merged = self._merged_registry()
         client = self.cfg.client_mods_dir or "未设置"
         server = self.cfg.server_mods_dir or "未设置"
         self.status_var.set(f"客户端: {client}   服务端: {server}   "
@@ -588,6 +694,7 @@ class GuiApp:
     def _start_update_flow(self, mods):
         """逐个处理：弹版本选择器 → 更新 → 下一个（单个mod失败不影响其他）。"""
         self._pending_updates = list(mods)
+        self._update_total = len(mods)
         self._update_results = []
         self._set_busy(True)
         self._process_next_update()
@@ -598,6 +705,9 @@ class GuiApp:
             return
         m = self._pending_updates.pop(0)
         entry = self.db.get(m["mod_id"]) or {}
+        idx = self._update_total - len(self._pending_updates)
+        self._push_progress(idx, self._update_total,
+                            f"批量更新 {idx + 1}/{self._update_total}: {m['name_en']}")
         self._log(f"正在获取 {m['name_en']} 的可用版本列表...")
         self._run_async(
             lambda: updater.list_install_options(entry, self.cfg, self.db, force=True),
@@ -634,7 +744,9 @@ class GuiApp:
             for side in m["sides"]:
                 try:
                     r = updater.update_mod(self.cfg, self.db, self.installed,
-                                           m["mod_id"], side, version=ver)
+                                           m["mod_id"], side, version=ver,
+                                           progress_cb=self._download_progress_cb(
+                                               f"下载 {m['name_en']}"))
                 except Exception as e:  # 单个mod异常不影响其他
                     r = {"action": "error", "error": str(e)}
                 r["side"], r["mod_id"], r["name"] = side, m["mod_id"], m["name_en"]
@@ -655,9 +767,28 @@ class GuiApp:
         if not messagebox.askyesno("确认", "更新所有已安装且未锁定、启用的mod？\n旧版本会自动备份。"):
             return
         self._set_busy(True)
-        self._run_async(
-            lambda: updater.update_all(self.cfg, self.db, self.installed),
-            on_done=lambda rs: self._on_update_done(rs or []))
+
+        def job():
+            reg = updater.build_registry(self.cfg, self.db, self.installed)
+            todo = [(side, mid, st["name_en"]) for side in SIDES
+                    for mid, st in reg[side].items() if st["enabled"] and not st["locked"]]
+            state = {"done": 0}
+
+            def cb(side, mod_id):
+                state["done"] += 1
+                self._push_progress(state["done"], len(todo),
+                                    f"全部更新 {state['done']}/{len(todo)}")
+            results = updater.update_all(self.cfg, self.db, self.installed, progress_cb=cb)
+            return results
+
+        self._run_async(job, on_done=lambda rs: self._on_update_done(rs or []))
+
+    def _offer_open_download_page(self, entry):
+        """manual 源的引导闭环：询问是否打开下载页（对齐 CLI）。"""
+        urls = (entry or {}).get("urls") or {}
+        url = urls.get("curseforge") or urls.get("github")
+        if url and messagebox.askyesno("需要手动下载", f"打开下载页面？\n{url}"):
+            webbrowser.open(url)
 
     def _on_update_done(self, results):
         self._set_busy(False)
@@ -672,6 +803,8 @@ class GuiApp:
                 self._log(f"{label} {name}: 已是最新")
             elif r["action"] == "manual":
                 self._log(f"{label} {name}: {r.get('note') or '需手动下载'}")
+                if not self.busy:
+                    self._offer_open_download_page(r.get("entry"))
             elif r["action"] == "skipped_incompatible":
                 self._log(f"[跳过] {label} {name}: {r.get('note')}")
             else:
@@ -682,80 +815,128 @@ class GuiApp:
         self._log(f"完成：成功更新 {n_ok} 个")
         self.refresh_all()
 
+    def _check_not_busy(self) -> bool:
+        """操作前检查；busy 时给出反馈而不是静默吞掉。"""
+        if self.busy:
+            messagebox.showinfo("提示", "有操作正在进行，请等它完成后再试")
+            return False
+        return True
+
     def toggle_selected(self):
         sel = self._selected_inst()
         if not sel:
             messagebox.showinfo("提示", "请先选中要切换的mod")
             return
-        for m in sel:
-            self._toggle_mod(m)
-        self.refresh_installed()
-
-    def _toggle_mod(self, m):
-        # 全部已装端别启用 → 全部禁用；否则全部启用（同步两端）
-        want = not all(st["enabled"] for st in m["sides"].values())
-        if not want and self.cfg.data.get("core_mod_confirm") \
-                and not messagebox.askyesno("确认", f"禁用 {m['name_en']}？\n（影响端别：{INSTALL_SIDE_CN[m['install_side']]}）"):
+        if not self._check_not_busy():
             return
-        for side in m["sides"]:
-            r = updater.set_enabled(self.cfg, self.db, self.installed, m["mod_id"], side, want)
-            if r["action"] in ("enabled", "disabled"):
-                self._log(f"已{'启用' if want else '禁用'} {SIDE_LABELS[side]} {m['name_en']}")
-            elif r["action"] != "unchanged":
-                self._log(f"[错误] {SIDE_LABELS[side]} {m['name_en']}: {r.get('error')}")
+        # 确认框在主线程弹；文件操作移后台线程（不冻结界面、不与更新并发）
+        jobs = []
+        for m in sel:
+            want = not all(st["enabled"] for st in m["sides"].values())
+            if not want and self.cfg.data.get("core_mod_confirm") \
+                    and not messagebox.askyesno("确认", f"禁用 {m['name_en']}？\n（影响端别：{INSTALL_SIDE_CN[m['install_side']]}）"):
+                return
+            jobs.append((m, want))
+        self._set_busy(True)
+
+        def job():
+            out = []
+            for m, want in jobs:
+                for side in m["sides"]:
+                    r = updater.set_enabled(self.cfg, self.db, self.installed,
+                                            m["mod_id"], side, want)
+                    out.append((want, side, m["name_en"], r))
+            return out
+
+        def done(out):
+            self._set_busy(False)
+            for want, side, name, r in out:
+                if r["action"] in ("enabled", "disabled"):
+                    self._log(f"已{'启用' if want else '禁用'} {SIDE_LABELS[side]} {name}")
+                elif r["action"] != "unchanged":
+                    self._log(f"[错误] {SIDE_LABELS[side]} {name}: {r.get('error')}")
+            self.refresh_installed()
+        self._run_async(job, on_done=done)
 
     def lock_selected(self):
         sel = self._selected_inst()
         if not sel:
             messagebox.showinfo("提示", "请先选中mod")
             return
-        for m in sel:
-            self._lock_mod(m)
-        self.refresh_installed()
+        if not self._check_not_busy():
+            return
+        jobs = [(m, not m["locked"]) for m in sel]
+        self._set_busy(True)
 
-    def _lock_mod(self, m):
-        new = not m["locked"]
-        for side in m["sides"]:
-            updater.set_lock(self.installed, m["mod_id"], side, new)
-        self._log(f"{m['name_en']}: 已{'锁定' if new else '解锁'}（两端同步）")
+        def job():
+            out = []
+            for m, new in jobs:
+                for side in m["sides"]:
+                    updater.set_lock(self.installed, m["mod_id"], side, new)
+                out.append((m["name_en"], new))
+            return out
+
+        def done(out):
+            self._set_busy(False)
+            for name, new in out:
+                self._log(f"{name}: 已{'锁定' if new else '解锁'}（两端同步）")
+            self.refresh_installed()
+        self._run_async(job, on_done=done)
 
     def exclude_selected(self):
         sel = self._selected_inst()
         if not sel:
             messagebox.showinfo("提示", "请先选中要剔除的mod")
             return
+        if not self._check_not_busy():
+            return
         names = "、".join(m["name_en"] for m in sel)
         if not messagebox.askyesno("确认", f"从受管列表剔除 {names}？\n"
                                     "（不会删除文件；可在「未受管MOD」页的“恢复已排除文件”中恢复显示）"):
             return
-        for m in sel:
-            self._exclude_mod(m)
-        self.refresh_all()
+        self._set_busy(True)
 
-    def _exclude_mod(self, m):
-        files = updater.exclude_installed(self.cfg, self.db, self.installed, m["mod_id"])
-        self._log(f"已剔除 {m['name_en']}: {', '.join(files) or '无文件'}")
+        def job():
+            return [(m["name_en"],
+                     updater.exclude_installed(self.cfg, self.db, self.installed, m["mod_id"]))
+                    for m in sel]
+
+        def done(out):
+            self._set_busy(False)
+            for name, files in out:
+                self._log(f"已剔除 {name}: {', '.join(files) or '无文件'}")
+            self.refresh_all()
+        self._run_async(job, on_done=done)
 
     def delete_selected(self):
         sel = self._selected_inst()
         if not sel:
             messagebox.showinfo("提示", "请先选中要删除的mod")
             return
-        for m in sel:
-            self._delete_mod(m)
-        self.refresh_all()
-
-    def _delete_mod(self, m):
-        if not messagebox.askyesno("确认删除", f"删除 {m['name_en']}？\n"
-                                   f"（影响端别：{INSTALL_SIDE_CN[m['install_side']]}；\n"
-                                   "jar 会移入 data/backup 备份目录并加 .deleted 后缀，可手动恢复）"):
+        if not self._check_not_busy():
             return
-        r = updater.delete_mod(self.cfg, self.db, self.installed, m["mod_id"])
-        if r["action"] == "deleted":
-            for d in r["deleted"]:
-                self._log(f"已删除 {d}")
-        if r.get("error"):
-            self._log(f"[错误] 删除 {m['name_en']}: {r['error']}")
+        for m in sel:
+            if not messagebox.askyesno("确认删除", f"删除 {m['name_en']}？\n"
+                                       f"（影响端别：{INSTALL_SIDE_CN[m['install_side']]}；\n"
+                                       "jar 会移入 data/backup 备份目录并加 .deleted 后缀，可手动恢复）"):
+                return
+        self._set_busy(True)
+
+        def job():
+            return [(m["name_en"],
+                     updater.delete_mod(self.cfg, self.db, self.installed, m["mod_id"]))
+                    for m in sel]
+
+        def done(out):
+            self._set_busy(False)
+            for name, r in out:
+                if r["action"] == "deleted":
+                    for d in r["deleted"]:
+                        self._log(f"已删除 {d}")
+                if r.get("error"):
+                    self._log(f"[错误] 删除 {name}: {r['error']}")
+            self.refresh_all()
+        self._run_async(job, on_done=done)
 
     def open_link_selected(self):
         sel = self._selected_inst()
@@ -818,11 +999,10 @@ class GuiApp:
             menu.add_command(label=f"锁定/解锁{tag}", command=self.lock_selected)
             menu.add_command(label=f"打开下载页{tag}", command=self.open_link_selected)
         else:
-            menu.add_command(label="启用/禁用",
-                             command=lambda: (self._toggle_mod(m), self.refresh_installed()))
-            menu.add_command(label="锁定/解锁",
-                             command=lambda: (self._lock_mod(m), self.refresh_installed()))
+            menu.add_command(label="启用/禁用", command=self.toggle_selected)
+            menu.add_command(label="锁定/解锁", command=self.lock_selected)
             menu.add_command(label="打开下载页", command=lambda: self._open_link_mod(m))
+            menu.add_command(label="浏览备份…", command=lambda: self._backup_dialog(m))
         menu.add_separator()
         sides = list(m["sides"])
         if len(sides) == 1:
@@ -839,10 +1019,8 @@ class GuiApp:
             menu.add_command(label=f"删除mod...{tag}", command=self.delete_selected)
             menu.add_command(label=f"从列表剔除{tag}", command=self.exclude_selected)
         else:
-            menu.add_command(label="删除mod...",
-                             command=lambda: (self._delete_mod(m), self.refresh_all()))
-            menu.add_command(label="从列表剔除",
-                             command=lambda: (self._exclude_mod(m), self.refresh_all()))
+            menu.add_command(label="删除mod...", command=self.delete_selected)
+            menu.add_command(label="从列表剔除", command=self.exclude_selected)
         if m.get("duplicates"):
             menu.add_separator()
             menu.add_command(label=f"清理重复jar（{sum(len(v) for v in m['duplicates'].values())}个）",
@@ -876,6 +1054,7 @@ class GuiApp:
         if e.get("detail"):
             lines.append(f"\n详细信息:\n{e['detail']}")
         top = tk.Toplevel(self.root)
+        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
         top.title(f"{m['name_en']} {m.get('name_cn') or ''}")
         top.geometry("680x460")
         frame = ttk.Frame(top)
@@ -885,6 +1064,73 @@ class GuiApp:
         t.configure(state="disabled")
         t.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(t, frame)
+
+    def _backup_dialog(self, m):
+        """备份管理：列出该mod的全部备份，可恢复任意版本（对齐 CLI 菜单9）。"""
+        by_side = updater.list_backups(self.cfg)
+        rows = [(side, p) for side in ("client", "server")
+                for p in by_side.get(side, {}).get(m["mod_id"], [])]
+        top = tk.Toplevel(self.root)
+        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
+        top.title(f"备份管理 - {m['name_en']}")
+        top.geometry("720x400")
+        ttk.Label(top, text="按备份时间倒序；选中一份后点「恢复」，当前文件会先自动备份。",
+                  font=FONT).pack(anchor="w", padx=8, pady=(8, 2))
+        cols = ("side", "file", "time")
+        frame = ttk.Frame(top)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="browse")
+        for c, h, w in zip(cols, ("端别", "备份文件", "备份时间"), (80, 440, 140)):
+            tree.heading(c, text=h)
+            tree.column(c, width=w, anchor="w")
+        tree.pack(side="left", fill="both", expand=True)
+        self._attach_scrollbar(tree, frame)
+        for side, p in rows:
+            try:
+                ts = self._fmt_time(p.stat().st_mtime)
+            except OSError:
+                ts = "?"
+            tree.insert("", "end", iid=f"{side}|{p}",
+                        values=(SIDE_LABELS[side], p.name, ts))
+        if not rows:
+            tree.insert("", "end", values=("—", "（暂无备份）", "—"))
+
+        btns = ttk.Frame(top)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+        sel_var = {"p": None}
+
+        def selected():
+            iid = tree.selection()[0] if tree.selection() else None
+            if not iid:
+                return None
+            side, _, path = iid.partition("|")
+            return side, Path(path)
+
+        def do_restore():
+            got = selected()
+            if not got:
+                return
+            side, path = got
+            if not messagebox.askyesno(
+                    "确认恢复",
+                    f"恢复 {SIDE_LABELS[side]} 的 {path.name}？\n当前文件会先自动备份。"):
+                return
+            r = updater.restore_backup(self.cfg, self.db, self.installed, side, path)
+            if r["action"] == "restored":
+                self._log(f"已恢复 {m['name_en']}（{SIDE_LABELS[side]}）→ {r['file']}")
+                top.destroy()
+                self.refresh_installed()
+            else:
+                messagebox.showerror("恢复失败", r.get("error") or "未知错误")
+
+        def do_reveal():
+            got = selected()
+            if got:
+                self._reveal(got[1])
+
+        ttk.Button(btns, text="恢复选中备份", command=do_restore).pack(side="left")
+        ttk.Button(btns, text="在资源管理器中打开", command=do_reveal).pack(side="left", padx=6)
+        ttk.Button(btns, text="关闭", command=top.destroy).pack(side="right")
 
     def _cleanup_dups(self, m):
         dups = []
@@ -972,6 +1218,7 @@ class GuiApp:
     def _edit_name_cn(self, e):
         """编辑/新增中文名（留空恢复wiki原名）。"""
         top = tk.Toplevel(self.root)
+        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
         top.title(f"编辑中文名 - {e['name_en']}")
         top.geometry("420x150")
         ttk.Label(top, text="中文名（留空=恢复wiki原文）:", font=FONT).pack(anchor="w", padx=12, pady=(12, 4))
@@ -1011,8 +1258,12 @@ class GuiApp:
 
         def job():
             out = []
+            done = 0
             for e in sel:
                 sides, note = updater.auto_install_sides(e, self.cfg)
+                done += 1
+                self._push_progress(done, len(sel),
+                                    f"批量安装 {done}/{len(sel)}: {e['name_en'] or e['id']}")
                 for side in sides:
                     r = updater.install_mod(self.cfg, self.db, self.installed, e["id"], side)
                     r["side"], r["name"] = side, e["name_en"] or e["id"]
@@ -1033,6 +1284,7 @@ class GuiApp:
                     self._log(f"已跳过 {r['name']}: {r.get('note')}")
                 elif r["action"] == "manual":
                     self._log(f"{label} {r['name']}: {r.get('note') or '需手动下载'}")
+                    self._offer_open_download_page(r.get("entry"))
                 elif r["action"] == "skipped_incompatible":
                     self._log(f"[跳过] {label} {r['name']}: {r.get('note')}")
                 else:
@@ -1053,6 +1305,7 @@ class GuiApp:
             return
         cur = updater.current_source_url(e)
         top = tk.Toplevel(self.root)
+        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
         top.title(f"选择下载源 - {e['name_en']}")
         top.geometry("640x360")
         var = tk.StringVar(value=cur)
@@ -1101,7 +1354,7 @@ class GuiApp:
     def _installed_marks(self) -> dict:
         """{mod_id: install_side}，用于标记可添加列表中已安装的mod。"""
         marks = {}
-        for m in updater.build_merged_registry(self.cfg, self.db, self.installed):
+        for m in self._merged_registry():
             marks[m["mod_id"]] = m["install_side"]
         return marks
 
@@ -1153,6 +1406,7 @@ class GuiApp:
         marks = self._installed_marks()
         installed_txt = INSTALL_SIDE_CN.get(marks.get(e["id"]), "未安装")
         top = tk.Toplevel(self.root)
+        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
         top.title(f"{e['name_en']} {e['name_cn']}")
         top.geometry("680x460")
         src = updater.current_source_url(e)
@@ -1226,7 +1480,9 @@ class GuiApp:
             out = []
             for side in sides:
                 r = updater.install_mod(self.cfg, self.db, self.installed, e["id"], side,
-                                        version=ver)
+                                        version=ver,
+                                        progress_cb=self._download_progress_cb(
+                                            f"下载 {e['name_en']}"))
                 r["side"], r["name"] = side, e["name_en"] or e["id"]
                 out.append(r)
             return out
@@ -1242,6 +1498,9 @@ class GuiApp:
                 self._log(f"已安装到{label}: {r['name']} v{r['version']}")
             elif r["action"] == "manual":
                 self._log(f"{label} {r['name']}: {r.get('note') or '需手动下载'}")
+                self._offer_open_download_page(r.get("entry"))
+            elif r["action"] == "skipped_incompatible":
+                self._log(f"[跳过] {label} {r['name']}: {r.get('note')}")
             else:
                 self._log(f"[错误] {label} {r['name']}: {r.get('error')}")
                 if r.get("warning"):
@@ -1254,6 +1513,7 @@ class GuiApp:
     def _version_picker(self, options, current=None, title="选择版本"):
         """模态版本选择对话框。返回版本字符串或 None（取消）。"""
         top = tk.Toplevel(self.root)
+        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
         top.title(title)
         top.geometry("560x440")
         gtnh = self.cfg.data.get("gtnh_version") or ""
@@ -1312,11 +1572,14 @@ class GuiApp:
         sel = self._selected_addable()
         if not sel:
             return
+        opened = 0
         for e in sel:
             url = (e["urls"] or {}).get("github") or (e["urls"] or {}).get("curseforge")
             if url:
                 webbrowser.open(url)
-                return
+                opened += 1
+        if not opened:
+            messagebox.showinfo("提示", "选中的mod没有可用下载链接")
 
     def refresh_wiki(self):
         if self.busy:
@@ -1424,6 +1687,7 @@ class GuiApp:
             return
         entries = sorted(self.db.all(), key=lambda e: e["id"])
         top = tk.Toplevel(self.root)
+        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
         top.title("选择要关联的mod")
         frame = ttk.Frame(top)
         frame.pack(fill="both", expand=True, padx=8, pady=8)
@@ -1472,6 +1736,7 @@ class GuiApp:
             messagebox.showinfo("提示", "没有被剔除/忽略的文件")
             return
         top = tk.Toplevel(self.root)
+        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
         top.title("恢复已排除文件")
         top.geometry("560x320")
         frame = ttk.Frame(top)
@@ -1523,6 +1788,7 @@ class GuiApp:
     def _custom_source_dialog(self, existing=None):
         editing = existing is not None
         top = tk.Toplevel(self.root)
+        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
         top.title("编辑自定义源" if editing else "添加自定义源")
         top.geometry("500x360")
         f = ttk.Frame(top)
@@ -1675,12 +1941,22 @@ class GuiApp:
     def save_settings(self):
         self.cfg.set_mods_dir("client", self.client_entry.get().strip())
         self.cfg.set_mods_dir("server", self.server_entry.get().strip())
+        for side, p in (("客户端", self.cfg.client_mods_dir),
+                        ("服务端", self.cfg.server_mods_dir)):
+            if p and not p.is_dir():
+                if not messagebox.askyesno("确认",
+                        f"{side} mods 目录不存在：\n{p}\n仍要保存吗？（之后可再改）"):
+                    return
         self.cfg.data["github_token"] = self.token_entry.get().strip()
         p = self.proxy_entry.get().strip()
         if p:
             if ":" in p:
                 host, _, port = p.partition(":")
-                self.cfg.data["proxy"] = {"host": host, "port": int(port or 8080)}
+                try:
+                    self.cfg.data["proxy"] = {"host": host, "port": int(port or 8080)}
+                except ValueError:
+                    messagebox.showerror("错误", "代理端口必须是数字")
+                    return
             else:
                 self.cfg.data["proxy"] = {"host": p, "port": 8080}
         else:
@@ -1710,6 +1986,11 @@ class GuiApp:
 
 def run():
     data_dir = utils.resolve_data_dir()
+    try:  # 高分屏 DPI 感知（Win 8.1+；失败不影响运行）
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
     try:
         app = GuiApp(data_dir)
         app.run()
