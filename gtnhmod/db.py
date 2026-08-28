@@ -25,7 +25,7 @@ class ModsDB:
     def load(self):
         data = utils.load_json(self.path, None)
         if not data:
-            # 文件缺失/损坏（load_json 失败返回 {}）→ 尝试从 .bak 自动恢复
+            # 文件缺失/损坏（load_json 显式传 None，失败返回 None）→ 尝试从 .bak 自动恢复
             bak = self.path.with_suffix(self.path.suffix + ".bak")
             recovered = utils.load_json(bak, None)
             if recovered:

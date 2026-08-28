@@ -111,6 +111,29 @@ class TestReconcile(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_reconcile_preserves_remote_cache(self):
+        """校正只覆盖磁盘可见字段，远端检查缓存（last_remote_version 等）必须保留。"""
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_recon2_"))
+        try:
+            mods_dir = tmp / "mods"
+            mods_dir.mkdir()
+            (mods_dir / "SomeMod-1.2.3.jar").write_bytes(b"PK\x03\x04")
+            inst = InstalledDB(tmp / "installed.json")
+            inst.set("client", "some-mod", file_name="SomeMod-1.0.0.jar",
+                     last_remote_version="1.2.3", last_checked="2026-08-28 10:00:00",
+                     last_remote_date="2026-08-01T00:00:00Z", install_date="2026-07-01 09:00")
+            scan = {"client": scan_folder(mods_dir)}
+            match_all(scan["client"], ENTRIES)
+            reconcile(scan, inst)
+            rec = inst.get("client", "some-mod")
+            self.assertEqual(rec["last_remote_version"], "1.2.3")
+            self.assertEqual(rec["last_checked"], "2026-08-28 10:00:00")
+            self.assertEqual(rec["last_remote_date"], "2026-08-01T00:00:00Z")
+            self.assertEqual(rec["install_date"], "2026-07-01 09:00")
+            self.assertEqual(rec["parsed_version"], "1.2.3")  # 磁盘版本仍被校正
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 class TestMatchRealDb(unittest.TestCase):
     """用真实 wiki 数据跑一遍匹配，检查会不会大量误配。"""

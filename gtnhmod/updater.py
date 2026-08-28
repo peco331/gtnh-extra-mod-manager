@@ -83,17 +83,19 @@ def match_compat(compat_rules: list, gtnh_version: str, mod_version: str) -> str
     return "compatible" if known else "unknown"
 
 
-def get_available_versions(entry: dict, cfg, db=None, *, force: bool = False) -> list:
+def list_install_options(entry: dict, cfg, db=None, *, force: bool = False) -> tuple:
     """列出可安装/更新的版本（最新在前），并标注适配性与推荐。
 
-    返回 [{"version","tag","body","candidates","compat","recommended","latest"}]。
-    传入 db 时会从下载资产文件名学习该mod的真实jar命名（存入aliases）。
+    返回 (options, error)：error 非空时 options 为空（网络/限流等原因），
+    调用方应把真实原因展示给用户，而不是把错误当成"无版本可用"。
+    传入 db 时会从下载资产文件名学习该mod的真实jar命名（存入aliases），
+    并缓存最新版发布时间（供「可添加MOD」按更新时间排序）。
     """
     source = Source.from_entry(entry, cfg)
     try:
         options = source.list_versions(force=force)
-    except Exception:
-        return []
+    except Exception as e:
+        return [], str(e)
     # 从首个有资产的版本学习真实jar命名（供以后扫描精确匹配）
     if db is not None:
         for o in options:
@@ -121,10 +123,11 @@ def get_available_versions(entry: dict, cfg, db=None, *, force: bool = False) ->
             "compat": compat,
             "recommended": False,
             "latest": i == 0,
+            "prerelease": o.prerelease,
             "published_at": o.published_at,
         })
     if not result:
-        return []
+        return [], None
     # 推荐：第一个确认适配的；全部 unknown 时推荐最新
     for r in result:
         if r["compat"] == "compatible":
@@ -132,7 +135,35 @@ def get_available_versions(entry: dict, cfg, db=None, *, force: bool = False) ->
             break
     else:
         result[0]["recommended"] = True
-    return result
+    return result, None
+
+
+def get_available_versions(entry: dict, cfg, db=None, *, force: bool = False) -> list:
+    """兼容包装：只返回版本列表（出错时为空列表）。新代码请用 list_install_options。"""
+    return list_install_options(entry, cfg, db, force=force)[0]
+
+
+def _pick_default_option(options: list) -> tuple:
+    """默认（不指定版本）路径选版：最新正式版优先，跳过不兼容版本。
+
+    旧逻辑用 releases/latest（不含 prerelease）；仓库只有 prerelease 时
+    退回全量候选（对齐旧 _check_via_releases 的兜底行为）。
+    返回 (选中option|None, 说明note)；None 表示所有候选均不兼容。
+    """
+    latest = options[0]
+    pool = [o for o in options if not o.get("prerelease")] or options
+    chosen = next((o for o in pool if o["compat"] != "incompatible"), None)
+    if chosen is None:
+        return None, ""
+    if chosen["version"] != latest["version"]:
+        if latest["compat"] == "incompatible":
+            note = (f"最新版 {latest['version']} 与当前 GTNH 不兼容，"
+                    f"已自动选择最新兼容版 {chosen['version']}")
+        else:
+            note = (f"最新版 {latest['version']} 为 prerelease，"
+                    f"已选择最新正式版 {chosen['version']}")
+        return chosen, note
+    return chosen, ""
 
 
 def scan_sides(cfg, db) -> dict:
@@ -153,6 +184,24 @@ def unmatched_files(cfg, db) -> dict:
     for side, files in scan_sides(cfg, db).items():
         result[side] = [f for f in files if not f.mod_id and f.file_name not in ignored]
     return result
+
+
+def reconcile_installed(cfg, db, installed) -> int:
+    """用磁盘扫描校正 installed.json（清理手动删除jar留下的残留记录）。
+
+    在程序启动时调用一次。只处理已配置目录的端别——未配置目录时扫描结果
+    为空，若照常校正会把该端别的记录全部误删。返回清理的记录数。
+    """
+    scan = {side: files for side, files in scan_sides(cfg, db).items()
+            if cfg.mods_dir(side)}
+    if not scan:
+        return 0
+    before = sum(len(installed.all_ids(side)) for side in scan)
+    scanner.reconcile(scan, installed)
+    removed = before - sum(len(installed.all_ids(side)) for side in scan)
+    if removed:
+        _log_op(cfg, f"校正已安装记录：清理 {removed} 条磁盘上已不存在的记录")
+    return removed
 
 
 def build_registry(cfg, db, installed) -> dict:
@@ -430,6 +479,7 @@ def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
     """
     results = []
     db_dirty = False
+    inst_dirty = False
     ignored = set(cfg.data.get("ignored_files") or [])
     for side in sides:
         folder = cfg.mods_dir(side)
@@ -454,7 +504,10 @@ def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
             try:
                 info = source.check(f.version, force=force)
                 if info.latest_version:
-                    installed.touch_checked(side, f.mod_id, info.latest_version)
+                    # 批量模式：收尾一次性保存（N个mod = N次全文件重写太浪费）
+                    installed.touch_checked(side, f.mod_id, info.latest_version,
+                                            remote_date=info.published_at, save=False)
+                    inst_dirty = True
                 if info.candidates:
                     _learn_asset_name(db, entry, info.candidates[0].file_name)
                 if info.published_at and entry.get("release_date") != info.published_at:
@@ -467,6 +520,8 @@ def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
                 progress_cb(side, f.mod_id)
     if db_dirty:
         db.save()
+    if inst_dirty:
+        installed.save()
     return results
 
 
@@ -484,9 +539,9 @@ def version_status(current, latest) -> str:
 
 def install_mod(cfg, db, installed, mod_id: str, side: str, *,
                 version: str = None, progress_cb=None) -> dict:
-    """安装 mod 到指定端别。version 指定时安装该版本（否则最新）。
+    """安装 mod 到指定端别。version 指定时安装该版本（否则最新兼容版）。
 
-    返回结果 dict（action: installed/manual/error）。
+    返回结果 dict（action: installed/manual/skipped_incompatible/error）。
     """
     entry = db.get(mod_id)
     if not entry:
@@ -496,12 +551,16 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
         return {"action": "error",
                 "error": f"{SIDE_LABELS[side]}mods目录未设置或不存在，请先在设置中配置"}
     warn = _side_warning(entry, side)
-    source = Source.from_entry(entry, cfg)
+    name = entry.get("name_en") or mod_id
+    gtnh = (cfg.data.get("gtnh_version") or "").strip()
+    options, err = list_install_options(entry, cfg, db, force=True)
+    if err:
+        _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {name} 失败: {err}")
+        return {"action": "error", "error": f"查询版本列表失败: {err}"}
     if version is not None:
-        opt = next((o for o in get_available_versions(entry, cfg, db, force=True)
-                    if o["version"] == version), None)
+        opt = next((o for o in options if o["version"] == version), None)
         if not opt:
-            _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {entry.get('name_en') or mod_id} 失败: 版本 {version} 不可用")
+            _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {name} 失败: 版本 {version} 不可用")
             return {"action": "error", "error": f"版本 {version} 不可用（列表可能已过期，请重试）"}
         if not opt["candidates"]:
             return {"action": "manual", "note": f"版本 {version} 无自动下载资产，需手动下载",
@@ -511,15 +570,27 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
                           utils.now_str(), f"已选版本 {version}",
                           opt.get("published_at"))
     else:
-        try:
-            info = source.check(None, force=True)
-        except Exception as e:
-            return {"action": "error", "error": f"查询最新版本失败: {e}"}
-        if not info.candidates:
-            return {"action": "manual", "note": info.note or "该mod无自动下载渠道",
+        if not options:
+            # 无任何版本：取源的说明（手动源/CurseForge 的引导文案）
+            try:
+                info0 = Source.from_entry(entry, cfg).check(None, force=True)
+            except Exception:
+                info0 = None
+            note = (info0.note if info0 and info0.note else "") or "该mod无自动下载渠道"
+            return {"action": "manual", "note": note, "entry": entry, "warning": warn}
+        chosen, note = _pick_default_option(options)
+        if chosen is None:
+            msg = (f"现有版本均与 GTNH {gtnh} 不兼容，未自动安装"
+                   f"（最新版 {options[0]['version']}），可在版本列表中手动选择")
+            _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {name}: {msg}")
+            return {"action": "skipped_incompatible", "note": msg,
                     "entry": entry, "warning": warn}
-        cand = info.candidates[0]
-    _touch_release_date(db, entry, info.published_at)
+        if not chosen["candidates"]:
+            return {"action": "manual", "note": note or "该mod无自动下载渠道",
+                    "entry": entry, "warning": warn}
+        cand = chosen["candidates"][0]
+        info = UpdateInfo(chosen["version"], chosen["candidates"], chosen["body"],
+                          utils.now_str(), note, chosen.get("published_at"))
     old = find_installed_file(cfg, db, side, mod_id)
     try:
         dest, unremoved = downloader.update_with_backup(
@@ -637,9 +708,9 @@ def _cleanup_extras(cfg, db, side: str, mod_id: str, dest: Path,
 
 def update_mod(cfg, db, installed, mod_id: str, side: str, *,
                version: str = None, progress_cb=None) -> dict:
-    """更新已安装 mod。version 指定时更新到该版本（否则最新）。
+    """更新已安装 mod。version 指定时更新到该版本（否则最新兼容版）。
 
-    返回结果 dict（action: updated/uptodate/manual/error）。
+    返回结果 dict（action: updated/uptodate/manual/skipped_incompatible/error）。
     """
     entry = db.get(mod_id)
     if not entry:
@@ -651,12 +722,15 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
     old = find_installed_file(cfg, db, side, mod_id)
     if not old:
         return {"action": "error", "error": f"{SIDE_LABELS[side]}未找到已安装文件"}
-    source = Source.from_entry(entry, cfg)
+    gtnh = (cfg.data.get("gtnh_version") or "").strip()
+    options, err = list_install_options(entry, cfg, db, force=True)
+    if err:
+        _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id} 失败: {err}")
+        return {"action": "error", "error": f"查询版本列表失败: {err}"}
     if version is not None:
         if old.version and version == old.version:
             return {"action": "uptodate", "version": old.version, "note": "已是指定版本"}
-        opt = next((o for o in get_available_versions(entry, cfg, db, force=True)
-                    if o["version"] == version), None)
+        opt = next((o for o in options if o["version"] == version), None)
         if not opt:
             _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id} 失败: 版本 {version} 不可用")
             return {"action": "error", "error": f"版本 {version} 不可用（列表可能已过期，请重试）"}
@@ -667,21 +741,32 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
                           utils.now_str(), f"已选版本 {version}",
                           opt.get("published_at"))
     else:
-        try:
-            info = source.check(old.version, force=True)
-        except Exception as e:
-            return {"action": "error", "error": f"查询最新版本失败: {e}"}
-        if not info.candidates:
-            return {"action": "manual", "note": info.note or "该mod无自动下载渠道",
-                    "entry": entry}
-        if old.version and info.latest_version:
+        if not options:
             try:
-                if compare(info.latest_version, old.version) <= 0:
+                info0 = Source.from_entry(entry, cfg).check(None, force=True)
+            except Exception:
+                info0 = None
+            note = (info0.note if info0 and info0.note else "") or "该mod无自动下载渠道"
+            return {"action": "manual", "note": note, "entry": entry}
+        latest = options[0]
+        chosen, note = _pick_default_option(options)
+        if chosen is None:
+            msg = (f"现有版本均与 GTNH {gtnh} 不兼容，未自动更新"
+                   f"（最新版 {latest['version']}），可在版本列表中手动选择")
+            _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id}: {msg}")
+            return {"action": "skipped_incompatible", "note": msg, "entry": entry}
+        if old.version:
+            try:
+                if compare(chosen["version"], old.version) <= 0:
                     return {"action": "uptodate", "version": old.version,
-                            "note": "已是最新版本"}
+                            "note": note or "已是最新版本"}
             except VersionParseError:
                 pass
-    _touch_release_date(db, entry, info.published_at)
+        if not chosen["candidates"]:
+            return {"action": "manual", "note": note or "该版本无自动下载资产，需手动下载",
+                    "entry": entry}
+        info = UpdateInfo(chosen["version"], chosen["candidates"], chosen["body"],
+                          utils.now_str(), note, chosen.get("published_at"))
     cand = info.candidates[0]
     try:
         dest, unremoved = downloader.update_with_backup(
@@ -795,6 +880,7 @@ def delete_mod(cfg, db, installed, mod_id: str, *, sides: tuple = SIDES) -> dict
     name = entry.get("name_en") or mod_id
     deleted, errors = [], []
     for side in sides:
+        side_err = len(errors)  # 本端别处理前的错误数（错误跨端共享时判定会误伤）
         files = find_installed_files(cfg, db, side, mod_id)
         if not files:
             continue
@@ -810,7 +896,7 @@ def delete_mod(cfg, db, installed, mod_id: str, *, sides: tuple = SIDES) -> dict
                 errors.append(f"{SIDE_LABELS[side]} 文件被占用，请先关闭游戏/服务端: {f.file_name}")
             except OSError as e:
                 errors.append(f"{SIDE_LABELS[side]} 删除失败: {e}")
-        if not errors:
+        if len(errors) == side_err:
             installed.remove(side, mod_id)
     if not deleted and not errors:
         return {"action": "error", "error": "未找到该mod的文件"}
@@ -820,8 +906,30 @@ def delete_mod(cfg, db, installed, mod_id: str, *, sides: tuple = SIDES) -> dict
 
 # ---------- 备份 ----------
 
+def prune_all_backups(cfg) -> int:
+    """按每mod保留数清理存量超限备份（含 .deleted），返回删除的文件数。
+
+    修复前的 prune 按新文件名匹配旧备份，永远清不到，备份目录会无限
+    增长；启动时调用一次把历史积压清掉（超出保留数的旧备份被删除）。
+    """
+    base = cfg.backup_dir
+    if not base.is_dir():
+        return 0
+    removed = 0
+    for side in SIDES:
+        side_dir = base / side
+        if not side_dir.is_dir():
+            continue
+        for mod_dir in side_dir.iterdir():
+            if mod_dir.is_dir():
+                removed += downloader.prune_backups(mod_dir, cfg.backup_keep)
+    if removed:
+        _log_op(cfg, f"按每mod保留数 {cfg.backup_keep} 清理存量备份：删除 {removed} 个文件")
+    return removed
+
+
 def list_backups(cfg) -> dict:
-    """列出备份：{side: {mod_id: [Path,...]}}。"""
+    """列出备份：{side: {mod_id: [Path,...]}}（每个 mod 内最新在前）。"""
     out = {}
     base = cfg.backup_dir
     if not base.is_dir():
@@ -833,8 +941,8 @@ def list_backups(cfg) -> dict:
         for mod_dir in sorted(side_dir.iterdir()):
             if not mod_dir.is_dir():
                 continue
-            files = sorted(list(mod_dir.glob("*.jar")) + list(mod_dir.glob("*.jar.deleted")),
-                           key=lambda p: p.stat().st_mtime, reverse=True)
+            # backup_files 已按 mtime 排序并对消失的文件容错
+            files = list(reversed(downloader.backup_files(mod_dir)))
             if files:
                 out.setdefault(side, {})[mod_dir.name] = files
     return out

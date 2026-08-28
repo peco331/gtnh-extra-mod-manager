@@ -42,6 +42,12 @@ class GuiApp:
         self.cfg = Config(data_dir)
         self.db = ModsDB(data_dir / "mods_db.json")
         self.installed = InstalledDB(data_dir / "installed.json")
+        # 启动维护：清理手动删除jar的残留记录 + 按保留数清理积压备份
+        try:
+            updater.reconcile_installed(self.cfg, self.db, self.installed)
+            updater.prune_all_backups(self.cfg)
+        except OSError as e:
+            utils.append_log(data_dir, f"启动维护失败: {e}")
         self.queue: queue.Queue = queue.Queue()
         self.busy = False
 
@@ -594,12 +600,17 @@ class GuiApp:
         entry = self.db.get(m["mod_id"]) or {}
         self._log(f"正在获取 {m['name_en']} 的可用版本列表...")
         self._run_async(
-            lambda: updater.get_available_versions(entry, self.cfg, self.db, force=True),
-            on_done=lambda opts: self._on_versions_for_update(opts, m))
+            lambda: updater.list_install_options(entry, self.cfg, self.db, force=True),
+            on_done=lambda result: self._on_versions_for_update(result, m))
 
-    def _on_versions_for_update(self, options, m):
-        if options is None:
+    def _on_versions_for_update(self, result, m):
+        if result is None:
             self._log(f"[错误] {m['name_en']}: 获取版本列表失败，已跳过")
+            self._process_next_update()
+            return
+        options, err = result
+        if err:
+            self._log(f"[错误] {m['name_en']}: 获取版本列表失败（{err}），已跳过")
             self._process_next_update()
             return
         if not options:
@@ -661,6 +672,8 @@ class GuiApp:
                 self._log(f"{label} {name}: 已是最新")
             elif r["action"] == "manual":
                 self._log(f"{label} {name}: {r.get('note') or '需手动下载'}")
+            elif r["action"] == "skipped_incompatible":
+                self._log(f"[跳过] {label} {name}: {r.get('note')}")
             else:
                 self._log(f"[错误] {label} {name}: {r.get('error')}")
             if r.get("leftover"):
@@ -1020,6 +1033,8 @@ class GuiApp:
                     self._log(f"已跳过 {r['name']}: {r.get('note')}")
                 elif r["action"] == "manual":
                     self._log(f"{label} {r['name']}: {r.get('note') or '需手动下载'}")
+                elif r["action"] == "skipped_incompatible":
+                    self._log(f"[跳过] {label} {r['name']}: {r.get('note')}")
                 else:
                     self._log(f"[错误] {label} {r['name']}: {r.get('error')}")
             self._log(f"批量安装完成：成功 {n_ok} 个")
@@ -1178,12 +1193,17 @@ class GuiApp:
         self._set_busy(True)
         self._log(f"正在获取 {e['name_en']} 的可用版本列表...")
         self._run_async(
-            lambda: updater.get_available_versions(e, self.cfg, self.db, force=True),
-            on_done=lambda opts: self._on_versions_for_install(opts, e, sides, note))
+            lambda: updater.list_install_options(e, self.cfg, self.db, force=True),
+            on_done=lambda result: self._on_versions_for_install(result, e, sides, note))
 
-    def _on_versions_for_install(self, options, e, sides, note):
+    def _on_versions_for_install(self, result, e, sides, note):
         self._set_busy(False)
-        if options is None:
+        if result is None:
+            return
+        options, err = result
+        if err:
+            messagebox.showerror("获取版本列表失败", err)
+            self._log(f"[错误] {e['name_en']}: {err}")
             return
         if not options:
             # manual/curseforge 源无版本列表 → 直接原流程

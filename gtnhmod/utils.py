@@ -60,9 +60,11 @@ def atomic_write_json(path: Path, data) -> None:
 
 
 def load_json(path: Path, default=None):
-    """读取 JSON，文件缺失或损坏时返回 default。"""
-    if default is None:
-        default = {}
+    """读取 JSON，文件缺失或损坏时返回 default。
+
+    default 显式传 None 时失败返回 None（调用方可借此区分"损坏"与"空对象"）；
+    不传 default 时失败返回 {}。
+    """
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)

@@ -1,6 +1,7 @@
 """下载、jar 校验、旧版本备份与替换。"""
 import os
 import shutil
+import zipfile
 from pathlib import Path
 
 from . import net, utils
@@ -46,7 +47,7 @@ def atomic_replace(src: Path, dst: Path) -> None:
 
 
 def verify_jar(path: Path) -> None:
-    """校验下载产物：非空、zip 魔数、不是 HTML 错误页。失败抛 VerifyError。"""
+    """校验下载产物：非空、zip 魔数、不是 HTML 错误页、zip 结构完整。失败抛 VerifyError。"""
     try:
         size = path.stat().st_size
     except OSError:
@@ -60,6 +61,14 @@ def verify_jar(path: Path) -> None:
         raise VerifyError(f"下载到的是错误页面而非jar: {path.name}")
     if not head.startswith(ZIP_MAGICS):
         raise VerifyError(f"文件不是有效的 jar/zip: {path.name}")
+    # 魔数只覆盖前512字节，被截断的 zip 也能通过——完整校验中央目录与 CRC
+    try:
+        with zipfile.ZipFile(path) as z:
+            bad = z.testzip()
+    except (zipfile.BadZipFile, OSError) as e:
+        raise VerifyError(f"jar 压缩结构损坏（可能下载不完整）: {path.name}（{e}）")
+    if bad is not None:
+        raise VerifyError(f"jar 内部文件损坏: {path.name}（{bad}）")
 
 
 def _unique_backup_path(backup_dir: Path, file_name: str) -> Path:
@@ -72,18 +81,39 @@ def _unique_backup_path(backup_dir: Path, file_name: str) -> Path:
     return bak
 
 
-def _prune_backups(backup_dir: Path, file_name: str, keep: int) -> None:
-    """清理超出保留数的旧备份（按修改时间从旧到新）。"""
+def _backup_mtime(p: Path) -> float:
     try:
-        old = sorted(backup_dir.glob(f"*_{file_name}"),
-                     key=lambda p: p.stat().st_mtime)
+        return p.stat().st_mtime
     except OSError:
-        return
-    while len(old) > max(0, keep):
+        return 0.0
+
+
+def backup_files(backup_dir: Path) -> list:
+    """备份目录下的全部备份文件（jar 与 .deleted），按 mtime 旧→新排序。"""
+    try:
+        files = list(backup_dir.glob("*.jar")) + list(backup_dir.glob("*.jar.deleted"))
+        return sorted(files, key=lambda p: (_backup_mtime(p), p.name))
+    except OSError:
+        return []
+
+
+def prune_backups(backup_dir: Path, keep: int) -> int:
+    """清理超出保留数的旧备份，返回删除的文件数。
+
+    按整个备份目录清理而非按文件名匹配：备份保存的是旧 jar 的文件名，
+    更新后文件名随版本号变化，按新文件名 glob 永远匹配不到旧备份，
+    会导致备份无限累积。.deleted 备份（删除操作移入）一并计入保留数。
+    """
+    files = backup_files(backup_dir)
+    excess = files[:max(0, len(files) - max(0, keep))]
+    removed = 0
+    for p in excess:
         try:
-            old.pop(0).unlink()
+            p.unlink()
+            removed += 1
         except OSError:
             pass
+    return removed
 
 
 def update_with_backup(cand, dest_dir: Path, backup_dir: Path, *,
@@ -133,5 +163,5 @@ def update_with_backup(cand, dest_dir: Path, backup_dir: Path, *,
                 v.unlink()
             except OSError:
                 failed.append(v.name)
-    _prune_backups(backup_dir, target.name, backup_keep)
+    prune_backups(backup_dir, backup_keep)
     return target, failed

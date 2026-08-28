@@ -146,7 +146,9 @@ def reconcile(scan_by_side: dict, installed: "InstalledDB") -> dict:
     """用磁盘扫描结果校正 installed.json。
 
     返回 {side: {mod_id: InstalledFile}}（当前磁盘上真实存在的、已匹配的文件）。
-    installed.json 中文件已不存在的记录会被清除。
+    installed.json 中文件已不存在的记录会被清除。只校正磁盘可见字段，
+    保留 last_remote_version/last_checked 等远端检查缓存（避免每次校正
+    都把检查结果清掉、白白多耗一次 GitHub 配额）。
     """
     live: dict = {}
     for side, files in scan_by_side.items():
@@ -160,8 +162,9 @@ def reconcile(scan_by_side: dict, installed: "InstalledDB") -> dict:
                           file_name=f.file_name,
                           parsed_version=f.version or "",
                           enabled=f.enabled,
-                          install_date=inst.get("install_date") or None,
-                          updated_at=inst.get("updated_at") or None,
+                          **{k: inst[k] for k in
+                             ("install_date", "updated_at", "last_remote_version",
+                              "last_checked", "last_remote_date") if k in inst},
                           locked=bool(inst.get("locked")))
         # 清理已不存在于磁盘的记录
         for mod_id in installed.all_ids(side):

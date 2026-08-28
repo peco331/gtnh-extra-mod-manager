@@ -2,10 +2,12 @@
 
 使用 local_folder 源（无网络）。
 """
+import io
 import shutil
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -16,11 +18,20 @@ from gtnhmod.installed import InstalledDB  # noqa: E402
 from gtnhmod import updater  # noqa: E402
 from gtnhmod.scanner import scan_folder  # noqa: E402
 
-JAR = b"PK\x03\x04" + b"\x00" * 64
+
+def _jar_bytes() -> bytes:
+    """构造真实的最小 zip（verify_jar 校验 zip 中央目录，假魔数字节过不了）。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("TestMod.txt", "dummy jar for tests")
+    return buf.getvalue()
 
 
-def make_jar(path: Path, content: bytes = JAR) -> Path:
-    path.write_bytes(content)
+JAR = _jar_bytes()
+
+
+def make_jar(path: Path, content: bytes = None) -> Path:
+    path.write_bytes(content if content is not None else JAR)
     return path
 
 
@@ -69,17 +80,17 @@ class TestE2E(unittest.TestCase):
         self.assertEqual(info.latest_version, expect)
 
     def step_update(self):
-        n_before = len(list((self.cfg.backup_dir / "client" / self.mod_id).glob("*.jar")))
         r = updater.update_mod(self.cfg, self.db, self.installed, self.mod_id, "client")
         self.assertEqual(r["action"], "updated", r)
         self.assertEqual(r["to"], "1.1.0")
         # 旧文件已移除、新文件就位
         names = [p.name for p in self.client_mods.glob("*.jar*")]
         self.assertEqual(names, ["TestMod-1.7.10-1.1.0.jar"])
-        # 备份存在（按端别/目录存放；比更新前多一份）
+        # 备份存在（prune 按整个备份目录保留 backup_keep 份，共享目录可能已满）
         backups = list((self.cfg.backup_dir / "client" / self.mod_id).glob("*.jar"))
-        self.assertEqual(len(backups), n_before + 1)
-        self.assertTrue(any("TestMod-1.7.10-1.0.0.jar" in b.name for b in backups))
+        self.assertLessEqual(len(backups), self.cfg.backup_keep)
+        self.assertTrue(any("TestMod-1.7.10-1.0.0.jar" in b.name for b in backups),
+                        sorted(b.name for b in backups))
 
     def test_full_chain(self):
         # 1. 安装 1.0.0
@@ -443,6 +454,41 @@ class TestE2E(unittest.TestCase):
         um = updater.unmatched_files(self.cfg, self.db)
         self.assertFalse(any(f.file_name == unknown.name for f in um["client"]))
         self.db.remove_custom(eid)
+
+
+class TestInstalledBakRecovery(unittest.TestCase):
+    """installed.json 损坏/缺失时从 .bak 自动恢复（锁定状态不能静默丢失）。"""
+
+    def test_corrupt_main_recovers_from_bak(self):
+        import json
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_inst_"))
+        try:
+            p = tmp / "installed.json"
+            good = {"version": 1,
+                    "installed": {"client": {"m1": {"locked": True,
+                                                    "file_name": "M-1.0.0.jar"}}}}
+            p.write_text(json.dumps(good), encoding="utf-8")
+            p.with_suffix(".json.bak").write_text(json.dumps(good), encoding="utf-8")
+            # 主文件损坏 → 恢复
+            p.write_text("{broken json", encoding="utf-8")
+            db = InstalledDB(p)
+            self.assertTrue(db.get("client", "m1")["locked"])
+            self.assertEqual(db.get("client", "m1")["file_name"], "M-1.0.0.jar")
+            # 主文件缺失 → 同样恢复
+            p.unlink()
+            db2 = InstalledDB(p)
+            self.assertTrue(db2.get("client", "m1")["locked"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_first_run_no_bak_starts_empty(self):
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_inst2_"))
+        try:
+            db = InstalledDB(tmp / "installed.json")
+            self.assertEqual(db.all_ids("client"), [])
+            self.assertEqual(db.all_ids("server"), [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

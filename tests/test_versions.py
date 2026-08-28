@@ -131,5 +131,28 @@ class TestSplit(unittest.TestCase):
                          ("modernmarkings", None, "0.3.13-1.7.10"))
 
 
+class TestCompareTieBreak(unittest.TestCase):
+    """结构化键相等时的 tie-break：不同构建可分先后，多出的未知后缀仍判等。"""
+
+    def test_distinct_builds_no_longer_equal(self):
+        # 旧版把未知字母 token 全部忽略 → 不同构建判等 → 更新被漏报
+        self.assertEqual(compare("1.2.3s", "1.2.3t"), -1)
+        self.assertEqual(compare("1.2.3t", "1.2.3s"), 1)
+        self.assertEqual(compare("1.0.0+build.9", "1.0.0+build.5"), 1)
+
+    def test_extra_unknown_suffix_still_equal(self):
+        self.assertEqual(compare("2.0.0-GTNH", "2.0.0"), 0)
+        self.assertEqual(compare("1.0.0", "1.0.0.0"), 0)
+        self.assertEqual(compare("1.0", "1.0.0"), 0)
+
+    def test_numeric_tokens_compared_numerically(self):
+        # p05 与 p5 数值等价（GTNH 补丁段）；build.10 比 build.9 新（按数值）
+        self.assertEqual(compare("0.2.0p05", "0.2.0p5"), 0)
+        self.assertEqual(compare("1.0.0+build.10", "1.0.0+build.9"), 1)
+
+    def test_max_version_uses_tie_break(self):
+        self.assertEqual(max_version(["1.2.3s", "1.2.3t"]), "1.2.3t")
+
+
 if __name__ == "__main__":
     unittest.main()

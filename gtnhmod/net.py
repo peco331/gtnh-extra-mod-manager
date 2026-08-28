@@ -126,6 +126,8 @@ def download(url: str, dest: Path, *, timeout=60, proxy=None, progress_cb=None) 
     """下载到 dest。progress_cb(done_bytes, total_bytes)。失败清理半成品。
 
     url 无 :// 时视为本地路径（local_folder 源），直接复制。
+    响应带 Content-Length 时校验实际字节数，服务端提前断开（截断的 zip
+    也能通过魔数校验）直接报错，不落盘坏文件。
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     if "://" not in url:
@@ -155,6 +157,8 @@ def download(url: str, dest: Path, *, timeout=60, proxy=None, progress_cb=None) 
                     done += len(chunk)
                     if progress_cb:
                         progress_cb(done, total)
+        if total and done != total:
+            raise HttpError(-1, f"下载不完整（服务端提前断开）: {done}/{total} 字节")
         os.replace(tmp, dest)
     except BaseException:
         try:

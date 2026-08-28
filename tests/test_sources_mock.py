@@ -1,5 +1,6 @@
 """sources.py / downloader.py 测试：本地 http.server 模拟 GitHub API。"""
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -11,7 +12,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gtnhmod import net  # noqa: E402
-from gtnhmod.downloader import VerifyError, update_with_backup, verify_jar  # noqa: E402
+from gtnhmod.downloader import (  # noqa: E402
+    VerifyError, prune_backups, update_with_backup, verify_jar,
+)
 from gtnhmod.sources import (  # noqa: E402
     DownloadCandidate, GitHubSource, LocalFolderSource, ManualSource,
     extract_version, pick_assets,
@@ -36,7 +39,17 @@ TAGS_RELEASE = {
                 "browser_download_url": "http://127.0.0.1:PORT/download/main.jar", "size": 100}],
 }
 
-JAR_BYTES = b"PK\x03\x04" + b"\x00" * 100
+def _jar_bytes() -> bytes:
+    """构造真实的最小 zip（verify_jar 校验 zip 中央目录，假魔数字节过不了）。"""
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("FakeMod.txt", "dummy jar for tests")
+    return buf.getvalue()
+
+
+JAR_BYTES = _jar_bytes()
 
 
 class MockHandler(BaseHTTPRequestHandler):
@@ -340,6 +353,115 @@ class TestVerifyAndUpdate(unittest.TestCase):
             self.assertEqual(failed, ["SomeMod-1.7.10-1.0.0.jar"])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestVerifyJarZip(unittest.TestCase):
+    """verify_jar 的 zip 结构校验：截断/损坏的 jar 不能通过魔数检查蒙混过关。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="gtnh_vj_"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_accepts_real_zip(self):
+        p = self.tmp / "ok.jar"
+        p.write_bytes(JAR_BYTES)
+        verify_jar(p)  # 不抛即通过
+
+    def test_rejects_truncated_zip(self):
+        # 截断：魔数完好（前512字节内），中央目录丢失 → 旧版校验放行，新版必须拒绝
+        p = self.tmp / "cut.jar"
+        p.write_bytes(JAR_BYTES[: len(JAR_BYTES) // 2])
+        with self.assertRaises(VerifyError):
+            verify_jar(p)
+
+    def test_rejects_garbage_after_magic(self):
+        # 魔数后全是垃圾字节（非zip结构）
+        p = self.tmp / "junk.jar"
+        p.write_bytes(b"PK\x03\x04" + b"\x00" * 100)
+        with self.assertRaises(VerifyError):
+            verify_jar(p)
+
+
+class TestDownloadContentLength(unittest.TestCase):
+    """net.download 按 Content-Length 校验实际字节数，截断响应直接报错。"""
+
+    def test_truncated_response_raises(self):
+        data = _jar_bytes()
+        routes = {("GET", "/truncated.jar"): (
+            data, {"headers": {"Content-Length": str(len(data) + 50)}})}
+        srv, port = start_server(routes)
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_dl_"))
+        try:
+            dest = tmp / "x.jar"
+            with self.assertRaises(net.HttpError):
+                net.download(f"http://127.0.0.1:{port}/truncated.jar", dest)
+            self.assertFalse(dest.exists())
+            self.assertFalse((tmp / "x.jar.part").exists())
+        finally:
+            srv.shutdown()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_complete_download_ok(self):
+        data = _jar_bytes()
+        routes = {("GET", "/full.jar"): (
+            data, {"headers": {"Content-Length": str(len(data))}})}
+        srv, port = start_server(routes)
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_dl2_"))
+        try:
+            dest = tmp / "x.jar"
+            net.download(f"http://127.0.0.1:{port}/full.jar", dest)
+            self.assertEqual(dest.read_bytes(), data)
+        finally:
+            srv.shutdown()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestPruneBackups(unittest.TestCase):
+    """备份保留数按整个备份目录清理：更新改名后旧名备份也能被裁剪。"""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp(prefix="gtnh_prune_"))
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def _mkjar(self, name, mtime):
+        p = self.d / name
+        p.write_bytes(JAR_BYTES)
+        os.utime(p, (mtime, mtime))
+
+    def test_prunes_across_renames(self):
+        # 旧 bug：备份按旧文件名存，prune 按新文件名 glob 永远清不到 → 无限累积
+        self._mkjar("20250101_000000_FakeMod-1.7.10-0.9.0.jar", 1000)
+        self._mkjar("20250102_000000_FakeMod-1.7.10-1.0.0.jar", 2000)
+        self._mkjar("20250103_000000_FakeMod-1.7.10-1.1.0.jar", 3000)
+        self._mkjar("20250104_000000_FakeMod-1.7.10-1.2.0.jar", 4000)
+        removed = prune_backups(self.d, 2)
+        self.assertEqual(removed, 2)
+        remaining = sorted(p.name for p in self.d.glob("*.jar"))
+        self.assertEqual(len(remaining), 2)
+        self.assertTrue(all(n.endswith(("1.1.0.jar", "1.2.0.jar")) for n in remaining))
+
+    def test_deleted_counts_toward_keep(self):
+        self._mkjar("20250101_000000_FakeMod-1.7.10-0.9.0.jar.deleted", 1000)
+        self._mkjar("20250102_000000_FakeMod-1.7.10-1.0.0.jar", 2000)
+        removed = prune_backups(self.d, 1)
+        self.assertEqual(removed, 1)
+        remaining = list(self.d.glob("*.jar*"))
+        self.assertEqual(len(remaining), 1)
+        self.assertTrue(remaining[0].name.endswith("1.0.0.jar"))
+
+    def test_mtime_order_not_name_order(self):
+        # 按备份时间从旧到新删除：0.9.0 的备份时间更早，先被裁剪
+        # （copy2 保留了源 jar 的 mtime，多数场景下与版本新旧一致）
+        self._mkjar("20250101_000000_FakeMod-1.7.10-0.8.0.jar", 9000)  # 备份更晚
+        self._mkjar("20250102_000000_FakeMod-1.7.10-0.9.0.jar", 1000)  # 备份更早
+        prune_backups(self.d, 1)
+        remaining = [p.name for p in self.d.glob("*.jar")]
+        self.assertEqual(len(remaining), 1)
+        self.assertIn("0.8.0", remaining[0])
 
 
 if __name__ == "__main__":

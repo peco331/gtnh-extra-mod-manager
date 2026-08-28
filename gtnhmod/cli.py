@@ -28,6 +28,12 @@ class CliApp:
         self.cfg = Config(data_dir)
         self.db = ModsDB(data_dir / "mods_db.json")
         self.installed = InstalledDB(data_dir / "installed.json")
+        # 启动维护：清理手动删除jar的残留记录 + 按保留数清理积压备份
+        try:
+            updater.reconcile_installed(self.cfg, self.db, self.installed)
+            updater.prune_all_backups(self.cfg)
+        except OSError as e:
+            utils.append_log(data_dir, f"启动维护失败: {e}")
         self.ui = ConsoleUI()
 
     # ---------- 菜单入口 ----------
@@ -234,7 +240,10 @@ class CliApp:
         side_txt = "、".join(SIDE_LABELS[s] for s in sides)
         # 版本选择（有版本列表时；manual/curseforge 源无列表走原流程）
         self.ui.info("正在获取可用版本列表...")
-        options = updater.get_available_versions(entry, self.cfg, self.db, force=True)
+        options, verr = updater.list_install_options(entry, self.cfg, self.db, force=True)
+        if verr:
+            self.ui.error(f"获取版本列表失败: {verr}")
+            return
         version = None
         if options:
             version = self._pick_version_from(options, None,
@@ -265,6 +274,8 @@ class CliApp:
             url = (entry.get("urls") or {}).get("curseforge") or (entry.get("urls") or {}).get("github")
             if url and self.ui.confirm("打开浏览器手动下载?"):
                 webbrowser.open(url)
+        elif r["action"] == "skipped_incompatible":
+            self.ui.warn(f"{SIDE_LABELS[side]}: " + (r.get("note") or "版本与当前GTNH不兼容"))
         else:
             self.ui.error(f"{SIDE_LABELS[side]}: " + (r.get("error") or "安装失败"))
 
@@ -313,7 +324,10 @@ class CliApp:
         if a == 0:
             entry = self.db.get(m["mod_id"]) or {}
             self.ui.info("正在获取可用版本列表...")
-            options = updater.get_available_versions(entry, self.cfg, self.db, force=True)
+            options, verr = updater.list_install_options(entry, self.cfg, self.db, force=True)
+            if verr:
+                self.ui.error(f"获取版本列表失败: {verr}")
+                return
             version = None
             if options:
                 cur = next(iter(m["sides"].values()))
@@ -457,6 +471,8 @@ class CliApp:
                     self.ui.info(f"  {SIDE_LABELS[r['side']]} {r['name']}: 已是最新")
                 elif r["action"] == "manual":
                     self.ui.warn(f"  {SIDE_LABELS[r['side']]} {r['name']}: {r.get('note')}")
+                elif r["action"] == "skipped_incompatible":
+                    self.ui.warn(f"  {SIDE_LABELS[r['side']]} {r['name']}: {r.get('note')}")
                 else:
                     self.ui.error(f"  {SIDE_LABELS[r['side']]} {r['name']}: {r.get('error')}")
             self.ui.info(f"完成：成功更新 {n_ok} 个")
@@ -464,7 +480,10 @@ class CliApp:
         side, st = targets[idx]
         entry = self.db.get(st["mod_id"]) or {}
         self.ui.info("正在获取可用版本列表...")
-        options = updater.get_available_versions(entry, self.cfg, self.db, force=True)
+        options, verr = updater.list_install_options(entry, self.cfg, self.db, force=True)
+        if verr:
+            self.ui.error(f"获取版本列表失败: {verr}")
+            return
         version = None
         if options:
             version = self._pick_version_from(options, st["version"],
@@ -490,6 +509,8 @@ class CliApp:
             if entry and (entry["urls"].get("curseforge") or entry["urls"].get("github")):
                 if self.ui.confirm("打开下载页面?"):
                     webbrowser.open(entry["urls"]["curseforge"] or entry["urls"]["github"])
+        elif r["action"] == "skipped_incompatible":
+            self.ui.warn(r.get("note") or "版本与当前GTNH不兼容，未更新")
         else:
             self.ui.error(r.get("error") or "更新失败")
 

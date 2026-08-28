@@ -10,6 +10,7 @@
 """
 import re
 from dataclasses import dataclass
+from functools import cmp_to_key
 
 # 常见 MC 版本锚点表（文件名/标签切分用，GTNH 以 1.7.10 为主）
 KNOWN_MC_VERSIONS = (
@@ -99,14 +100,45 @@ def parse_version(s) -> Version:
     return Version(tuple(parts), pre_kind, tuple(pre_nums), raw)
 
 
+def _tie_key(s: str) -> tuple:
+    """tie-break 排序键：数字段按数值、字母段按字典序（可跨类型比较）。"""
+    return tuple((0, int(t), "") if t.isdigit() else (1, 0, t)
+                 for t in re.findall(r"\d+|[a-z]+", _clean(s)))
+
+
+def _tie_break(ra: str, rb: str) -> int:
+    """结构化键相等时按原文打破平局。
+
+    只在两侧"同一位置都有但值不同"的 token 上分先后（如 1.2.3s 与
+    1.2.3t 两个构建、+build.5 与 +build.9）；一侧多出的未知后缀
+    （2.0.0-GTNH vs 2.0.0、1.0.0 vs 1.0.0.0）维持判等，与旧语义一致。
+    """
+    ta, tb = _tie_key(ra), _tie_key(rb)
+    for i in range(max(len(ta), len(tb))):
+        x = ta[i] if i < len(ta) else None
+        y = tb[i] if i < len(tb) else None
+        if x is None or y is None:
+            continue
+        if x != y:
+            return -1 if x < y else 1
+    return 0
+
+
 def compare(a, b) -> int:
-    """比较两个版本（str 或 Version），返回 -1/0/1。"""
+    """比较两个版本（str 或 Version），返回 -1/0/1。
+
+    结构化键相等但原文不同时（未知字母 token 被忽略），见 _tie_break。
+    """
     va = a if isinstance(a, Version) else parse_version(a)
     vb = b if isinstance(b, Version) else parse_version(b)
     n = max(len(va.parts), len(vb.parts))
     ka = (va.parts + (0,) * (n - len(va.parts)),) + va.key()[1:]
     kb = (vb.parts + (0,) * (n - len(vb.parts)),) + vb.key()[1:]
-    return -1 if ka < kb else (1 if ka > kb else 0)
+    if ka != kb:
+        return -1 if ka < kb else 1
+    if va.raw != vb.raw:
+        return _tie_break(va.raw, vb.raw)
+    return 0
 
 
 def max_version(values) -> str | None:

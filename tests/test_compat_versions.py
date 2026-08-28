@@ -1,10 +1,12 @@
 """GTNH 兼容表解析 + 版本匹配 + 指定版本安装 测试。"""
+import io
 import json
 import shutil
 import sys
 import tempfile
 import threading
 import unittest
+import zipfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -126,7 +128,10 @@ class TestVersionInstall(unittest.TestCase):
             db = ModsDB(data / "mods_db.json")
             inst = InstalledDB(data / "installed.json")
             for v in ("0.8.0", "0.9.0", "1.0.0"):
-                (src / f"VerMod-1.7.10-{v}.jar").write_bytes(b"PK\x03\x04" + v.encode())
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+                    z.writestr(f"VerMod-{v}.txt", v)
+                (src / f"VerMod-1.7.10-{v}.jar").write_bytes(buf.getvalue())
             mid = db.add_custom({"name_en": "VerMod", "source_type": "local_folder",
                                  "source": {"path": str(src), "name_regex": "^VerMod"}})
             entry = db.get(mid)
@@ -481,6 +486,118 @@ class TestAtomicReplace(unittest.TestCase):
             self.assertTrue(dst.exists())
             self.assertEqual(dst.read_bytes(), b"PK\x03\x04new")
             self.assertFalse(src.exists())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestDefaultPathCompat(unittest.TestCase):
+    """默认（不指定版本）安装/更新路径：跳过不兼容版本；错误不再伪装成无版本。"""
+
+    def _setup(self):
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_dc_"))
+        (tmp / "src").mkdir()
+        (tmp / "mods").mkdir()
+        from gtnhmod.config import Config
+        cfg = Config(tmp)
+        cfg.set_mods_dir("client", tmp / "mods")
+        cfg.data["gtnh_version"] = "2.9.0"
+        cfg.save()
+        return tmp, cfg
+
+    @staticmethod
+    def _mkjar(path, ver):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+            z.writestr(f"VerMod-{ver}.txt", ver)
+        path.write_bytes(buf.getvalue())
+
+    _RULE_10 = [{"kind": "range", "mod_ver": "1.0", "min": "2.10.0", "max": "9.9.9",
+                 "raw": "{{row|1.0|2.10.0|9.9.9}}"}]  # 1.0.x 需 GTNH>=2.10
+
+    def _add_local_mod(self, db, src):
+        mid = db.add_custom({"name_en": "VerMod", "source_type": "local_folder",
+                             "source": {"path": str(src), "name_regex": "^VerMod"}})
+        return mid
+
+    def test_install_falls_back_to_compatible(self):
+        tmp, cfg = self._setup()
+        try:
+            from gtnhmod.db import ModsDB
+            from gtnhmod.installed import InstalledDB
+            db, inst = ModsDB(tmp / "mods_db.json"), InstalledDB(tmp / "installed.json")
+            src = tmp / "src"
+            for v in ("1.0.0", "0.9.0", "0.8.0"):
+                self._mkjar(src / f"VerMod-1.7.10-{v}.jar", v)
+            mid = self._add_local_mod(db, src)
+            db.update_entry(mid, {"compat": self._RULE_10})
+            r = updater.install_mod(cfg, db, inst, mid, "client")
+            self.assertEqual(r["action"], "installed", r)
+            self.assertEqual(r["version"], "0.9.0")  # 1.0.0 不兼容 → 退回 0.9.0
+            self.assertIn("不兼容", r.get("note") or "")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_install_all_incompatible_skipped(self):
+        tmp, cfg = self._setup()
+        try:
+            from gtnhmod.db import ModsDB
+            from gtnhmod.installed import InstalledDB
+            db, inst = ModsDB(tmp / "mods_db.json"), InstalledDB(tmp / "installed.json")
+            src = tmp / "src"
+            self._mkjar(src / "VerMod-1.7.10-1.0.0.jar", "1.0.0")
+            mid = self._add_local_mod(db, src)
+            db.update_entry(mid, {"compat": self._RULE_10})
+            r = updater.install_mod(cfg, db, inst, mid, "client")
+            self.assertEqual(r["action"], "skipped_incompatible", r)
+            self.assertIn("不兼容", r.get("note") or "")
+            self.assertEqual(list((tmp / "mods").glob("*.jar")), [])  # 未安装
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_update_falls_back_to_compatible(self):
+        tmp, cfg = self._setup()
+        try:
+            from gtnhmod.db import ModsDB
+            from gtnhmod.installed import InstalledDB
+            db, inst = ModsDB(tmp / "mods_db.json"), InstalledDB(tmp / "installed.json")
+            src = tmp / "src"
+            self._mkjar(src / "VerMod-1.7.10-1.0.0.jar", "1.0.0")
+            self._mkjar(src / "VerMod-1.7.10-0.9.5.jar", "0.9.5")
+            self._mkjar(src / "VerMod-1.7.10-0.8.0.jar", "0.8.0")
+            mid = self._add_local_mod(db, src)
+            db.update_entry(mid, {"compat": self._RULE_10})
+            r = updater.install_mod(cfg, db, inst, mid, "client", version="0.8.0")
+            self.assertEqual(r["action"], "installed", r)
+            r = updater.update_mod(cfg, db, inst, mid, "client")
+            self.assertEqual(r["action"], "updated", r)
+            self.assertEqual(r["to"], "0.9.5")  # 跳过不兼容的 1.0.0
+            self.assertIn("不兼容", r.get("note") or "")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_version_list_error_propagates(self):
+        tmp, cfg = self._setup()
+        try:
+            from gtnhmod.db import ModsDB
+            from gtnhmod.installed import InstalledDB
+            db, inst = ModsDB(tmp / "mods_db.json"), InstalledDB(tmp / "installed.json")
+            mid = db.add_custom({"name_en": "NetMod", "source_type": "github",
+                                 "source": {"owner": "o", "repo": "r",
+                                            "asset_regex": "", "exclude_regex": ""}})
+            from gtnhmod.sources import GitHubSource
+            src = GitHubSource("o", "r", api_base="http://127.0.0.1:9",
+                               cache_dir=cfg.cache_dir, ttl_hours=0)
+            entry = db.get(mid)
+            entry["source"] = {"owner": "o", "repo": "r",
+                               "asset_regex": "", "exclude_regex": ""}
+            from unittest import mock
+            with mock.patch.object(updater.Source, "from_entry", return_value=src):
+                options, err = updater.list_install_options(entry, cfg, db, force=True)
+                self.assertEqual(options, [])
+                self.assertTrue(err)
+                r = updater.install_mod(cfg, db, inst, mid, "client")
+                self.assertEqual(r["action"], "error")
+                self.assertIn("查询版本列表失败", r["error"])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

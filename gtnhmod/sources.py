@@ -10,11 +10,12 @@ import time
 import urllib.parse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from functools import cmp_to_key
 from pathlib import Path
 
 from . import net, utils
 from .versions import (MC_VERSION_RE, VersionParseError, _MC_SET,
-                       max_version, parse_version, split_mc_mod_version)
+                       compare, max_version, parse_version, split_mc_mod_version)
 
 
 class SourceError(Exception):
@@ -46,6 +47,7 @@ class VersionOption:
     body: str | None = None
     published_at: str | None = None
     candidates: list | None = None   # None = 该版本无自动下载资产
+    prerelease: bool = False         # GitHub prerelease（默认路径自动跳过）
 
 
 def sort_version_options(options: list) -> list:
@@ -57,7 +59,9 @@ def sort_version_options(options: list) -> list:
             parseable.append(o)
         except VersionParseError:
             unparse.append(o)
-    parseable.sort(key=lambda o: parse_version(o.version).key(), reverse=True)
+    # 用 compare 排序而非 key()：键相等的不同构建（1.2.3s/t）也能分出先后
+    parseable.sort(key=cmp_to_key(lambda x, y: compare(x.version, y.version)),
+                   reverse=True)
     return parseable + unparse
 
 
@@ -293,7 +297,8 @@ class GitHubSource(Source):
             cands = pick_assets(rel.get("assets") or [], tag, self.repo,
                                 self.asset_regex, self.exclude_regex)
             options.append(VersionOption(ver, tag, rel.get("body"),
-                                         rel.get("published_at"), cands or None))
+                                         rel.get("published_at"), cands or None,
+                                         bool(rel.get("prerelease"))))
         # 按版本去重（保留最新发布的那条）
         seen, uniq = set(), []
         for o in options:
