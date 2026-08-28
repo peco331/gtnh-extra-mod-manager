@@ -4,7 +4,7 @@
 同时管理**客户端**与**服务端**的 mods 文件夹：安装、一键检查更新、更新（自动备份旧版本）、
 启用/禁用开关，并区分客户端/服务端/双端 mod。
 
-数据来源：[GTNH wiki - 可添加MOD](https://gtnh.huijiwiki.com/wiki/可添加MOD)（79 个 mod，
+数据来源：[GTNH wiki - 可添加MOD](https://gtnh.huijiwiki.com/wiki/可添加MOD)（以 wiki 实时数据为准，
 按网站分类：星门规则下的功能增强/性能优化/视听增强/旧版本限定 + 非星门规则）。
 wiki 没有的 mod 可通过**自定义源**（GitHub 仓库 / 本地文件夹 / 手动登记）扩展。
 
@@ -24,8 +24,8 @@ wiki 没有的 mod 可通过**自定义源**（GitHub 仓库 / 本地文件夹 /
 非交互模式（可配合 Windows 任务计划每日自动检查）：
 
 ```
-py -m gtnhmod cli --check        # 只检查并打印结果
-py -m gtnhmod cli --update-all   # 直接更新全部可更新的mod
+py -m gtnhmod cli --check        # 只检查并打印结果（有出错项时退出码为 1）
+py -m gtnhmod cli --update-all   # 直接更新全部可更新的mod（有失败项时退出码为 1）
 ```
 
 ## 使用流程
@@ -132,7 +132,7 @@ wiki 站开启 Cloudflare 人机验证后，程序直连会收到"请稍候…"�
 ## 开发与测试
 
 ```
-py -m unittest discover -s tests -v    # 66 个单元/E2E测试（离线，含真实wiki样例解析）
+py -m unittest discover -s tests -v    # 160 个单元/E2E测试（离线，含真实wiki样例解析）
 ```
 
 结构：核心库 `gtnhmod/`（versions/wiki/net/sources/scanner/downloader/updater...）

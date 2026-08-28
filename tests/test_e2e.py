@@ -123,12 +123,12 @@ class TestE2E(unittest.TestCase):
         self.assertEqual(r["action"], "enabled")
         self.assertTrue((self.client_mods / "TestMod-1.7.10-1.1.0.jar").exists())
         # 7. 锁定后检查跳过
-        updater.toggle_lock(self.installed, self.mod_id, "client")
+        updater.set_lock(self.installed, self.mod_id, "client", True)
         results = updater.check_updates(self.cfg, self.db, self.installed,
                                         sides=("client",), force=True)
         found = [r for r in results if r[1] == self.mod_id]
         self.assertEqual(found, [])
-        updater.toggle_lock(self.installed, self.mod_id, "client")  # 解锁
+        updater.set_lock(self.installed, self.mod_id, "client", False)  # 解锁
 
     def test_config_instances_independent(self):
         # 两个 Config 实例互不污染（回归：DEFAULTS 浅拷贝共享 mods_folders dict）

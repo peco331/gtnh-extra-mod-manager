@@ -10,7 +10,8 @@ def main():
         gui.run()
     else:
         from . import cli
-        cli.run(args)
+        rc = cli.run(args) or 0
+        sys.exit(rc)  # 非交互模式失败时返回非0，任务计划才能感知
 
 
 if __name__ == "__main__":

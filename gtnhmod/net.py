@@ -13,8 +13,9 @@ import urllib.request
 from pathlib import Path
 
 from . import utils
+from . import __version__
 
-USER_AGENT = "GTNH-ModManager/1.0 (Windows; Python stdlib urllib)"
+USER_AGENT = f"GTNH-ModManager/{__version__} (Windows; Python stdlib urllib)"
 
 # 最近一次响应的 GitHub API 剩余配额（无则 None）
 rate_remaining: int | None = None
@@ -119,7 +120,25 @@ def http_get_cached(url: str, *, cache_file: Path, ttl_hours: float = 6.0,
         raise HttpError(-2, f"响应不是 JSON: {url}")
     cache = {"etag": hdrs.get("ETag"), "fetched_at": now, "data": data}
     utils.atomic_write_json(cache_file, cache)
+    _prune_stale_cache(cache_file)
     return data, "fresh"
+
+
+def _prune_stale_cache(cache_file: Path, max_age_days: float = 30) -> None:
+    """顺带清理缓存目录里长期未更新的文件（mod删除后的残留等）。
+
+    以文件 mtime 判断；按写缓存时触发，避免独立的清扫定时任务。
+    """
+    try:
+        cutoff = time.time() - max_age_days * 86400
+        for p in cache_file.parent.glob("*.json"):
+            try:
+                if p != cache_file and p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def download(url: str, dest: Path, *, timeout=60, proxy=None, progress_cb=None) -> None:

@@ -89,34 +89,3 @@ class ConsoleUI(UIProtocol):
         except (EOFError, KeyboardInterrupt):
             return default
         return s or default
-
-
-class FakeUI(UIProtocol):
-    """测试用：预设答案队列。"""
-
-    def __init__(self, choices=None, confirms=True, texts=None):
-        self.choices = list(choices or [])
-        self.confirms = confirms
-        self.texts = list(texts or [])
-        self.messages = []
-
-    def choose(self, title, options, allow_cancel=True):
-        self.messages.append(("choose", title, options))
-        return self.choices.pop(0) if self.choices else None
-
-    def confirm(self, msg):
-        self.messages.append(("confirm", msg))
-        return self.confirms
-
-    def info(self, msg):
-        self.messages.append(("info", msg))
-
-    def warn(self, msg):
-        self.messages.append(("warn", msg))
-
-    def error(self, msg):
-        self.messages.append(("error", msg))
-
-    def input_text(self, prompt, default=""):
-        self.messages.append(("input", prompt))
-        return self.texts.pop(0) if self.texts else default

@@ -204,6 +204,18 @@ def reconcile_installed(cfg, db, installed) -> int:
     return removed
 
 
+def startup_maintenance(cfg, db, installed) -> None:
+    """程序启动维护：校正已安装记录、清理积压备份、清扫孤儿临时文件。"""
+    try:
+        reconcile_installed(cfg, db, installed)
+        prune_all_backups(cfg)
+        n = utils.clean_orphan_tmp(cfg.cache_dir)
+        if n:
+            _log_op(cfg, f"清扫孤儿下载临时文件 {n} 个")
+    except OSError as e:
+        _log_op(cfg, f"启动维护失败: {e}")
+
+
 def build_registry(cfg, db, installed) -> dict:
     """构建已安装注册表：{side: {mod_id: state}}，以磁盘扫描为准。
 
@@ -525,6 +537,36 @@ def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
     return results
 
 
+def bindable_links(entry: dict) -> list:
+    """可绑定为下载源的链接（GitHub 仓库页 / CurseForge 页面）。"""
+    return [l for l in entry_links(entry)
+            if "github.com" in l["url"] or "curseforge.com" in l["url"]]
+
+
+def summarize_check(results: list, reg: dict) -> dict:
+    """检查更新结果计数：{update, uptodate, unknown, manual, error}。
+
+    reg 为 build_registry 结果（判定"可更新"需要当前已装版本号）。
+    CLI/GUI 的检查结果汇总共用本函数，避免两处计数逻辑漂移。
+    """
+    counts = {"update": 0, "uptodate": 0, "unknown": 0, "manual": 0, "error": 0}
+    for side, mod_id, info, err in results:
+        if err:
+            counts["error"] += 1
+        elif not info or not info.latest_version:
+            counts["manual"] += 1
+        else:
+            cur = (reg.get(side, {}).get(mod_id) or {}).get("version")
+            st = version_status(cur, info.latest_version)
+            if st == "update":
+                counts["update"] += 1
+            elif st == "uptodate":
+                counts["uptodate"] += 1
+            else:
+                counts["unknown"] += 1
+    return counts
+
+
 def version_status(current, latest) -> str:
     """比较已装版本与远端版本：update=可更新 / uptodate=已最新 / unknown=无法判断。"""
     if not current or not latest:
@@ -842,14 +884,6 @@ def set_enabled(cfg, db, installed, mod_id: str, side: str, enabled: bool) -> di
     name = entry.get("name_en") or mod_id
     _log_op(cfg, f"{SIDE_LABELS[side]} {'启用' if enabled else '禁用'} {name}（{new_path.name}）")
     return {"action": "enabled" if enabled else "disabled", "file": new_path.name}
-
-
-def toggle_lock(installed, mod_id: str, side: str) -> dict:
-    """锁定/解锁：锁定的mod跳过检查更新与更新。"""
-    inst = installed.get(side, mod_id)
-    new_locked = not bool((inst or {}).get("locked"))
-    installed.set(side, mod_id, locked=new_locked)
-    return {"action": "locked" if new_locked else "unlocked"}
 
 
 def set_lock(installed, mod_id: str, side: str, locked: bool) -> None:

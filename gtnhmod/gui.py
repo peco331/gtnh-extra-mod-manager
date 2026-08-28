@@ -42,12 +42,8 @@ class GuiApp:
         self.cfg = Config(data_dir)
         self.db = ModsDB(data_dir / "mods_db.json")
         self.installed = InstalledDB(data_dir / "installed.json")
-        # 启动维护：清理手动删除jar的残留记录 + 按保留数清理积压备份
-        try:
-            updater.reconcile_installed(self.cfg, self.db, self.installed)
-            updater.prune_all_backups(self.cfg)
-        except OSError as e:
-            utils.append_log(data_dir, f"启动维护失败: {e}")
+        # 启动维护：校正已安装记录、清理积压备份、清扫孤儿临时文件
+        updater.startup_maintenance(self.cfg, self.db, self.installed)
         self.queue: queue.Queue = queue.Queue()
         self.busy = False
 
@@ -412,7 +408,7 @@ class GuiApp:
         ttk.Label(f, text="每mod备份保留数").grid(row=5, column=0, sticky="w", pady=6)
         self.backup_entry = ttk.Entry(f, width=10)
         self.backup_entry.grid(row=5, column=1, sticky="w", padx=6)
-        ttk.Label(f, text="GTNH整合包版本（预留）").grid(row=6, column=0, sticky="w", pady=6)
+        ttk.Label(f, text="GTNH整合包版本（兼容推荐用）").grid(row=6, column=0, sticky="w", pady=6)
         self.gtnh_entry = ttk.Entry(f, width=10)
         self.gtnh_entry.grid(row=6, column=1, sticky="w", padx=6)
         ttk.Button(f, text="保存设置", command=self.save_settings).grid(row=7, column=1, sticky="w", pady=10)
@@ -654,8 +650,8 @@ class GuiApp:
         if results is None:
             results = []
         self._set_busy(False)
-        n_upd = 0
         reg = updater.build_registry(self.cfg, self.db, self.installed)
+        counts = updater.summarize_check(results, reg)
         for side, mod_id, info, err in sorted(results, key=lambda r: r[1]):
             entry = self.db.get(mod_id) or {}
             name = entry.get("name_en") or mod_id
@@ -668,7 +664,6 @@ class GuiApp:
             cur = (reg[side].get(mod_id) or {}).get("version")
             st = updater.version_status(cur, info.latest_version)
             if st == "update":
-                n_upd += 1
                 self._log(f"{SIDE_LABELS[side]} {name}: v{cur} → v{info.latest_version} 可更新")
             elif st == "uptodate":
                 self._log(f"{SIDE_LABELS[side]} {name}: v{cur} 已最新")
@@ -676,7 +671,8 @@ class GuiApp:
                 self._log(f"{SIDE_LABELS[side]} {name}: 当前v{cur}，最新v{info.latest_version}（请手动判断）")
             if info.candidates is None and info.latest_version:
                 self._log(f"  （{name} 无自动下载资产，需手动下载）")
-        self._log(f"检查完成：发现 {n_upd} 个可更新")
+        self._log(f"检查完成：发现 {counts['update']} 个可更新"
+                  + (f"，{counts['error']} 个出错" if counts["error"] else ""))
         self.refresh_installed()
 
     def update_selected(self):
@@ -1295,8 +1291,7 @@ class GuiApp:
 
     def _bind_source_dialog(self, e):
         """选择该mod的一个下载链接绑定为下载源（检查更新/下载用它）。"""
-        cand = [l for l in updater.entry_links(e)
-                if "github.com" in l["url"] or "curseforge.com" in l["url"]]
+        cand = updater.bindable_links(e)
         if not cand:
             if messagebox.askyesno("链接列表缺失",
                                    "该mod的下载链接列表不完整（可能是旧版工具保存的数据）。\n"

@@ -3,8 +3,35 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
+
+
+def clean_orphan_tmp(root: Path, keep_seconds: float = 86400) -> int:
+    """清扫下载中断留下的孤儿临时文件（.part / .dl_*），返回删除数。
+
+    只清超过 keep_seconds 的（避免误删正在进行中的下载）；进程被杀时
+    这些文件不会自清理，会永久残留。
+    """
+    if not root.is_dir():
+        return 0
+    removed = 0
+    now = time.time()
+    try:
+        candidates = list(root.rglob("*.part")) + list(root.rglob(".dl_*"))
+    except OSError:
+        return 0
+    for p in candidates:
+        if not p.is_file():
+            continue
+        try:
+            if now - p.stat().st_mtime > keep_seconds:
+                p.unlink()
+                removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def resolve_data_dir() -> Path:

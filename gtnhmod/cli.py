@@ -28,12 +28,8 @@ class CliApp:
         self.cfg = Config(data_dir)
         self.db = ModsDB(data_dir / "mods_db.json")
         self.installed = InstalledDB(data_dir / "installed.json")
-        # 启动维护：清理手动删除jar的残留记录 + 按保留数清理积压备份
-        try:
-            updater.reconcile_installed(self.cfg, self.db, self.installed)
-            updater.prune_all_backups(self.cfg)
-        except OSError as e:
-            utils.append_log(data_dir, f"启动维护失败: {e}")
+        # 启动维护：校正已安装记录、清理积压备份、清扫孤儿临时文件
+        updater.startup_maintenance(self.cfg, self.db, self.installed)
         self.ui = ConsoleUI()
 
     # ---------- 菜单入口 ----------
@@ -186,8 +182,7 @@ class CliApp:
 
     def _bind_source_flow(self, entry):
         """列出该mod的全部下载链接，选择其一绑定为下载源（检查更新/下载用它）。"""
-        cand = [l for l in updater.entry_links(entry)
-                if "github.com" in l["url"] or "curseforge.com" in l["url"]]
+        cand = updater.bindable_links(entry)
         if not cand:
             self.ui.warn("该mod的下载链接列表不完整（可能是旧版工具保存的数据），"
                          "请先执行菜单1「刷新Wiki数据」")
@@ -408,35 +403,31 @@ class CliApp:
         self._print_check_results(results)
 
     def _print_check_results(self, results):
-        n_update = n_ok = n_err = n_manual = 0
         reg = updater.build_registry(self.cfg, self.db, self.installed)
+        counts = updater.summarize_check(results, reg)
         for side, mod_id, info, err in sorted(results, key=lambda r: r[1]):
             entry = self.db.get(mod_id) or {}
             name = entry.get("name_en") or mod_id
             if err:
-                n_err += 1
                 self.ui.error(f"  {SIDE_LABELS[side]} {name}: {err}")
                 continue
             if not info or not info.latest_version:
-                n_manual += 1
                 self.ui.info(f"  {SIDE_LABELS[side]} {name}: {info.note if info else '无信息'}")
                 continue
             st = reg[side].get(mod_id) or {}
             cur = st.get("version")
             status = updater.version_status(cur, info.latest_version)
             if status == "update":
-                n_update += 1
                 self.ui.ok(f"  {SIDE_LABELS[side]} {name}: v{cur} → v{info.latest_version} 可更新")
             elif status == "uptodate":
-                n_ok += 1
                 self.ui.info(f"  {SIDE_LABELS[side]} {name}: v{cur} 已是最新")
             else:
-                n_manual += 1
                 self.ui.warn(f"  {SIDE_LABELS[side]} {name}: 当前v{cur}，最新v{info.latest_version}（版本格式无法比较，请手动判断）")
             if info.candidates is None and info.latest_version:
                 self.ui.warn(f"      （无自动下载资产，需手动下载）")
         print()
-        self.ui.info(f"可更新 {n_update} 个 / 已最新 {n_ok} 个 / 需手动 {n_manual} 个 / 出错 {n_err} 个")
+        self.ui.info(f"可更新 {counts['update']} 个 / 已最新 {counts['uptodate']} 个 "
+                     f"/ 需手动 {counts['manual']} 个 / 出错 {counts['error']} 个")
 
     # ---------- 5 更新 ----------
     def do_update_menu(self):
@@ -690,7 +681,7 @@ class CliApp:
                 f"代理: {self.cfg.proxy or '（跟随系统）'}",
                 f"检查结果缓存时长: {self.cfg.check_interval_hours} 小时",
                 f"每mod保留备份数: {self.cfg.backup_keep}",
-                f"GTNH整合包版本（预留）: {self.cfg.data.get('gtnh_version') or '（未设置）'}",
+                f"GTNH整合包版本（兼容推荐用）: {self.cfg.data.get('gtnh_version') or '（未设置）'}",
                 f"Wiki反爬Cookie: {'已配置' if self.cfg.wiki_cookie else '（未配置，站点开启Cloudflare验证时需要）'}",
                 "恢复已排除/忽略的文件（重新显示）",
                 "打开操作日志文件",
@@ -823,28 +814,40 @@ def run(argv=None):
 
 
 def run_check(app) -> int:
-    """非交互：检查更新（供计划任务）。"""
+    """非交互：检查更新（供计划任务）。出错时返回非0，任务计划才能感知失败。"""
     print("GTNH mod 检查更新...")
-    results = updater.check_updates(app.cfg, app.db, app.installed)
+    try:
+        results = updater.check_updates(app.cfg, app.db, app.installed)
+    except Exception as e:
+        print(f"检查失败: {e}")
+        return 1
     app._print_check_results(results)
-    return 0
+    n_err = sum(1 for r in results if r[3])
+    return 1 if n_err else 0
 
 
 def run_update_all(app) -> int:
-    """非交互：更新全部。"""
+    """非交互：更新全部。有失败项时返回非0。"""
     print("GTNH mod 全部更新...")
-    results = updater.update_all(app.cfg, app.db, app.installed)
-    n_ok = 0
+    try:
+        results = updater.update_all(app.cfg, app.db, app.installed)
+    except Exception as e:
+        print(f"更新失败: {e}")
+        return 1
+    n_ok = n_fail = 0
     for r in results:
         if r["action"] == "updated":
             n_ok += 1
             print(f"已更新 {SIDE_LABELS[r['side']]} {r['name']}: {r['from']} -> {r['to']}")
         elif r["action"] == "manual":
             print(f"需手动 {SIDE_LABELS[r['side']]} {r['name']}: {r.get('note')}")
-        elif r["action"] not in ("uptodate",):
+        elif r["action"] == "skipped_incompatible":
+            print(f"跳过 {SIDE_LABELS[r['side']]} {r['name']}: {r.get('note')}")
+        elif r["action"] != "uptodate":
+            n_fail += 1
             print(f"失败 {SIDE_LABELS[r['side']]} {r['name']}: {r.get('error')}")
     print(f"完成：成功更新 {n_ok} 个")
-    return 0
+    return 1 if n_fail else 0
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ DEFAULTS = {
     "backup_keep": 3,             # 每个mod保留的旧版本备份数
     "wiki_url": "https://gtnh.huijiwiki.com/api.php",
     "wiki_page": "可添加MOD",
-    "gtnh_version": "",           # 预留：当前整合包版本（兼容性提示用）
+    "gtnh_version": "",           # 当前整合包版本（兼容性推荐/拦截用）
     "ignored_files": [],          # 未受管且主动忽略的 jar 文件名
     "core_mod_confirm": True,     # 禁用 mod 前二次确认
     "wiki_cookie": "",            # Cloudflare 反爬：浏览器通过验证后的 Cookie（cf_clearance）
