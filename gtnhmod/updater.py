@@ -143,11 +143,13 @@ def get_available_versions(entry: dict, cfg, db=None, *, force: bool = False) ->
     return list_install_options(entry, cfg, db, force=force)[0]
 
 
-def _pick_default_option(options: list) -> tuple:
+def _pick_default_option(options: list, old_version: str | None = None) -> tuple:
     """默认（不指定版本）路径选版：最新正式版优先，跳过不兼容版本。
 
     旧逻辑用 releases/latest（不含 prerelease）；仓库只有 prerelease 时
     退回全量候选（对齐旧 _check_via_releases 的兜底行为）。
+    同版本号的变体构建互为判等（如 v1.85 / v1.85-Multi / v1.85-Multiplayer）：
+    排序最高者若与当前已装版本判等，但同组里有严格更新的变体，优先选它。
     返回 (选中option|None, 说明note)；None 表示所有候选均不兼容。
     """
     latest = options[0]
@@ -155,10 +157,27 @@ def _pick_default_option(options: list) -> tuple:
     chosen = next((o for o in pool if o["compat"] != "incompatible"), None)
     if chosen is None:
         return None, ""
+    if old_version:
+        try:
+            for o in pool:
+                if o["compat"] == "incompatible":
+                    continue
+                if compare(o["version"], chosen["version"]) == 0 \
+                        and compare(o["version"], old_version) > 0:
+                    chosen = o
+                    break
+        except VersionParseError:
+            pass
     if chosen["version"] != latest["version"]:
+        try:
+            same_ver = compare(chosen["version"], latest["version"]) == 0
+        except VersionParseError:
+            same_ver = False
         if latest["compat"] == "incompatible":
-            note = (f"最新版 {latest['version']} 与当前 GTNH 不兼容，"
-                    f"已自动选择最新兼容版 {chosen['version']}")
+            note = (f"最新版 {latest['version']} 按 wiki 兼容表可能与当前 GTNH 不兼容，"
+                    f"已选择标注适配的 {chosen['version']}")
+        elif same_ver:
+            note = f"同版本号存在多个构建，已选择新于当前版本的 {chosen['version']}"
         else:
             note = (f"最新版 {latest['version']} 为 prerelease，"
                     f"已选择最新正式版 {chosen['version']}")
@@ -242,6 +261,13 @@ def build_registry(cfg, db, installed) -> dict:
                 try:
                     if compare(latest, f.version) > 0:
                         status = "update_avail"
+                        # 最新版存在但按 wiki 兼容规则不适配当前整合包 → 单独状态，
+                        # 与"可更新"（全部更新会自动安装的）区分开，列表不再误导
+                        compat = match_compat(entry.get("compat") or [],
+                                              (cfg.data.get("gtnh_version") or "").strip(),
+                                              latest)
+                        if compat == "incompatible":
+                            status = "update_incompat"
                 except VersionParseError:
                     pass
             st = {
@@ -299,6 +325,8 @@ def build_merged_registry(cfg, db, installed) -> list:
         statuses = [st["status"] for st in sides.values()]
         if "update_avail" in statuses:
             m["status"] = "update_avail"
+        elif "update_incompat" in statuses:
+            m["status"] = "update_incompat"
         elif all(s == "disabled" for s in statuses):
             m["status"] = "disabled"
         else:
@@ -622,7 +650,7 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
             return {"action": "manual", "note": note, "entry": entry, "warning": warn}
         chosen, note = _pick_default_option(options)
         if chosen is None:
-            msg = (f"现有版本均与 GTNH {gtnh} 不兼容，未自动安装"
+            msg = (f"现有版本按 wiki 兼容表可能与 GTNH {gtnh} 均不兼容，未自动安装"
                    f"（最新版 {options[0]['version']}），可在版本列表中手动选择")
             _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {name}: {msg}")
             return {"action": "skipped_incompatible", "note": msg,
@@ -798,9 +826,9 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
             note = (info0.note if info0 and info0.note else "") or "该mod无自动下载渠道"
             return {"action": "manual", "note": note, "entry": entry, "warning": warn}
         latest = options[0]
-        chosen, note = _pick_default_option(options)
+        chosen, note = _pick_default_option(options, old_version=old.version)
         if chosen is None:
-            msg = (f"现有版本均与 GTNH {gtnh} 不兼容，未自动更新"
+            msg = (f"现有版本按 wiki 兼容表可能与 GTNH {gtnh} 均不兼容，未自动更新"
                    f"（最新版 {latest['version']}），可在版本列表中手动选择")
             _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id}: {msg}")
             return {"action": "skipped_incompatible", "note": msg, "entry": entry,
@@ -808,6 +836,11 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
         if old.version:
             try:
                 if compare(chosen["version"], old.version) <= 0:
+                    if compare(latest["version"], old.version) > 0:
+                        # 有更新的版本但 wiki 兼容表未标注适配——如实说明，而不是"已是最新"
+                        note = (note or f"最新版 {latest['version']} 按 wiki 兼容表"
+                                f"可能与当前 GTNH {gtnh} 不兼容，保持 v{old.version}；"
+                                f"需要的话在版本选择器中手动安装")
                     return {"action": "uptodate", "version": old.version,
                             "note": note or "已是最新版本"}
             except VersionParseError:

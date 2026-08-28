@@ -164,6 +164,16 @@ def split_mc_mod_version(stem: str):
     "advanced_memory_card-1.0.1-1.7.10-GTNH"（版本段在MC锚点前，name-modver-mcver 命名）
         → ("advanced_memory_card", "1.7.10", "1.0.1-1.7.10-GTNH")
     """
+    name, mc, ver = _split_mc_mod_version_raw(stem)
+    if ver:
+        # 版本段只保留 ASCII 版本字符："dualhotbar-1.7.10-1.6[双层-超长快捷栏]"
+        # 的版本是 1.6，方括号中文备注不是版本的一部分
+        m = re.match(r"[A-Za-z0-9_.+-]+", ver)
+        ver = (m.group(0).rstrip("-_.+") if m else "") or ver
+    return (name, mc, ver)
+
+
+def _split_mc_mod_version_raw(stem: str):
     stem = (stem or "").strip()
     parts = stem.split("-")
     # 找 MC 锚点：先精确匹配已知 MC 版本表，其次通用模式；不能是最后一段

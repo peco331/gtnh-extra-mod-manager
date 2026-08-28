@@ -20,7 +20,9 @@ from .config import Config
 from .db import ModsDB
 from .installed import InstalledDB
 
-STATUS_CN = {"installed": "已安装", "update_avail": "可更新", "disabled": "已禁用"}
+STATUS_CN = {"installed": "已安装", "update_avail": "可更新",
+             "update_incompat": "有新版（可能不兼容）",
+             "disabled": "已禁用"}
 STATUS_COLORS = {"update_avail": "#1a7f37", "disabled": "#999999", "installed": "#000000"}
 INSTALL_SIDE_CN = {"both": "双端", "client": "仅客户端", "server": "仅服务端"}
 FONT = ("Microsoft YaHei UI", 9)
@@ -305,9 +307,9 @@ class GuiApp:
         self.guide.pack(fill="x", padx=6, pady=(0, 4))
         self.guide.pack_forget()  # 默认隐藏，两端目录均未配置时显示
 
-        cols = ("name", "side", "version", "latest", "status")
-        heads = ("名称", "安装端别", "已装版本（✗=该端已禁用）", "最新版本", "状态")
-        widths = (330, 90, 240, 130, 70)
+        cols = ("name", "side", "version", "inst_time", "latest", "status")
+        heads = ("名称", "安装端别", "已装版本（✗=该端已禁用）", "本地更新时间", "最新版本", "状态")
+        widths = (300, 80, 190, 105, 120, 90)
         tree_frame = ttk.Frame(tab)
         tree_frame.pack(fill="both", expand=True, padx=6)
         self.inst_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
@@ -315,12 +317,14 @@ class GuiApp:
         for c, h, w in zip(cols, heads, widths):
             self.inst_tree.heading(c, text=h)
             self.inst_tree.column(c, width=w, anchor="w")
-        self.inst_tree.tag_configure("upd", background=STATUS_COLORS.get("upd_bg", "#e5f5ea"))
+        self.inst_tree.tag_configure("upd", background="#c9ecd8",
+                                     foreground="#0a6b2d")
+        self.inst_tree.tag_configure("incompat", background="#fdf3d1")
         self.inst_tree.tag_configure("dis", foreground=STATUS_COLORS["disabled"])
         self.inst_tree.tag_configure("odd", background="#f4f5f7")
         self.inst_tree.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.inst_tree, tree_frame)
-        self._make_sortable(self.inst_tree, desc_first_cols=("latest",))
+        self._make_sortable(self.inst_tree, desc_first_cols=("latest", "inst_time"))
         self.inst_tree.bind("<Double-1>", self._on_inst_double)
         self.inst_tree.bind("<Button-3>", lambda e: self._popup(self.inst_tree, self._inst_menu, e))
         self.busy_buttons = (self.btn_check, self.btn_update, self.btn_update_all)
@@ -656,13 +660,23 @@ class GuiApp:
         return base + lock + dup
 
     @staticmethod
+    def _fmt_ver(v) -> str:
+        """版本显示统一 v 前缀（解析结果自带 v 时不叠加，如 v1.85-Multi 不变 vv…）。"""
+        v = str(v or "").strip()
+        if not v:
+            return ""
+        if v[0] in "vV" and v[1:2].isdigit():
+            return "v" + v[1:]
+        return "v" + v if v[0].isdigit() else v
+
+    @staticmethod
     def _version_cell(m) -> str:
         """已装版本列：双端一致只显示一份；不一致或部分禁用时分别标注（✗=禁用）。"""
         def cell(side):
             st = m["sides"].get(side)
             if not st:
                 return None
-            return f"v{st.get('version') or '?'}" + ("" if st["enabled"] else "✗")
+            return GuiApp._fmt_ver(st.get("version") or "?") + ("" if st["enabled"] else "✗")
         c, s = cell("client"), cell("server")
         if c and s:
             return c if c == s else f"客 {c} / 服 {s}"
@@ -679,16 +693,18 @@ class GuiApp:
             self.guide.pack_forget()
         for i, m in enumerate(self._inst_rows()):
             status = m["status"]
-            base = "upd" if status == "update_avail" else ("dis" if status == "disabled" else "")
-            # upd 行用绿色底、隔行用灰底；两者同是背景色，只取其一避免优先级歧义
-            odd = "" if base == "upd" else ("odd" if i % 2 else "")
+            base = {"update_avail": "upd", "update_incompat": "incompat",
+                    "disabled": "dis"}.get(status, "")
+            # upd/incompat 行用彩色底、隔行用灰底；同是背景色只取其一避免优先级歧义
+            odd = "" if base in ("upd", "incompat") else ("odd" if i % 2 else "")
             tags = tuple(t for t in (base, odd) if t)
             self.inst_tree.insert(
                 "", "end", iid=m["mod_id"], tags=tags,
                 values=(self._name_cell(m),
                         INSTALL_SIDE_CN.get(m["install_side"], m["install_side"]),
                         self._version_cell(m),
-                        m["latest_version"] or "",
+                        m["install_time"] or "—",
+                        self._fmt_ver(m["latest_version"]),
                         STATUS_CN.get(status, status)))
             self.inst_rows[m["mod_id"]] = m
         # 底部状态栏（路径缩略显示，完整路径见设置页）
