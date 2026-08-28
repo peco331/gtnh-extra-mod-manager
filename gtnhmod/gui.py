@@ -320,6 +320,8 @@ class GuiApp:
         self.inst_tree.tag_configure("upd", background="#c9ecd8",
                                      foreground="#0a6b2d")
         self.inst_tree.tag_configure("incompat", background="#fdf3d1")
+        self.inst_tree.tag_configure("locked", background="#e4e8fb",
+                                     foreground="#3d4bb8")
         self.inst_tree.tag_configure("dis", foreground=STATUS_COLORS["disabled"])
         self.inst_tree.tag_configure("odd", background="#f4f5f7")
         self.inst_tree.pack(side="left", fill="both", expand=True)
@@ -695,9 +697,16 @@ class GuiApp:
             status = m["status"]
             base = {"update_avail": "upd", "update_incompat": "incompat",
                     "disabled": "dis"}.get(status, "")
-            # upd/incompat 行用彩色底、隔行用灰底；同是背景色只取其一避免优先级歧义
-            odd = "" if base in ("upd", "incompat") else ("odd" if i % 2 else "")
-            tags = tuple(t for t in (base, odd) if t)
+            # 行样式优先级：可更新(绿) > 可能不兼容(黄) > 锁定(蓝紫) > 隔行(灰)。
+            # 锁定+可更新时保留绿底，锁定用名称里的 🔒 与整行蓝紫字区分
+            if base in ("upd", "incompat"):
+                tags = (base,)
+            elif m["locked"]:
+                tags = ("locked",)
+            elif base == "dis":
+                tags = ("dis",)
+            else:
+                tags = ("odd",) if i % 2 else ()
             self.inst_tree.insert(
                 "", "end", iid=m["mod_id"], tags=tags,
                 values=(self._name_cell(m),
