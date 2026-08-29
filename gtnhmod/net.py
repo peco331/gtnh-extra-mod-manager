@@ -90,16 +90,18 @@ def http_get(url: str, *, headers=None, timeout=30, retries=2, binary=False, pro
 
 
 def http_get_cached(url: str, *, cache_file: Path, ttl_hours: float = 6.0,
-                    headers=None, proxy=None):
+                    headers=None, proxy=None, force: bool = False):
     """带 ETag 条件缓存与新鲜度缓存的 GET，返回 (json数据, source)。
 
     source ∈ fresh（新拉取）/ cache（ttl内缓存）/ not_modified（304）
               / cache_stale（限流或出错时退回的过期缓存）。
-    404 抛 HttpError(404)；403/429 时有缓存则退回缓存，无缓存抛出。
+    force=True 跳过 TTL 新鲜度判断但保留 If-None-Match 条件请求
+    （304 不计入 API 配额）——"强制刷新"用，不是完全绕过缓存。
+    404 抛 HttpError；403/429 时有缓存则退回缓存，无缓存抛出。
     """
     cache = utils.load_json(cache_file, None)
     now = time.time()
-    if cache and now - cache.get("fetched_at", 0) < ttl_hours * 3600:
+    if not force and cache and now - cache.get("fetched_at", 0) < ttl_hours * 3600:
         return cache.get("data"), "cache"
     req_headers = dict(headers or {})
     if cache and cache.get("etag"):

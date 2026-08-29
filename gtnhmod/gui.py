@@ -8,6 +8,7 @@
 import os
 import queue
 import subprocess
+import sys
 import threading
 import tkinter as tk
 import webbrowser
@@ -170,8 +171,9 @@ class GuiApp:
         self.log_frame = log_frame
         self._apply_log_layout()
         self.status_var = tk.StringVar(value="就绪")
-        ttk.Label(bottom, textvariable=self.status_var, font=FONT,
-                  anchor="w").pack(fill="x", padx=8, pady=(2, 4))
+        self.status_label = ttk.Label(bottom, textvariable=self.status_var, font=FONT,
+                                      anchor="w")
+        self.status_label.pack(fill="x", padx=8, pady=(2, 4))
         if not self.cfg.client_mods_dir and not self.cfg.server_mods_dir:
             self._log("就绪。首次使用请先到「设置」配置两端 mods 目录；"
                       "mod 数据请点「可添加MOD」页的刷新按钮获取。")
@@ -185,8 +187,11 @@ class GuiApp:
         self._apply_log_layout()
 
     def _apply_log_layout(self):
+        # 展开时固定在状态栏之前（pack_forget 后重新 pack 会追加到队尾，
+        # 不指定位置状态栏会被顶到日志上方）
         if self.log_expanded:
-            self.log_frame.pack(fill="both", expand=True, padx=6)
+            self.log_frame.pack(fill="both", expand=True, padx=6,
+                                before=self.status_label)
             self.log_toggle_btn.configure(text="收起日志 ▴")
         else:
             self.log_frame.pack_forget()
@@ -318,6 +323,7 @@ class GuiApp:
         widths = (300, 80, 190, 105, 120, 90)
         tree_frame = ttk.Frame(tab)
         tree_frame.pack(fill="both", expand=True, padx=6)
+        self.inst_tree_frame = tree_frame  # guide 卡片 pack(before=) 用
         self.inst_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                       selectmode="extended")
         for c, h, w in zip(cols, heads, widths):
@@ -593,11 +599,11 @@ class GuiApp:
                     self._set_busy(payload[0])
                 elif kind == "refresh":
                     self.refresh_all()
+                elif kind == "_progress":
+                    self._on_progress(payload[1])
                 elif kind == "_done":
                     if payload[0]:
                         payload[0](payload[1])
-                elif kind == "_progress":
-                    self._on_progress(payload[1])
                 elif kind == "_error":
                     msg = payload[1]
                     if payload[0]:
@@ -606,7 +612,14 @@ class GuiApp:
                     self._log(f"[错误] {msg}")
         except queue.Empty:
             pass
-        self.root.after(100, self._poll_queue)
+        except Exception:
+            # 单个回调异常不能杀死事件泵（否则 busy 永久卡死、界面假死）
+            self._report_cb_exc(*sys.exc_info())
+        finally:
+            try:
+                self.root.after(100, self._poll_queue)
+            except tk.TclError:
+                pass  # 窗口已销毁（退出中）
 
     def refresh_all(self):
         self.refresh_installed()
@@ -699,7 +712,7 @@ class GuiApp:
         self.inst_rows = {}
         # 新手引导：两端目录均未配置时显示
         if not self.cfg.client_mods_dir and not self.cfg.server_mods_dir:
-            self.guide.pack(fill="x", padx=6, pady=(0, 4))
+            self.guide.pack(fill="x", padx=6, pady=(0, 4), before=self.inst_tree_frame)
         else:
             self.guide.pack_forget()
         for i, m in enumerate(self._inst_rows()):
@@ -826,9 +839,9 @@ class GuiApp:
             return
         m = self._pending_updates.pop(0)
         entry = self.db.get(m["mod_id"]) or {}
-        idx = self._update_total - len(self._pending_updates)
+        idx = self._update_total - len(self._pending_updates)  # pop 后即第 idx 个（1-based）
         self._push_progress(idx, self._update_total,
-                            f"批量更新 {idx + 1}/{self._update_total}: {m['name_en']}")
+                            f"批量更新 {idx}/{self._update_total}: {m['name_en']}")
         self._log(f"正在获取 {m['name_en']} 的可用版本列表...")
         self._run_async(
             lambda: updater.list_install_options(entry, self.cfg, self.db, force=True),
@@ -1485,11 +1498,11 @@ class GuiApp:
         return marks
 
     def _addable_row_style(self, e, installed: bool, i: int) -> tuple:
-        """可添加行的 (tags, 名称文本)。优先级：新增(🆕浅黄底) > 已安装(✓绿字) > 隔行灰。"""
-        if e["id"] in getattr(self, "_new_ids", ()):
-            return ("new",), "🆕 " + e["name_en"]
+        """可添加行的 (tags, 名称文本)。优先级：已安装(✓绿字) > 新增(🆕浅黄底) > 隔行灰。"""
         if installed:
             return ("inst",), "✓ " + e["name_en"]
+        if e["id"] in getattr(self, "_new_ids", ()):
+            return ("new",), "🆕 " + e["name_en"]
         if i % 2:
             return ("odd",), e["name_en"]
         return (), e["name_en"]

@@ -89,9 +89,14 @@ def _backup_mtime(p: Path) -> float:
 
 
 def backup_files(backup_dir: Path) -> list:
-    """备份目录下的全部备份文件（jar 与 .deleted），按 mtime 旧→新排序。"""
+    """备份目录下的全部备份文件，按 mtime 旧→新排序。
+
+    `*.jar*` 一网打尽四种形态：x.jar / x.jar.deleted（删除移入）/
+    x.jar.disabled（备份禁用中的mod）/ x.jar.disabled.deleted——
+    漏任何一种都会导致该备份永不清理、也无法在备份管理中看到。
+    """
     try:
-        files = list(backup_dir.glob("*.jar")) + list(backup_dir.glob("*.jar.deleted"))
+        files = list(backup_dir.glob("*.jar*"))
         return sorted(files, key=lambda p: (_backup_mtime(p), p.name))
     except OSError:
         return []

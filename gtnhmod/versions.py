@@ -106,6 +106,18 @@ def _tie_key(s: str) -> tuple:
                  for t in re.findall(r"\d+|[a-z]+", _clean(s)))
 
 
+def order_key(s: str) -> tuple:
+    """全序排序键：结构化键为主，同结构变体（v1.85 / v1.85-Multi / …Multiplayer）
+    按 _tie_key 严格分先后。
+
+    compare() 刻意把"多出未知后缀"判等（2.0.0-GTNH == 2.0.0），不可传递、
+    不能用作排序比较器；排序展示请用本键。
+    """
+    v = parse_version(s)
+    return (v.parts, RELEASE_RANK if v.pre_kind is None else v.pre_kind,
+            v.pre_nums, _tie_key(v.raw))
+
+
 def _tie_break(ra: str, rb: str) -> int:
     """结构化键相等时按原文打破平局。
 

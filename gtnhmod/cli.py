@@ -83,13 +83,13 @@ class CliApp:
         except Exception as e:
             self.ui.error(f"抓取失败: {e}")
             return
+        for w in warnings:  # 合并前打印（缓存/限流提示是合并失败时的重要上下文）
+            self.ui.warn(w)
         try:
             changes = self.db.merge_wiki(mods)
         except Exception as e:
             self.ui.error(f"合并失败: {e}")
             return
-        for w in warnings:
-            self.ui.warn(w)
         if not changes:
             self.ui.ok("wiki 数据已是最新，无变化")
             return

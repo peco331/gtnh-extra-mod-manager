@@ -10,12 +10,11 @@ import time
 import urllib.parse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from functools import cmp_to_key
 from pathlib import Path
 
 from . import net, utils
 from .versions import (MC_VERSION_RE, VersionParseError, _MC_SET,
-                       compare, max_version, parse_version, split_mc_mod_version)
+                       max_version, order_key, parse_version, split_mc_mod_version)
 
 
 class SourceError(Exception):
@@ -59,9 +58,9 @@ def sort_version_options(options: list) -> list:
             parseable.append(o)
         except VersionParseError:
             unparse.append(o)
-    # 用 compare 排序而非 key()：键相等的不同构建（1.2.3s/t）也能分出先后
-    parseable.sort(key=cmp_to_key(lambda x, y: compare(x.version, y.version)),
-                   reverse=True)
+    # order_key 是全序（变体构建 v1.85/Multi/Multiplayer 也严格分先后），
+    # compare 的判等语义不可传递、不能用作排序比较器
+    parseable.sort(key=lambda o: order_key(o.version), reverse=True)
     return parseable + unparse
 
 
@@ -181,7 +180,8 @@ class GitHubSource(Source):
         try:
             data, src = net.http_get_cached(url, cache_file=cache_file,
                                             ttl_hours=self.ttl_hours,
-                                            headers=headers, proxy=self.proxy)
+                                            headers=headers, proxy=self.proxy,
+                                            force=force)
         except net.HttpError as e:
             if e.code == 404:
                 # 缓存"不存在"状态，避免反复 404 请求

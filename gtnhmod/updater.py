@@ -11,7 +11,8 @@ from . import SIDES, SIDE_LABELS, utils
 from . import downloader, installed as installed_mod, scanner, sources
 from . import wiki as wikimod
 from .sources import Source, UpdateInfo
-from .versions import VersionParseError, compare, parse_version, split_mc_mod_version
+from .versions import (VersionParseError, compare, order_key, parse_version,
+                       split_mc_mod_version)
 
 IGNORED_HINT = "（已忽略）"
 
@@ -159,13 +160,12 @@ def _pick_default_option(options: list, old_version: str | None = None) -> tuple
         return None, ""
     if old_version:
         try:
-            for o in pool:
-                if o["compat"] == "incompatible":
-                    continue
-                if compare(o["version"], chosen["version"]) == 0 \
-                        and compare(o["version"], old_version) > 0:
-                    chosen = o
-                    break
+            # 同组判等的变体里取"最大"的（order_key 全序），而不是列表顺序第一个
+            group = [o for o in pool
+                     if o["compat"] != "incompatible"
+                     and compare(o["version"], chosen["version"]) == 0]
+            if group:
+                chosen = max(group, key=lambda o: order_key(o["version"]))
         except VersionParseError:
             pass
     if chosen["version"] != latest["version"]:
@@ -558,10 +558,16 @@ def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
                 results.append((side, f.mod_id, None, str(e)))
             if progress_cb:
                 progress_cb(side, f.mod_id)
-    if db_dirty:
-        db.save()
     if inst_dirty:
-        installed.save()
+        try:
+            installed.save()
+        except Exception as e:  # 保存失败不丢检查结果，仅记录（下次会重查）
+            _log_op(cfg, f"保存已安装记录失败: {e}")
+    if db_dirty:
+        try:
+            db.save()
+        except Exception as e:
+            _log_op(cfg, f"保存数据库失败: {e}")
     return results
 
 
@@ -572,26 +578,30 @@ def bindable_links(entry: dict) -> list:
 
 
 def summarize_check(results: list, reg: dict) -> dict:
-    """检查更新结果计数：{update, uptodate, unknown, manual, error}。
+    """检查更新结果计数，按 mod 去重（双端不重复计）：
+    {update, uptodate, unknown, manual, error}。
 
+    同一 mod 多端结果不一致时取最有行动价值的状态：
+    可更新 > 出错 > 无法判断 > 需手动 > 已最新。
     reg 为 build_registry 结果（判定"可更新"需要当前已装版本号）。
-    CLI/GUI 的检查结果汇总共用本函数，避免两处计数逻辑漂移。
     """
-    counts = {"update": 0, "uptodate": 0, "unknown": 0, "manual": 0, "error": 0}
+    per_mod: dict = {}
     for side, mod_id, info, err in results:
+        st = per_mod.setdefault(mod_id, set())
         if err:
-            counts["error"] += 1
+            st.add("error")
         elif not info or not info.latest_version:
-            counts["manual"] += 1
+            st.add("manual")
         else:
             cur = (reg.get(side, {}).get(mod_id) or {}).get("version")
-            st = version_status(cur, info.latest_version)
-            if st == "update":
-                counts["update"] += 1
-            elif st == "uptodate":
-                counts["uptodate"] += 1
-            else:
-                counts["unknown"] += 1
+            s = version_status(cur, info.latest_version)
+            st.add(s if s in ("update", "uptodate") else "unknown")
+    counts = {"update": 0, "uptodate": 0, "unknown": 0, "manual": 0, "error": 0}
+    for st in per_mod.values():
+        for key in ("update", "error", "unknown", "manual", "uptodate"):
+            if key in st:
+                counts[key] += 1
+                break
     return counts
 
 
@@ -1109,7 +1119,9 @@ def rollback_mod(cfg, db, installed, mod_id: str, *, sides: tuple = SIDES) -> li
     for side in sides:
         bak_dir = cfg.backup_dir / side / mod_id
         if bak_dir.is_dir():
-            all_jars += [p for p in bak_dir.glob("*.jar") if p.is_file()]
+            # 只回滚普通备份；.deleted（用户主动删除的）不参与
+            all_jars += [p for p in downloader.backup_files(bak_dir)
+                         if p.is_file() and not p.name.endswith(".deleted")]
     if not all_jars:
         return [{"side": side, "action": "nobackup"} for side in sides]
     src = max(all_jars, key=backup_key)
