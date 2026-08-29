@@ -131,6 +131,12 @@ class TestGitHubSource(unittest.TestCase):
         self.assertEqual(extract_version("1.7.10-0.8.0"), "0.8.0")
         self.assertEqual(extract_version("0.8.0"), "0.8.0")
 
+    def test_junk_patch_tag_rejected(self):
+        # 真实案例：仓库杂项 tag "p3" 不是可比较的版本（会被补丁规则解析成"版本3"
+        # 排到 v1.7.49 前面），必须返回 None 让列表跳过
+        self.assertIsNone(extract_version("p3"))
+        self.assertIsNone(extract_version("hotfix"))
+
     def test_version_from_modver_mc_tag(self):
         # 第二段是已知 MC 版本 → 首段是 mod 版本，整体保留
         self.assertEqual(extract_version("1.0.1-1.7.10-GTNH"), "1.0.1-1.7.10-GTNH")

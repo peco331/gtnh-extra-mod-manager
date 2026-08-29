@@ -105,14 +105,19 @@ def extract_version(tag: str) -> str | None:
     """从 tag 提取 mod 版本：首段是 MC 版本则去掉（1.7.10-0.8.0 → 0.8.0）。
 
     第二段若是已知 MC 版本（如 1.0.1-1.7.10-GTNH），说明首段是 mod 版本，不剥离。
+    提取结果必须以数字或 v+数字开头——"p3" 这类纯补丁名的杂项 tag 不是
+    可比较的版本，返回 None 让调用方跳过（否则会被解析成"版本3"排到最前）。
     """
     tag = (tag or "").strip()
     if not tag:
         return None
     parts = tag.split("-")
+    ver = tag
     if len(parts) >= 2 and MC_VERSION_RE.match(parts[0]) and parts[1] not in _MC_SET:
-        return "-".join(parts[1:])
-    return tag
+        ver = "-".join(parts[1:])
+    if not re.match(r"[vV]?\d", ver):
+        return None
+    return ver
 
 
 def _score_asset(name: str, tag: str, tag_clean: str, repo: str) -> int:

@@ -70,7 +70,12 @@ def parse_version(s) -> Version:
     raw = str(s).strip()
     if not raw:
         raise VersionParseError("版本为空")
-    tokens = re.findall(r"\d+|[a-z]+", _clean(raw))
+    cleaned = _clean(raw)
+    if not re.match(r"\d", cleaned):
+        # 版本必须以数字开头：否则 "p3" 这类补丁名会被 GTNH 补丁规则
+        # 误解析成"版本3"，排序时反而压过 v1.7.49
+        raise VersionParseError(f"无法解析版本: {raw!r}")
+    tokens = re.findall(r"\d+|[a-z]+", cleaned)
     if not any(t.isdigit() for t in tokens):
         raise VersionParseError(f"无法解析版本: {raw!r}")
 

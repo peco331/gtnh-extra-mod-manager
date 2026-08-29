@@ -156,6 +156,18 @@ class TestCompareTieBreak(unittest.TestCase):
         self.assertEqual(split_mc_mod_version("dualhotbar-1.61-超长快捷栏"),
                          ("dualhotbar", None, "1.61"))
 
+    def test_patch_name_without_base_is_unparseable(self):
+        # 真实案例：仓库杂项 tag "p3" 被补丁规则解析成"版本3"，
+        # 排序反而压过 v1.7.49 并抢走推荐/最新标记
+        self.assertRaises(VersionParseError, parse_version, "p3")
+
+
+class TestOrderKey(unittest.TestCase):
+    def test_variants_ordered(self):
+        from gtnhmod.versions import order_key
+        assert order_key("v1.85-Multiplayer") > order_key("v1.85-Multi")
+        assert order_key("v1.85-Multi") > order_key("v1.85")
+
     def test_max_version_uses_tie_break(self):
         self.assertEqual(max_version(["1.2.3s", "1.2.3t"]), "1.2.3t")
 
