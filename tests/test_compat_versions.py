@@ -602,5 +602,48 @@ class TestDefaultPathCompat(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestBindSourceUrl(unittest.TestCase):
+    """绑定子路径链接后，"当前绑定"标记用的 URL 必须能对上原始链接。"""
+
+    def test_current_source_url_returns_bound_subpath(self):
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_bind_"))
+        try:
+            from gtnhmod.db import ModsDB
+            db = ModsDB(tmp / "mods_db.json")
+            mid = db.add_custom({
+                "name_en": "DarkTextFix", "source_type": "github",
+                "source": {"owner": "eudesjunior", "repo": "DarkTextFix",
+                           "asset_regex": "", "exclude_regex": ""},
+                "github_url": "https://github.com/eudesjunior/DarkTextFix"})
+            # 绑定到另一个仓库的 releases 子路径
+            r = updater.bind_source(db, mid, "https://github.com/AdminXiaoMai/DarkTextFix/releases")
+            self.assertEqual(r["action"], "bound")
+            cur = updater.current_source_url(db.get(mid))
+            self.assertEqual(cur, "https://github.com/AdminXiaoMai/DarkTextFix/releases")
+            # 该 URL 应能在链接列表里精确匹配（GUI/CLI 的"← 当前绑定"标记依赖它）
+            cand = updater.bindable_links(db.get(mid))
+            self.assertIn(cur, [l["url"] for l in cand])
+            # 实际生效的下载源是绑定后的仓库
+            self.assertEqual(db.get(mid)["source"]["owner"], "AdminXiaoMai")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_legacy_entry_falls_back_to_reconstruction(self):
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_bind2_"))
+        try:
+            from gtnhmod.db import ModsDB
+            db = ModsDB(tmp / "mods_db.json")
+            mid = db.add_custom({
+                "name_en": "LegacyMod", "source_type": "github",
+                "source": {"owner": "o", "repo": "r",
+                           "asset_regex": "", "exclude_regex": ""}})
+            e = db.get(mid)
+            e["urls"]["github"] = None  # 模拟旧数据缺失
+            self.assertEqual(updater.current_source_url(e),
+                             "https://github.com/o/r")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -688,12 +688,22 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
 
 
 def current_source_url(entry: dict) -> str:
-    """条目当前绑定的下载源链接（github仓库页/curseforge页）；无则空串。"""
+    """条目当前绑定的下载源链接（github仓库页/curseforge页）；无则空串。
+
+    返回绑定时的原始链接（urls["github"]，可能是 releases 等子路径），而非从
+    owner/repo 重建的仓库根——否则绑定子路径后，"← 当前绑定"标记会对不上。
+    旧数据 urls 里没有时回退到重建。
+    """
     src = entry.get("source") or {}
-    if entry.get("source_type") == "github" and src.get("owner"):
-        return f"https://github.com/{src['owner']}/{src['repo']}"
+    urls = entry.get("urls") or {}
+    if entry.get("source_type") == "github":
+        if urls.get("github"):
+            return urls["github"]
+        if src.get("owner"):
+            return f"https://github.com/{src['owner']}/{src['repo']}"
+        return ""
     if entry.get("source_type") == "curseforge":
-        return (entry.get("urls") or {}).get("curseforge") or ""
+        return urls.get("curseforge") or ""
     return ""
 
 
@@ -728,6 +738,10 @@ def bind_source(db, mod_id: str, url: str) -> dict:
         fields["urls"]["curseforge"] = url
     else:
         return {"action": "error", "error": "仅支持绑定 GitHub 仓库或 CurseForge 页面链接"}
+    # 绑定的链接始终进入链接列表（否则选择对话框里看不到/标不住当前绑定）
+    fields["urls"]["links"] = list((entry.get("urls") or {}).get("links") or [])
+    if not any(l.get("url") == url for l in fields["urls"]["links"]):
+        fields["urls"]["links"].append({"url": url, "label": fields["source_type"]})
     db.update_entry(mod_id, fields)
     entry = db.get(mod_id)
     utils.append_log(db.path.parent,
