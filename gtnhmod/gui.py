@@ -1756,6 +1756,9 @@ class GuiApp:
             return
         # 本次新增的 mod 高亮显示（查看详情后清除；下次刷新覆盖）
         self._new_ids = {m["id"] for m in self.db.mods} - before
+        if self._new_ids:
+            self._log(f"本次新增 {len(self._new_ids)} 个mod，已在可添加列表中高亮"
+                      "（🆕 标记，查看详情后取消）")
         self._log(f"wiki 数据已更新，共 {len(self.db.wiki_mods())} 个mod，{len(changes)} 处变化")
         for c in changes[:30]:
             self._log(f"  - {c}")
