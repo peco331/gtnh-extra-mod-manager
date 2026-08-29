@@ -56,6 +56,7 @@ class GuiApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.report_callback_exception = self._report_cb_exc
         self._merged_cache = None      # build_merged_registry 结果缓存（一次刷新内复用）
+        self._new_ids: set = set()     # 本次刷新wiki新增的mod（查看详情后清除高亮）
         self._search_after = None      # 搜索防抖定时器
         self._build_ui()
         self.root.after(100, self._poll_queue)
@@ -362,6 +363,7 @@ class GuiApp:
             self.add_tree.heading(c, text=h)
             self.add_tree.column(c, width=w, anchor="w")
         self.add_tree.tag_configure("inst", foreground=STATUS_COLORS["update_avail"])
+        self.add_tree.tag_configure("new", background="#fff3bf")
         self.add_tree.tag_configure("odd", background="#f4f5f7")
         self.add_tree.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.add_tree, tree_frame)
@@ -1482,6 +1484,29 @@ class GuiApp:
             marks[m["mod_id"]] = m["install_side"]
         return marks
 
+    def _addable_row_style(self, e, installed: bool, i: int) -> tuple:
+        """可添加行的 (tags, 名称文本)。优先级：新增(🆕浅黄底) > 已安装(✓绿字) > 隔行灰。"""
+        if e["id"] in getattr(self, "_new_ids", ()):
+            return ("new",), "🆕 " + e["name_en"]
+        if installed:
+            return ("inst",), "✓ " + e["name_en"]
+        if i % 2:
+            return ("odd",), e["name_en"]
+        return (), e["name_en"]
+
+    def _clear_new_mark(self, e) -> None:
+        """查看详情后清除该行的新增高亮（原地更新，不整页刷新）。"""
+        if e["id"] not in getattr(self, "_new_ids", ()):
+            return
+        self._new_ids.discard(e["id"])
+        if not hasattr(self, "add_tree") or not e["id"] in self.add_rows:
+            return
+        i = list(self.add_tree.get_children("")).index(e["id"])
+        tags, name_txt = self._addable_row_style(e, e["id"] in self._installed_marks(), i)
+        self.add_tree.item(e["id"], tags=tags,
+                           values=(name_txt,) + tuple(self.add_tree.set(e["id"], c) for c in
+                                                      ("cn", "side", "cat", "installed", "updated", "desc")))
+
     def refresh_addable(self):
         if not hasattr(self, "add_tree"):
             return
@@ -1507,14 +1532,7 @@ class GuiApp:
                 continue
             side_txt = SIDE_LABELS.get(e["side"], e["side"]) + ("?" if e["side_uncertain"] else "")
             installed_txt = INSTALL_SIDE_CN.get(marks.get(e["id"]), "")
-            # 已安装用绿色前景；斑马纹只在未安装行上（避免两种背景色冲突）
-            if e["id"] in marks:
-                tags = ("inst",)
-            elif i % 2:
-                tags = ("odd",)
-            else:
-                tags = ()
-            name_txt = ("✓ " + e["name_en"]) if e["id"] in marks else e["name_en"]
+            tags, name_txt = self._addable_row_style(e, e["id"] in marks, i)
             self.add_tree.insert("", "end", iid=e["id"], tags=tags,
                                  values=(name_txt, e["name_cn"], side_txt,
                                          e["category"], installed_txt,
@@ -1533,6 +1551,7 @@ class GuiApp:
         if not sel:
             return
         e = sel[0]
+        self._clear_new_mark(e)  # 查看过详情后不再高亮"新增"
         marks = self._installed_marks()
         installed_txt = INSTALL_SIDE_CN.get(marks.get(e["id"]), "未安装")
         top = tk.Toplevel(self.root)
@@ -1728,12 +1747,15 @@ class GuiApp:
         for w in warnings:
             self._log(f"[警告] {w}")
         try:
+            before = {m["id"] for m in self.db.mods}
             changes = self.db.merge_wiki(mods)
         except Exception as e:
             self._log(f"[错误] {e}")
             messagebox.showerror("刷新Wiki失败", str(e))
             self._set_busy(False)
             return
+        # 本次新增的 mod 高亮显示（查看详情后清除；下次刷新覆盖）
+        self._new_ids = {m["id"] for m in self.db.mods} - before
         self._log(f"wiki 数据已更新，共 {len(self.db.wiki_mods())} 个mod，{len(changes)} 处变化")
         for c in changes[:30]:
             self._log(f"  - {c}")
