@@ -213,15 +213,20 @@ class GuiApp:
             tree.heading(col, command=lambda c=col: handler(c))
 
     def _sort_tree(self, tree, col, reverse):
+        """按列排序。无值（—/空）的行无论升降序都排在最后。"""
         def key(iid):
             v = tree.set(iid, col)
             try:
                 return (0, float(v))
             except ValueError:
+                if v in ("", "—", "?"):
+                    return (2, "")
                 return (1, v.lower())
         iids = list(tree.get_children(""))
-        iids.sort(key=key, reverse=reverse)
-        for i, iid in enumerate(iids):
+        has = [i for i in iids if key(i)[0] != 2]
+        empty = [i for i in iids if key(i)[0] == 2]
+        has.sort(key=key, reverse=reverse)
+        for i, iid in enumerate(has + empty):
             tree.move(iid, "", i)
 
     def _reapply_sort(self, tree):
@@ -361,6 +366,8 @@ class GuiApp:
         self.add_tree.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.add_tree, tree_frame)
         self._make_sortable(self.add_tree, desc_first_cols=("updated",))
+        # 默认按更新时间降序（有日期的在前，无日期的最后）
+        self.add_tree._sort_col, self.add_tree._sort_rev = "updated", True
         self.add_tree.bind("<Double-1>", lambda e: self.show_addable_detail())
         self.add_tree.bind("<Button-3>", lambda e: self._popup(self.add_tree, self._add_menu, e))
         self.only_uninstalled = tk.BooleanVar(value=False)
