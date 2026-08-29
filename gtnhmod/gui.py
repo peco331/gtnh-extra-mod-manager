@@ -169,11 +169,11 @@ class GuiApp:
         self.log.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.log, log_frame)
         self.log_frame = log_frame
-        self._apply_log_layout()
         self.status_var = tk.StringVar(value="就绪")
         self.status_label = ttk.Label(bottom, textvariable=self.status_var, font=FONT,
                                       anchor="w")
-        self.status_label.pack(fill="x", padx=8, pady=(2, 4))
+        self.status_label.pack(fill="x", padx=8, pady=(2, 4))  # 先占位
+        self._apply_log_layout()  # log_frame 用 before=status_label 插到状态栏之前
         if not self.cfg.client_mods_dir and not self.cfg.server_mods_dir:
             self._log("就绪。首次使用请先到「设置」配置两端 mods 目录；"
                       "mod 数据请点「可添加MOD」页的刷新按钮获取。")
@@ -252,6 +252,20 @@ class GuiApp:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _dialog(self, title, size="600x400"):
+        """统一对话框：Esc 关闭、跟随主窗、模态。"""
+        top = tk.Toplevel(self.root)
+        top.bind("<Escape>", lambda _e: top.destroy())
+        top.title(title)
+        top.geometry(size)
+        top.transient(self.root)
+        try:
+            top.wait_visibility()
+            top.grab_set()
+        except tk.TclError:
+            pass
+        return top
 
     def _reveal(self, path):
         """在资源管理器中定位文件。"""
@@ -820,15 +834,23 @@ class GuiApp:
             return
         if self.busy:
             return
-        if not messagebox.askyesno("确认", f"更新选中的 {len(sel)} 个mod（所有已装端别）？\n"
-                                    "将逐个弹出版本选择（可取消跳过），旧版本自动备份到 data/backup。"):
+        ans = messagebox.askyesnocancel(
+            "确认更新", f"更新选中的 {len(sel)} 个mod（所有已装端别）？\n\n"
+                       "「是」：逐个弹出版本选择器，可精确挑选\n"
+                       "「否」：全部使用推荐版本（最新兼容版），不再逐个询问\n"
+                       "「取消」：返回\n\n旧版本自动备份到 data/backup。")
+        if ans is None:
             return
-        self._start_update_flow(list(sel))
+        self._start_update_flow(list(sel), mode="pick" if ans else "recommend")
 
-    def _start_update_flow(self, mods):
-        """逐个处理：弹版本选择器 → 更新 → 下一个（单个mod失败不影响其他）。"""
+    def _start_update_flow(self, mods, mode="pick"):
+        """逐个处理：弹版本选择器 → 更新 → 下一个（单个mod失败不影响其他）。
+
+        mode="recommend" 跳过版本选择器，直接用推荐版本（最新兼容版）。
+        """
         self._pending_updates = list(mods)
         self._update_total = len(mods)
+        self._update_recommend = mode == "recommend"
         self._update_results = []
         self._set_busy(True)
         self._process_next_update()
@@ -842,6 +864,9 @@ class GuiApp:
         idx = self._update_total - len(self._pending_updates)  # pop 后即第 idx 个（1-based）
         self._push_progress(idx, self._update_total,
                             f"批量更新 {idx}/{self._update_total}: {m['name_en']}")
+        if getattr(self, "_update_recommend", False):
+            self._run_update_one(m, None)  # 推荐模式：跳过版本选择器
+            return
         self._log(f"正在获取 {m['name_en']} 的可用版本列表...")
         self._run_async(
             lambda: updater.list_install_options(entry, self.cfg, self.db, force=True),
@@ -931,6 +956,8 @@ class GuiApp:
             if r["action"] == "updated":
                 n_ok += 1
                 self._log(f"已更新 {label} {name}: v{r['from']} → v{r['to']}")
+                if r.get("body"):
+                    self._log(f"  更新日志: {r['body'][:200]}…")
                 if r.get("warning"):
                     self._log(f"  [端别提示] {r['warning']}")
             elif r["action"] == "uptodate":
@@ -991,6 +1018,25 @@ class GuiApp:
                     self._log(f"已{'启用' if want else '禁用'} {SIDE_LABELS[side]} {name}")
                 elif r["action"] != "unchanged":
                     self._log(f"[错误] {SIDE_LABELS[side]} {name}: {r.get('error')}")
+            self.refresh_installed()
+        self._run_async(job, on_done=done)
+
+    def toggle_one_side(self, m, side, enable):
+        """按端别单独启用/禁用（双端安装的mod）。"""
+        if not self._check_not_busy():
+            return
+        self._set_busy(True)
+
+        def job():
+            return updater.set_enabled(self.cfg, self.db, self.installed,
+                                       m["mod_id"], side, enable)
+
+        def done(r):
+            self._set_busy(False)
+            if r["action"] in ("enabled", "disabled"):
+                self._log(f"已{'启用' if enable else '禁用'} {SIDE_LABELS[side]} {m['name_en']}")
+            elif r["action"] != "unchanged":
+                self._log(f"[错误] {SIDE_LABELS[side]} {m['name_en']}: {r.get('error')}")
             self.refresh_installed()
         self._run_async(job, on_done=done)
 
@@ -1100,12 +1146,11 @@ class GuiApp:
             on_done=self._on_check_done)
 
     def _on_inst_double(self, event):
-        # 双击 → 在资源管理器中定位文件
+        # 双击 → 查看详情（与可添加页一致；资源管理器定位在右键菜单）
         iid = self.inst_tree.identify_row(event.y)
         m = self.inst_rows.get(iid)
         if m:
-            side = "client" if "client" in m["sides"] else next(iter(m["sides"]))
-            self.reveal_mod(m, side)
+            self._show_inst_detail(m)
 
     # ---------- 右键菜单 ----------
     def _inst_menu(self, menu, iid):
@@ -1139,6 +1184,15 @@ class GuiApp:
             menu.add_command(label="锁定/解锁", command=self.lock_selected)
             menu.add_command(label="打开下载页", command=lambda: self._open_link_mod(m))
             menu.add_command(label="浏览备份…", command=lambda: self._backup_dialog(m))
+        # 双端安装时可按端别单独启停（对齐 CLI 能力）
+        if not multi and len(m["sides"]) > 1:
+            sub2 = tk.Menu(menu, tearoff=0)
+            for s, st in m["sides"].items():
+                want = not st["enabled"]
+                label = f"{'禁用' if st['enabled'] else '启用'}（{SIDE_LABELS[s]}）"
+                sub2.add_command(label=label,
+                                 command=lambda s=s, w=want: self.toggle_one_side(m, s, w))
+            menu.add_cascade(label="按端别启用/禁用", menu=sub2)
         menu.add_separator()
         sides = list(m["sides"])
         if len(sides) == 1:
@@ -1567,26 +1621,70 @@ class GuiApp:
         self._clear_new_mark(e)  # 查看过详情后不再高亮"新增"
         marks = self._installed_marks()
         installed_txt = INSTALL_SIDE_CN.get(marks.get(e["id"]), "未安装")
-        top = tk.Toplevel(self.root)
-        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
-        top.title(f"{e['name_en']} {e['name_cn']}")
-        top.geometry("680x460")
-        src = updater.current_source_url(e)
-        text = (f"名称: {e['name_en']} {e['name_cn']}\n"
-                f"分类: {e['group']} / {e['category']}\n"
-                f"端别: {SIDE_LABELS.get(e['side'], e['side'])}"
-                + ("（wiki标注不确定）" if e["side_uncertain"] else "") + "\n"
-                f"已安装: {installed_txt}\n"
-                f"下载源: {src or '（默认第一个GitHub链接）'}\n\n"
-                + (e["desc"] + "\n\n" if e["desc"] else "")
-                + "详细信息:\n" + e["detail"])
+        top = self._dialog(f"{e['name_en']} {e['name_cn']}", "680x520")
         frame = ttk.Frame(top)
         frame.pack(fill="both", expand=True, padx=8, pady=8)
         t = tk.Text(frame, wrap="word", font=FONT)
-        t.insert("1.0", text)
-        t.configure(state="disabled")
         t.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(t, frame)
+
+        # 逐行写入并记录链接位置（双击打开）
+        links = (e.get("urls") or {}).get("links") or []
+        offset = 0
+
+        def emit(line, link_url=None):
+            nonlocal offset
+            t.insert("end", line + "\n")
+            if link_url:
+                start = offset + line.index(link_url)
+                tag = f"lnk{start}"
+                t.tag_configure(tag, foreground="#0a58ca", underline=True)
+                t.tag_add(tag, f"1.0+{start}c", f"1.0+{end_c(start, link_url)}c")
+                t.tag_bind(tag, "<Double-Button-1>",
+                           lambda _e, u=link_url: webbrowser.open(u))
+                t.tag_bind(tag, "<Enter>",
+                           lambda _e: t.configure(cursor="hand2"))
+                t.tag_bind(tag, "<Leave>",
+                           lambda _e: t.configure(cursor=""))
+            offset += len(line) + 1
+
+        def end_c(start, url):
+            return start + len(url)
+
+        emit(f"名称: {e['name_en']} {e['name_cn']}")
+        emit(f"分类: {e['group']} / {e['category']}")
+        emit("端别: " + SIDE_LABELS.get(e["side"], e["side"])
+             + ("（wiki标注不确定）" if e["side_uncertain"] else ""))
+        emit(f"已安装: {installed_txt}")
+        emit("发布时间: " + (((e.get("release_date") or "").replace("T", " "))[:16]
+                            or "（未知，检查更新后获取）"))
+        emit("下载源: " + (updater.current_source_url(e) or "（默认第一个GitHub链接）"))
+        if e.get("compat"):
+            emit("兼容性（wiki 标注）:")
+            for r in e["compat"]:
+                emit("  - " + (r.get("raw") or str(r)))
+        if links:
+            emit("链接（双击打开）:")
+            for l in links:
+                emit(f"  - {l['label']}: {l['url']}", link_url=l["url"])
+        if e.get("desc"):
+            emit("")
+            emit("简介: " + e["desc"])
+        emit("")
+        emit("详细信息:")
+        emit(e.get("detail") or "（无）")
+        t.configure(state="disabled")
+
+        btns = ttk.Frame(top)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+        url = (e.get("urls") or {}).get("github") or (e.get("urls") or {}).get("curseforge")
+        if url:
+            ttk.Button(btns, text="打开下载页",
+                       command=lambda u=url: webbrowser.open(u)).pack(side="left")
+        ttk.Button(btns, text="绑定源…",
+                   command=lambda: (top.destroy(), self._bind_source_dialog(e))
+                   ).pack(side="left", padx=6)
+        ttk.Button(btns, text="关闭", command=top.destroy).pack(side="right")
 
     def install_addable(self):
         """安装：按mod端别声明自动选择端别。"""
@@ -1673,51 +1771,97 @@ class GuiApp:
         self.refresh_all()
 
     def _version_picker(self, options, current=None, title="选择版本"):
-        """模态版本选择对话框。返回版本字符串或 None（取消）。"""
+        """模态版本选择对话框：过滤、仅显示适配、预选推荐/已装版本。返回版本或 None。"""
         top = tk.Toplevel(self.root)
         top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
         top.title(title)
-        top.geometry("560x440")
+        top.geometry("640x500")
         gtnh = self.cfg.data.get("gtnh_version") or ""
         ttk.Label(top, text=f"你的整合包版本: {gtnh or '（未设置，设置页可填写以获得推荐标记）'}",
                   font=FONT).pack(anchor="w", padx=10, pady=(10, 2))
+        bar = ttk.Frame(top)
+        bar.pack(fill="x", padx=10)
+        ttk.Label(bar, text="过滤:").pack(side="left")
+        filter_var = tk.StringVar()
+        ttk.Entry(bar, textvariable=filter_var, width=16).pack(side="left", padx=4)
+        only_compat = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="仅显示适配", variable=only_compat).pack(side="left", padx=4)
         frame = ttk.Frame(top)
         frame.pack(fill="both", expand=True, padx=10, pady=4)
-        lb = tk.Listbox(frame, width=64, height=12, font=FONT)
+        lb = tk.Listbox(frame, width=70, height=12, font=FONT, exportselection=False)
         lb.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(lb, frame)
-        for o in options:
+        detail = tk.Text(top, height=6, wrap="word", font=FONT, state="disabled")
+        detail.pack(fill="x", padx=10, pady=4)
+
+        def row_text(o):
             marks = []
             if o["recommended"]:
                 marks.append("推荐")
             if o["latest"]:
                 marks.append("最新")
+            if o.get("prerelease"):
+                marks.append("预发布")
             if o["compat"] == "incompatible":
                 marks.append("不适配当前GTNH")
             if current and o["version"] == current:
                 marks.append("已安装")
+            pub = (o.get("published_at") or "")[:10]
             tag = f"  [{'/'.join(marks)}]" if marks else ""
-            lb.insert("end", f"{o['version']}{tag}")
-        # 选中版本时显示更新日志
-        detail = tk.Text(top, height=6, wrap="word", font=FONT, state="disabled")
-        detail.pack(fill="x", padx=10, pady=4)
+            return f"{o['version']}{tag}" + (f"  {pub}" if pub else "")
+
+        shown = []  # 与 Listbox 行一一对应的 options 子集
+
+        def show_body(o):
+            detail.configure(state="normal")
+            detail.delete("1.0", "end")
+            body = (o.get("body") or "（该版本无更新日志）").strip()
+            if o["compat"] == "incompatible":
+                body = ("⚠ 按 wiki 兼容表可能与 GTNH " + gtnh
+                        + " 不适配" + chr(10) * 2) + body
+            detail.insert("1.0", body)
+            detail.configure(state="disabled")
+
+        def repopulate(*_a):
+            nonlocal shown
+            kw = filter_var.get().strip().lower()
+            shown = [o for o in options
+                     if (not only_compat.get() or o["compat"] != "incompatible")
+                     and (not kw or kw in o["version"].lower()
+                          or kw in (o.get("body") or "").lower())]
+            lb.delete(0, "end")
+            for o in shown:
+                lb.insert("end", row_text(o))
 
         def on_sel(event):
             idx = lb.curselection()
-            if not idx:
-                return
-            o = options[idx[0]]
-            detail.configure(state="normal")
-            detail.delete("1.0", "end")
-            detail.insert("1.0", o.get("body") or "（该版本无更新日志）")
-            detail.configure(state="disabled")
+            if idx:
+                show_body(shown[idx[0]])
         lb.bind("<<ListboxSelect>>", on_sel)
+        filter_var.trace_add("write", lambda *a: repopulate())
+        only_compat.trace_add("write", lambda *a: repopulate())
+        repopulate()
+
+        def preselect():
+            prefer = None
+            if current:
+                prefer = next((o for o in shown if o["version"] == current), None)
+            if prefer is None:
+                prefer = next((o for o in shown if o["recommended"]),
+                              shown[0] if shown else None)
+            if prefer is not None:
+                i = shown.index(prefer)
+                lb.selection_set(i)
+                lb.see(i)
+                show_body(prefer)
+        preselect()
+
         result = {"version": None}
 
         def ok():
             idx = lb.curselection()
             if idx:
-                result["version"] = options[idx[0]]["version"]
+                result["version"] = shown[idx[0]]["version"]
             top.destroy()
         btns = ttk.Frame(top)
         btns.pack(fill="x", padx=10, pady=8)
@@ -1853,34 +1997,74 @@ class GuiApp:
         if not sel:
             messagebox.showinfo("提示", "请先选中文件")
             return
-        entries = sorted(self.db.all(), key=lambda e: e["id"])
-        top = tk.Toplevel(self.root)
-        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
-        top.title("选择要关联的mod")
+        f_names = "、".join(f.file_name for _, f in sel)
+        top = self._dialog("选择要关联的mod", "640x460")
+        ttk.Label(top, text=f"将把 {f_names} 关联到选中的mod条目（可搜索）",
+                  font=FONT).pack(anchor="w", padx=8, pady=(8, 2))
+        bar = ttk.Frame(top)
+        bar.pack(fill="x", padx=8)
+        ttk.Label(bar, text="搜索:").pack(side="left")
+        kw_var = tk.StringVar()
+        ttk.Entry(bar, textvariable=kw_var, width=26).pack(side="left", padx=4)
         frame = ttk.Frame(top)
-        frame.pack(fill="both", expand=True, padx=8, pady=8)
-        lb = tk.Listbox(frame, width=60, height=16, font=FONT)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        lb = tk.Listbox(frame, width=72, height=15, font=FONT, exportselection=False)
         lb.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(lb, frame)
-        for e in entries:
-            lb.insert("end", f"{e['name_en'] or e['id']}（{e['name_cn']}）")
+        entries = sorted(self.db.all(), key=lambda e: (e["name_en"] or e["id"]).lower())
+
+        def key_of(e):
+            return f"{e['name_en'] or e['id']} {e['name_cn'] or ''}".lower()
+
+        shown = []
+
+        def repopulate(*_a):
+            nonlocal shown
+            kw = kw_var.get().strip().lower()
+            named = [(key_of(e), e) for e in entries]
+            if kw:
+                named = [(k, e) for k, e in named if kw in k]
+            named.sort(key=lambda x: x[0])
+            shown = [e for _, e in named]
+            lb.delete(0, "end")
+            for e in shown:
+                lb.insert("end", f"{e['name_en'] or e['id']}（{e['name_cn']}）")
+        kw_var.trace_add("write", lambda *a: repopulate())
+        repopulate()
+
+        # 按未受管文件名与条目英文名的包含关系预选最可能的条目
+        first_file = (sel[0][1].name_part or sel[0][1].file_name).lower()
+        for i, e in enumerate(shown):
+            if e["name_en"] and len(e["name_en"]) >= 4 and e["name_en"].lower() in first_file:
+                lb.selection_set(i)
+                lb.see(i)
+                break
 
         def ok():
             idx = lb.curselection()
             if not idx:
                 return
-            e = entries[idx[0]]
+            e = shown[idx[0]]
             for side, f in sel:
                 updater.associate_unmanaged(self.db, e["id"], f.name_part or f.file_name)
             self._log(f"已关联到 {e['name_en'] or e['id']}，重新扫描后生效")
             top.destroy()
             self.refresh_unmanaged()
-        ttk.Button(top, text="确认关联", command=ok).pack(pady=4)
+        btns = ttk.Frame(top)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(btns, text="确认关联", command=ok).pack(side="left", padx=2)
+        ttk.Button(btns, text="取消", command=top.destroy).pack(side="left", padx=6)
 
     def register_unmanaged(self):
         sel = self._selected_um()
         if not sel:
             messagebox.showinfo("提示", "请先选中文件")
+            return
+        names = (chr(10) + "").join("  " + f.file_name for _, f in sel)
+        if not messagebox.askyesno(
+                "注册为自定义mod",
+                "注册 " + str(len(sel)) + " 个文件为自定义源？"
+                "（端别默认双端，之后可在「自定义源」页修改）" + chr(10) + names):
             return
         for side, f in sel:
             eid = updater.register_unmanaged(self.cfg, self.db, side, f.file_name)
