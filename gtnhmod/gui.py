@@ -5,6 +5,7 @@
 
 已安装页：一个 mod 一行，安装端别分三类（双端/仅客户端/仅服务端）。
 """
+import json
 import os
 import queue
 import subprocess
@@ -15,7 +16,7 @@ import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import SIDES, SIDE_LABELS, __version__, updater, utils, cookies
+from . import SIDES, SIDE_LABELS, __version__, net, updater, utils, cookies
 from . import wiki as wikimod
 from .config import Config
 from .db import ModsDB
@@ -52,13 +53,13 @@ class GuiApp:
 
         self.root = tk.Tk()
         self.root.title(f"GTNH 额外MOD管理工具 v{__version__}")
-        self.root.geometry(self.cfg.data.get("window_geometry") or "1120x720")
+        self.root.geometry(self._clamp_geometry(
+            self.cfg.data.get("window_geometry") or "1120x720"))
         self.root.minsize(980, 640)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.report_callback_exception = self._report_cb_exc
         self._merged_cache = None      # build_merged_registry 结果缓存（一次刷新内复用）
         self._new_ids: set = set()     # 本次刷新wiki新增的mod（查看详情后清除高亮）
-        self._search_after = None      # 搜索防抖定时器
         self._build_ui()
         self.root.after(100, self._poll_queue)
         # 启动时刷新全部页签（否则自定义源/未受管页首次是空的）
@@ -75,6 +76,27 @@ class GuiApp:
         # 树全选（Ctrl+A）
         for t in (self.inst_tree, self.add_tree, self.um_tree, self.cust_tree):
             t.bind("<Control-a>", lambda _e, tree=t: tree.selection_set(tree.get_children("")))
+
+    @staticmethod
+    def _clamp_geometry(geo):
+        """恢复记忆的窗口位置时 clamp 到当前屏幕内（换小屏后窗口跑到屏外）。"""
+        import re
+        m = re.match(r"(\d+)x(\d+)(?:([+-]\d+)([+-]\d+))?", geo or "")
+        if not m:
+            return geo
+        w, h = int(m.group(1)), int(m.group(2))
+        try:
+            root = tk.Tk()
+            sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+            root.destroy()
+        except tk.TclError:
+            return geo
+        w, h = min(w, sw), min(h, sh)
+        x = y = None
+        if m.group(3) is not None:
+            x = min(max(int(m.group(3)), 0), max(0, sw - 200))
+            y = min(max(int(m.group(4)), 0), max(0, sh - 200))
+        return f"{w}x{h}" + (f"{x:+d}{y:+d}" if x is not None else "")
 
     def _on_close(self):
         """退出前取消挂起的防抖定时器（避免对已销毁控件的回调）并记忆窗口状态。"""
@@ -197,6 +219,11 @@ class GuiApp:
             self.log_frame.pack_forget()
             self.log_toggle_btn.configure(text="展开日志 ▾")
 
+    def _set_status(self, msg):
+        """写状态栏；后台任务进行时让位给进度文案。"""
+        if not self.busy:
+            self.status_var.set(msg)
+
     def _attach_scrollbar(self, widget, parent):
         sb = ttk.Scrollbar(parent, orient="vertical", command=widget.yview)
         sb.pack(side="right", fill="y")
@@ -310,6 +337,8 @@ class GuiApp:
                 has_dir = True
         if not has_dir:
             dir_menu.add_command(label="（未设置目录）", state="disabled")
+        dir_menu.add_separator()
+        dir_menu.add_command(label="备份管理（全部）…", command=self._backup_overview_dialog)
         self.btn_dirs["menu"] = dir_menu
         self.btn_dirs.pack(side="right", padx=(4, 0))
         self.btn_update_all = ttk.Button(bar, text="全部更新", command=self.update_all)
@@ -454,8 +483,9 @@ class GuiApp:
         ttk.Button(btns, text="删除", command=self.remove_custom).pack(side="left", padx=2)
 
     def _build_settings_tab(self, tab):
-        f = ttk.Frame(tab)
-        f.pack(fill="x", padx=12, pady=12)
+        # ---- 目录 ----
+        f = ttk.LabelFrame(tab, text="mods 目录")
+        f.pack(fill="x", padx=12, pady=(12, 6))
 
         def path_row(row, label, attr):
             ttk.Label(f, text=label).grid(row=row, column=0, sticky="w", pady=6)
@@ -472,25 +502,41 @@ class GuiApp:
 
         path_row(0, "客户端 mods 目录", "client_entry")
         path_row(1, "服务端 mods 目录", "server_entry")
-        ttk.Label(f, text="GitHub Token（可选，提高API限额）").grid(row=2, column=0, sticky="w", pady=6)
-        self.token_entry = ttk.Entry(f, width=60, show="*")
-        self.token_entry.grid(row=2, column=1, sticky="we", padx=6)
-        ttk.Label(f, text="代理地址（host:port，留空跟随系统）").grid(row=3, column=0, sticky="w", pady=6)
-        self.proxy_entry = ttk.Entry(f, width=60)
-        self.proxy_entry.grid(row=3, column=1, sticky="we", padx=6)
-        ttk.Label(f, text="检查结果缓存（小时）").grid(row=4, column=0, sticky="w", pady=6)
-        self.interval_entry = ttk.Entry(f, width=10)
-        self.interval_entry.grid(row=4, column=1, sticky="w", padx=6)
-        ttk.Label(f, text="每mod备份保留数").grid(row=5, column=0, sticky="w", pady=6)
-        self.backup_entry = ttk.Entry(f, width=10)
-        self.backup_entry.grid(row=5, column=1, sticky="w", padx=6)
-        ttk.Label(f, text="GTNH整合包版本（兼容推荐用）").grid(row=6, column=0, sticky="w", pady=6)
-        self.gtnh_entry = ttk.Entry(f, width=10)
-        self.gtnh_entry.grid(row=6, column=1, sticky="w", padx=6)
-        ttk.Button(f, text="保存设置", command=self.save_settings).grid(row=7, column=1, sticky="w", pady=10)
-
-        ttk.Button(f, text="打开操作日志", command=self._open_log_file).grid(row=7, column=1, padx=(110, 0), sticky="w", pady=10)
         f.columnconfigure(1, weight=1)
+
+        # ---- 网络（GitHub / 代理）----
+        nf = ttk.LabelFrame(tab, text="网络（GitHub 访问）")
+        nf.pack(fill="x", padx=12, pady=6)
+        ttk.Label(nf, text="GitHub Token（可选，提高API限额；匿名 60 次/时）").grid(
+            row=0, column=0, sticky="w", pady=6)
+        self.token_entry = ttk.Entry(nf, width=46, show="*")
+        self.token_entry.grid(row=0, column=1, sticky="we", padx=6)
+        ttk.Label(nf, text="代理地址（host:port，留空跟随系统）").grid(
+            row=1, column=0, sticky="w", pady=6)
+        self.proxy_entry = ttk.Entry(nf, width=46)
+        self.proxy_entry.grid(row=1, column=1, sticky="we", padx=6)
+        ttk.Button(nf, text="测试连接", command=self.test_network_settings).grid(
+            row=0, column=2, rowspan=2, padx=6)
+        ttk.Label(nf, text="获取 Token: github.com/settings/tokens（只需公开仓库读取权限）",
+                  foreground="#666").grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        nf.columnconfigure(1, weight=1)
+
+        # ---- 常规 ----
+        gf = ttk.LabelFrame(tab, text="常规")
+        gf.pack(fill="x", padx=12, pady=6)
+        ttk.Label(gf, text="检查更新结果缓存（小时）").grid(row=0, column=0, sticky="w", pady=6)
+        self.interval_entry = ttk.Entry(gf, width=10)
+        self.interval_entry.grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Label(gf, text="每mod备份保留数").grid(row=1, column=0, sticky="w", pady=6)
+        self.backup_entry = ttk.Entry(gf, width=10)
+        self.backup_entry.grid(row=1, column=1, sticky="w", padx=6)
+        ttk.Label(gf, text="GTNH整合包版本（兼容推荐用）").grid(row=2, column=0, sticky="w", pady=6)
+        self.gtnh_entry = ttk.Entry(gf, width=10)
+        self.gtnh_entry.grid(row=2, column=1, sticky="w", padx=6)
+        act = ttk.Frame(gf)
+        act.grid(row=3, column=0, columnspan=2, sticky="w", pady=8)
+        ttk.Button(act, text="保存设置", command=self.save_settings).pack(side="left", padx=2)
+        ttk.Button(act, text="打开操作日志", command=self._open_log_file).pack(side="left", padx=8)
 
         # ---- Wiki 反爬 Cookie（站点开启 Cloudflare 人机验证后使用）----
         wf = ttk.LabelFrame(tab, text="Wiki 反爬 Cookie（Cloudflare 人机验证）")
@@ -765,9 +811,9 @@ class GuiApp:
         merged = self._merged_registry()
         client = self._short_path(str(self.cfg.client_mods_dir or "未设置"))
         server = self._short_path(str(self.cfg.server_mods_dir or "未设置"))
-        self.status_var.set(f"客户端: {client}   服务端: {server}   "
-                            f"已装受管mod: {len(merged)} 个"
-                            f"（显示 {len(self.inst_rows)} 个）")
+        self._set_status(f"客户端: {client}   服务端: {server}   "
+                         f"已装受管mod: {len(merged)} 个"
+                         f"（显示 {len(self.inst_rows)} 个）")
         self._reapply_sort(self.inst_tree)
 
     @staticmethod
@@ -1216,6 +1262,88 @@ class GuiApp:
             menu.add_command(label=f"清理重复jar（{sum(len(v) for v in m['duplicates'].values())}个）",
                              command=lambda: self._cleanup_dups(m))
 
+    def _backup_overview_dialog(self):
+        """全局备份总览：跨mod列出全部备份，支持定位与删除。"""
+        by_side = updater.list_backups(self.cfg)
+        rows = [(side, mod, p) for side in ("client", "server")
+                for mod, files in by_side.get(side, {}).items() for p in files]
+        top = self._dialog("备份管理（全部）", "880x480")
+        total_kb = 0
+        for _, _, p in rows:
+            try:
+                total_kb += p.stat().st_size // 1024
+            except OSError:
+                pass
+        ttk.Label(top, text=f"共 {len(rows)} 个备份，合计约 {total_kb // 1024} MB"
+                            "（超出保留数的会在启动时自动清理）",
+                  font=FONT).pack(anchor="w", padx=8, pady=(8, 2))
+        cols = ("side", "mod", "file", "time", "size")
+        frame = ttk.Frame(top)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended")
+        for c, h, w in zip(cols, ("端别", "mod", "备份文件", "备份时间", "大小(KB)"),
+                           (70, 200, 380, 120, 70)):
+            tree.heading(c, text=h)
+            tree.column(c, width=w, anchor="w")
+        tree.pack(side="left", fill="both", expand=True)
+        self._attach_scrollbar(tree, frame)
+
+        def reload_rows():
+            tree.delete(*tree.get_children())
+            data = updater.list_backups(self.cfg)
+            n = 0
+            for side in ("client", "server"):
+                for mod, files in data.get(side, {}).items():
+                    for p in files:
+                        try:
+                            ts = self._fmt_time(p.stat().st_mtime)
+                            kb = p.stat().st_size // 1024
+                        except OSError:
+                            ts, kb = "?", "?"
+                        tree.insert("", "end", iid=f"{side}|{mod}|{p}",
+                                    values=(SIDE_LABELS[side], mod, p.name, ts, kb))
+                        n += 1
+            return n
+
+        reload_rows()
+
+        def selected():
+            got = []
+            for iid in tree.selection():
+                side, mod, path = iid.split("|", 2)
+                got.append((side, mod, Path(path)))
+            return got
+
+        def do_reveal():
+            for side, mod, p in selected():
+                self._reveal(p)
+
+        def do_delete():
+            got = selected()
+            if not got:
+                return
+            if not messagebox.askyesno("删除备份",
+                                       f"删除选中的 {len(got)} 个备份文件？（不可恢复）"):
+                return
+            n = 0
+            for side, mod, p in got:
+                try:
+                    p.unlink()
+                    n += 1
+                    self._log(f"已删除备份 {side}/{mod}: {p.name}")
+                except OSError as e:
+                    messagebox.showerror("删除失败", f"{p.name}: {e}")
+            if n:
+                updater.prune_all_backups(self.cfg)
+                reload_rows()
+                self._log(f"已删除 {n} 个备份文件")
+
+        btns = ttk.Frame(top)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(btns, text="在资源管理器中打开", command=do_reveal).pack(side="left")
+        ttk.Button(btns, text="删除选中", command=do_delete).pack(side="left", padx=6)
+        ttk.Button(btns, text="关闭", command=top.destroy).pack(side="right")
+
     def _show_inst_detail(self, m):
         """已安装 mod 的详情窗口：端别版本/文件、远端最新、wiki 详情。"""
         e = self.db.get(m["mod_id"]) or {}
@@ -1243,10 +1371,7 @@ class GuiApp:
             lines.append(f"\n简介:\n{e['desc']}")
         if e.get("detail"):
             lines.append(f"\n详细信息:\n{e['detail']}")
-        top = tk.Toplevel(self.root)
-        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
-        top.title(f"{m['name_en']} {m.get('name_cn') or ''}")
-        top.geometry("680x460")
+        top = self._dialog(f"{m['name_en']} {m.get('name_cn') or ''}", "680x460")
         frame = ttk.Frame(top)
         frame.pack(fill="both", expand=True, padx=8, pady=8)
         t = tk.Text(frame, wrap="word", font=FONT)
@@ -1260,10 +1385,7 @@ class GuiApp:
         by_side = updater.list_backups(self.cfg)
         rows = [(side, p) for side in ("client", "server")
                 for p in by_side.get(side, {}).get(m["mod_id"], [])]
-        top = tk.Toplevel(self.root)
-        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
-        top.title(f"备份管理 - {m['name_en']}")
-        top.geometry("720x400")
+        top = self._dialog(f"备份管理 - {m['name_en']}", "720x400")
         ttk.Label(top, text="按备份时间倒序；选中一份后点「恢复」，当前文件会先自动备份。",
                   font=FONT).pack(anchor="w", padx=8, pady=(8, 2))
         cols = ("side", "file", "time")
@@ -1411,10 +1533,7 @@ class GuiApp:
 
     def _edit_name_cn(self, e):
         """编辑/新增中文名（留空恢复wiki原名）。"""
-        top = tk.Toplevel(self.root)
-        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
-        top.title(f"编辑中文名 - {e['name_en']}")
-        top.geometry("420x150")
+        top = self._dialog(f"编辑中文名 - {e['name_en']}", "420x150")
         ttk.Label(top, text="中文名（留空=恢复wiki原文）:", font=FONT).pack(anchor="w", padx=12, pady=(12, 4))
         var = tk.StringVar(value=e.get("name_cn") or "")
         ent = ttk.Entry(top, textvariable=var, width=40)
@@ -1497,10 +1616,7 @@ class GuiApp:
                 self.refresh_wiki()
             return
         cur = updater.current_source_url(e)
-        top = tk.Toplevel(self.root)
-        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
-        top.title(f"选择下载源 - {e['name_en']}")
-        top.geometry("640x360")
+        top = self._dialog(f"选择下载源 - {e['name_en']}", "640x360")
         var = tk.StringVar(value=cur)
         for l in cand:
             mark = "  ← 当前绑定" if l["url"] == cur else ""
@@ -1582,7 +1698,6 @@ class GuiApp:
         for e in entries:
             groups.setdefault(f"{e['group']}/{e['category']}", []).append(e)
         cats = sorted(groups, key=lambda k: (k.split("/")[0] != "星门规则", k))
-        self._addable_cats = cats
         if not self.cat_var.get() or self.cat_var.get() not in cats:
             if cats:
                 self.cat_var.set(cats[0])
@@ -1600,13 +1715,18 @@ class GuiApp:
             side_txt = SIDE_LABELS.get(e["side"], e["side"]) + ("?" if e["side_uncertain"] else "")
             installed_txt = INSTALL_SIDE_CN.get(marks.get(e["id"]), "")
             tags, name_txt = self._addable_row_style(e, e["id"] in marks, i)
+            desc = e["desc"] or ""
             self.add_tree.insert("", "end", iid=e["id"], tags=tags,
                                  values=(name_txt, e["name_cn"], side_txt,
-                                         e["category"], installed_txt,
+                                         e["category"], installed_txt or "—",
                                          ((e.get("release_date") or "")
                                           .replace("T", " "))[:16] or "—",
-                                         e["desc"][:60]))
+                                         desc[:60] + ("…" if len(desc) > 60 else "")))
             self.add_rows[e["id"]] = e
+        n_new = sum(1 for i in self.add_rows if i in self._new_ids)
+        self._set_status(f"可添加MOD：分类「{cur}」共 {len(groups.get(cur, []))} 个"
+                         f"，显示 {len(self.add_rows)} 个"
+                         + (f"，本次新增 {n_new} 个（🆕）" if n_new else ""))
         self._reapply_sort(self.add_tree)
 
     def _selected_addable(self):
@@ -1772,10 +1892,7 @@ class GuiApp:
 
     def _version_picker(self, options, current=None, title="选择版本"):
         """模态版本选择对话框：过滤、仅显示适配、预选推荐/已装版本。返回版本或 None。"""
-        top = tk.Toplevel(self.root)
-        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
-        top.title(title)
-        top.geometry("640x500")
+        top = self._dialog(title, "640x500")
         gtnh = self.cfg.data.get("gtnh_version") or ""
         ttk.Label(top, text=f"你的整合包版本: {gtnh or '（未设置，设置页可填写以获得推荐标记）'}",
                   font=FONT).pack(anchor="w", padx=10, pady=(10, 2))
@@ -1964,6 +2081,7 @@ class GuiApp:
                                     values=(SIDE_LABELS[side], f.file_name,
                                             f.version or "", mtime, size))
                 self.um_rows.append((iid, side, f))
+        self._set_status(f"未受管文件：{len(self.um_rows)} 个")
         self._reapply_sort(self.um_tree)
 
     def _um_reveal(self, event):
@@ -2087,10 +2205,7 @@ class GuiApp:
         if not ignored:
             messagebox.showinfo("提示", "没有被剔除/忽略的文件")
             return
-        top = tk.Toplevel(self.root)
-        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
-        top.title("恢复已排除文件")
-        top.geometry("560x320")
+        top = self._dialog("恢复已排除文件", "560x320")
         frame = ttk.Frame(top)
         frame.pack(fill="both", expand=True, padx=8, pady=8)
         lb = tk.Listbox(frame, width=70, height=14, font=FONT, selectmode="extended")
@@ -2123,6 +2238,7 @@ class GuiApp:
                                           SIDE_LABELS.get(e["side"], e["side"]),
                                           e["source_type"], src_txt))
             self.cust_rows.append(e)
+        self._set_status(f"自定义源：{len(self.cust_rows)} 个")
         self._reapply_sort(self.cust_tree)
 
     def add_custom_dialog(self):
@@ -2139,10 +2255,7 @@ class GuiApp:
 
     def _custom_source_dialog(self, existing=None):
         editing = existing is not None
-        top = tk.Toplevel(self.root)
-        top.bind("<Escape>", lambda _e: top.destroy())  # Esc 关闭
-        top.title("编辑自定义源" if editing else "添加自定义源")
-        top.geometry("500x360")
+        top = self._dialog("编辑自定义源" if editing else "添加自定义源", "500x360")
         f = ttk.Frame(top)
         f.pack(fill="both", expand=True, padx=10, pady=10)
         ttk.Label(f, text="类型:").grid(row=0, column=0, sticky="w", pady=4)
@@ -2162,17 +2275,50 @@ class GuiApp:
         side = tk.StringVar(value=(existing or {}).get("side") or "both")
         ttk.Combobox(f, textvariable=side, state="readonly", width=22,
                      values=("client", "server", "both")).grid(row=3, column=1, sticky="w")
-        ttk.Label(f, text="GitHub owner/repo、CurseForge URL 或本地目录:").grid(row=4, column=0, sticky="w", pady=4)
-        src = ttk.Entry(f, width=40)
         old_src = (existing or {}).get("source") or {}
         old_urls = (existing or {}).get("urls") or {}
+        src_label = ttk.Label(f, text="源:")
+        src_label.grid(row=4, column=0, sticky="w", pady=4)
+        src = ttk.Entry(f, width=40)
+        src.grid(row=4, column=1, sticky="we")
+        regex_label = ttk.Label(f, text="文件名匹配正则（可选）:")
+        regex_entry = ttk.Entry(f, width=30)
+
+        def browse_src():
+            d = filedialog.askdirectory(title="选择本地目录")
+            if d:
+                src.delete(0, "end")
+                src.insert(0, d)
+        browse_btn = ttk.Button(f, text="浏览...", command=browse_src)
+        browse_btn.grid(row=4, column=2)
+
+        def on_kind(*_a):
+            k = kind.get()
+            is_local = k == "local_folder"
+            is_manual = k == "manual"
+            src_label.configure(text={"github": "GitHub owner/repo:",
+                                      "curseforge": "CurseForge 页面链接:",
+                                      "local_folder": "本地目录:",
+                                      "manual": "（手动维护，无源）"}.get(k, "源:"))
+            if is_local:
+                browse_btn.grid()
+                regex_label.grid()
+                regex_entry.grid(row=5, column=1, sticky="w")
+            else:
+                browse_btn.grid_remove()
+                regex_label.grid_remove()
+                regex_entry.grid_remove()
+            src.configure(state="disabled" if is_manual else "normal")
+
+        kind.trace_add("write", lambda *a: on_kind())
         if initial_type == "github":
             src.insert(0, f"{old_src.get('owner', '')}/{old_src.get('repo', '')}")
         elif initial_type == "curseforge":
             src.insert(0, old_urls.get("curseforge") or "")
         elif initial_type == "local_folder":
             src.insert(0, old_src.get("path") or "")
-        src.grid(row=4, column=1, sticky="w")
+            regex_entry.insert(0, old_src.get("name_regex") or "")
+        on_kind()
 
         def ok():
             k = kind.get()
@@ -2205,7 +2351,7 @@ class GuiApp:
                 if not p:
                     messagebox.showwarning("提示", "请填写本地目录路径", parent=top)
                     return
-                fields["source"] = {"path": p, "name_regex": ""}
+                fields["source"] = {"path": p, "name_regex": regex_entry.get().strip()}
             if editing:
                 self.db.update_custom(existing["id"], fields)
                 self._log(f"已编辑自定义源: {existing['id']}")
@@ -2289,6 +2435,43 @@ class GuiApp:
         else:
             self._log("[失败] 抓取到内容但解析不到mod（Cookie 可能已过期，或页面结构变更）")
             messagebox.showwarning("测试失败", "抓取内容解析不到mod，请重新导入有效的 Cookie")
+
+    def test_network_settings(self):
+        """用输入框当前的 Token/代理请求 GitHub API，报告连通性与剩余配额。"""
+        token = self.token_entry.get().strip()
+        proxy = None
+        p = self.proxy_entry.get().strip()
+        if p:
+            host, _, port = p.partition(":")
+            try:
+                proxy = {"host": host, "port": int(port or 8080)}
+            except ValueError:
+                messagebox.showerror("错误", "代理端口必须是数字")
+                return
+        headers = {"Accept": "application/vnd.github+json"}
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        if self.busy:
+            return
+        self._set_busy(True)
+        self._log("测试 GitHub 连接...")
+
+        def job():
+            raw, _ = net.http_get("https://api.github.com/rate_limit",
+                                  headers=headers, proxy=proxy, retries=0)
+            return json.loads(raw).get("resources", {}).get("core", {})
+
+        def done(core):
+            self._set_busy(False)
+            if core:
+                messagebox.showinfo(
+                    "连接成功",
+                    "GitHub API 连接正常。" + chr(10)
+                    + f"剩余配额: {core.get('remaining')}/{core.get('limit')}" + chr(10)
+                    + ("已配置 Token" if token else "匿名访问（建议配置 Token 提高限额）"))
+            else:
+                messagebox.showwarning("响应异常", "连接成功但响应格式不符")
+        self._run_async(job, on_done=done)
 
     def save_settings(self):
         self.cfg.set_mods_dir("client", self.client_entry.get().strip())

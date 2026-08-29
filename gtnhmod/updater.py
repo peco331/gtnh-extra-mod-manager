@@ -750,7 +750,7 @@ def bind_source(db, mod_id: str, url: str) -> dict:
         return {"action": "error", "error": "仅支持绑定 GitHub 仓库或 CurseForge 页面链接"}
     # 绑定的链接始终进入链接列表（否则选择对话框里看不到/标不住当前绑定）
     fields["urls"]["links"] = list((entry.get("urls") or {}).get("links") or [])
-    if not any(l.get("url") == url for l in fields["urls"]["links"]):
+    if not any(l.get("url", "").rstrip("/") == url for l in fields["urls"]["links"]):
         fields["urls"]["links"].append({"url": url, "label": fields["source_type"]})
     db.update_entry(mod_id, fields)
     entry = db.get(mod_id)
@@ -868,7 +868,11 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
                     return {"action": "uptodate", "version": old.version,
                             "note": note or "已是最新版本"}
             except VersionParseError:
-                pass
+                # 版本格式无法比较（如 dev-build 类 tag）：不盲目重装，交用户判断
+                return {"action": "manual",
+                        "note": (f"版本格式无法比较（已装 {old.version}，最新 "
+                                 f"{latest['version']}），请手动判断"),
+                        "entry": entry, "warning": warn}
         if not chosen["candidates"]:
             return {"action": "manual", "note": note or "该版本无自动下载资产，需手动下载",
                     "entry": entry, "warning": warn}
