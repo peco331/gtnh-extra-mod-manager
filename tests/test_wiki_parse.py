@@ -206,7 +206,7 @@ class TestFetchFallback(unittest.TestCase):
         cfg = self._cfg()
         cache = W._wiki_cache_file(cfg)
         cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text("cached wikitext", encoding="utf-8")
+        cache.write_text("cached {{可添加MOD表格行}} wikitext", encoding="utf-8")
 
         def fake_get(url, *, headers=None, timeout=30, retries=2, binary=False, proxy=None):
             raise W.net.HttpError(403, "Forbidden")
@@ -214,8 +214,25 @@ class TestFetchFallback(unittest.TestCase):
         with mock.patch.object(W.net, "http_get", side_effect=fake_get), \
                 mock.patch.object(W.time, "sleep"), self._no_curl():
             text, cached = W.fetch_wikitext(cfg)
-        self.assertEqual(text, "cached wikitext")
+        self.assertEqual(text, "cached {{可添加MOD表格行}} wikitext")
         self.assertIn("限流", cached)
+
+    def test_all_fail_rejects_invalid_cache(self):
+        # 兜底缓存同样要过校验：截断/被污染的缓存解析出"子集"会
+        # 绕过空防护、重演误标 wiki_removed 事故
+        import gtnhmod.wiki as W
+        cfg = self._cfg()
+        cache = W._wiki_cache_file(cfg)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text("<html>被污染的缓存</html>", encoding="utf-8")
+
+        def fake_get(url, *, headers=None, timeout=30, retries=2, binary=False, proxy=None):
+            raise W.net.HttpError(403, "Forbidden")
+
+        with mock.patch.object(W.net, "http_get", side_effect=fake_get), \
+                mock.patch.object(W.time, "sleep"), self._no_curl():
+            with self.assertRaises(W.net.HttpError):
+                W.fetch_wikitext(cfg)
 
     def test_all_fail_raises_friendly(self):
         import gtnhmod.wiki as W

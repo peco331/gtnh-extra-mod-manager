@@ -116,10 +116,12 @@ def order_key(s: str) -> tuple:
     按 _tie_key 严格分先后。
 
     compare() 刻意把"多出未知后缀"判等（2.0.0-GTNH == 2.0.0），不可传递、
-    不能用作排序比较器；排序展示请用本键。
+    不能用作排序比较器；排序展示请用本键。数字段补零到固定宽度，
+    保证 1.2 与 1.2.0 的键完全一致（可传递）。
     """
     v = parse_version(s)
-    return (v.parts, RELEASE_RANK if v.pre_kind is None else v.pre_kind,
+    parts = (v.parts + (0,) * 8)[:8]
+    return (parts, RELEASE_RANK if v.pre_kind is None else v.pre_kind,
             v.pre_nums, _tie_key(v.raw))
 
 
@@ -129,11 +131,16 @@ def _tie_break(ra: str, rb: str) -> int:
     只在两侧"同一位置都有但值不同"的 token 上分先后（如 1.2.3s 与
     1.2.3t 两个构建、+build.5 与 +build.9）；一侧多出的未知后缀
     （2.0.0-GTNH vs 2.0.0、1.0.0 vs 1.0.0.0）维持判等，与旧语义一致。
+    缺失位置对方是数值段时按 0 对齐（1.2 与 1.2.0 等价，与 1.2.1 分先后）。
     """
     ta, tb = _tie_key(ra), _tie_key(rb)
     for i in range(max(len(ta), len(tb))):
         x = ta[i] if i < len(ta) else None
         y = tb[i] if i < len(tb) else None
+        if x is not None and y is None and x[0] == 0:
+            y = (0, 0, "")
+        elif y is not None and x is None and y[0] == 0:
+            x = (0, 0, "")
         if x is None or y is None:
             continue
         if x != y:

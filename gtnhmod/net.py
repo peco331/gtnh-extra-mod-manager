@@ -4,6 +4,7 @@
 的条件请求（304 不计数）与新鲜度缓存使用；限流计数见 rate_remaining。
 """
 import gzip
+import http.client
 import json
 import os
 import shutil
@@ -80,6 +81,9 @@ def http_get(url: str, *, headers=None, timeout=30, retries=2, binary=False, pro
             last = HttpError(e.code, f"{url} -> {e.reason}")
             if e.code in (304, 400, 401, 403, 404, 422, 429):
                 raise last
+        except http.client.IncompleteRead as e:
+            # 服务端按 Content-Length 提前断连：与网络错误同等对待（重试）
+            last = HttpError(-1, f"{url} -> 响应不完整 ({e})")
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
             last = e
         if attempt < retries:

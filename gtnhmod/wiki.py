@@ -11,6 +11,7 @@
 """
 import hashlib
 import json
+import os
 import re
 import time
 import urllib.parse
@@ -34,7 +35,7 @@ SECTION_MAPPING = {
 }
 
 HEADER_RE = re.compile(r"^(?<!=)(={1,6})(?!=)\s*(.+?)\s*(?<!=)\1(?!=)\s*$")
-URL_RE = re.compile(r"\[(https?://[^\s\]]+)\s+([^\]]*)\]")
+URL_RE = re.compile(r"\[(https?://[^\s\]]+)(?:\s+([^\]]*))?\]")
 GITHUB_REPO_RE = re.compile(r"github\.com/([^/\s]+)/([^/\s#?]+)")
 # 排除常见的源码/deobf 包，避免误选 asset
 DEFAULT_EXCLUDE_REGEX = r"(sources|deobf|javadoc|api|[-.]dev(?:[-.]|$))"
@@ -176,10 +177,12 @@ def fetch_wikitext(cfg):
         try:
             text = fn(cfg)
             _validate_wikitext(text)
-            try:  # 成功后写本地缓存（失败兜底用）
+            try:  # 成功后原子写本地缓存（失败兜底用；进程被杀不留撕裂缓存）
                 cache_file = _wiki_cache_file(cfg)
                 cache_file.parent.mkdir(parents=True, exist_ok=True)
-                cache_file.write_text(text, encoding="utf-8")
+                tmp = cache_file.with_suffix(".tmp")
+                tmp.write_text(text, encoding="utf-8")
+                os.replace(tmp, cache_file)
             except OSError:
                 pass
             return text, None
@@ -192,24 +195,32 @@ def fetch_wikitext(cfg):
             errors.append(str(e))
         if i < len(fetchers) - 1 and code != -4:  # 未装可选依赖时不退避
             time.sleep(4 + i * 4)  # 4s、8s、12s 退避（该站限流对连续请求敏感）
-    # 全部失败 → 最近一次成功抓取的本地缓存兜底
+    # 全部失败 → 最近一次成功抓取的本地缓存兜底（同样要过校验：
+    # 截断/被污染的缓存解析出"子集"会绕过空防护，重演误删事故）
     cache_file = _wiki_cache_file(cfg)
     if cache_file.exists():
         try:
-            return cache_file.read_text(encoding="utf-8"), \
-                   "wiki 请求被临时限流，已使用最近一次成功抓取的数据"
-        except OSError:
+            cached = cache_file.read_text(encoding="utf-8")
+            _validate_wikitext(cached)
+            return cached, "wiki 请求被临时限流，已使用最近一次成功抓取的数据"
+        except (OSError, net.HttpError):
             pass
     raise net.HttpError(403, f"wiki 抓取失败（可能被临时限流，请稍后重试）: {'; '.join(errors)}")
 
 
 def _split_sections(text: str, level: int = 2):
-    """按指定等级的标题切分，返回 [(标题, 正文)]。首元素标题为空串（标题前内容）。"""
+    """按指定等级的标题切分，返回 [(标题, 正文)]。首元素标题为空串（标题前内容）。
+
+    花括号深度 > 0（处于模板内部）时跳过标题识别——模板参数值里的
+    行首 "==xxx==" 不应切断条目。
+    """
     result = []
     cur_title, cur_lines = "", []
+    depth = 0
     for line in text.split("\n"):
+        depth += line.count("{{") - line.count("}}")
         m = HEADER_RE.match(line)
-        if m and len(m.group(1)) == level:
+        if m and len(m.group(1)) == level and depth <= 0:
             result.append((cur_title, "\n".join(cur_lines)))
             cur_title, cur_lines = m.group(2).strip(), []
         else:
@@ -262,8 +273,11 @@ def _parse_params(inner: str) -> dict | None:
             params[cur_key] = "\n".join(cur_val).strip()
         cur_key, cur_val = None, []
 
+    depth = 0
     for line in m.group("body").split("\n"):
-        m2 = re.match(r"\|\s*([^\s=|]+)\s*=(.*)$", line)
+        depth += line.count("{{") - line.count("}}")
+        # 只在花括号深度 0 时识别参数行：嵌套模板自带的 |k=v 不泄漏为顶层参数
+        m2 = re.match(r"\|\s*([^\s=|]+)\s*=(.*)$", line) if depth <= 0 else None
         if m2:
             flush()
             cur_key, cur_val = m2.group(1), [m2.group(2)]
@@ -315,7 +329,7 @@ def parse_urls(raw: str) -> dict:
             "other": [], "links": [], "preferred": None}
     for m in URL_RE.finditer(raw or ""):
         url = m.group(1).rstrip("/")
-        label = m.group(2).strip() or url
+        label = (m.group(2) or "").strip() or url
         urls["links"].append({"url": url, "label": label})
         if urls["preferred"] is None and _is_preferred_label(label):
             urls["preferred"] = url
@@ -514,7 +528,7 @@ def parse_compat(detail: str) -> list:
         rules.append({"kind": "gtnh_min", "gtnh": m.group(1), "mod_min": m.group(2),
                       "raw": m.group(0)})
     # 5) "适用于/支持 GTNH X 以上版本"（无 mod 版本约束）
-    for m in re.finditer(r"(?:适用于|支持|仅支持)GTNH\s*" + GTNH_VER_RE + r"\s*以上(?:版本)?", text):
+    for m in re.finditer(r"(?<![不并])(?:适用于|支持|仅支持)\s*GTNH\s*" + GTNH_VER_RE + r"\s*以上(?:版本)?", text):
         rules.append({"kind": "gtnh_min", "gtnh": m.group(1), "mod_min": None,
                       "raw": m.group(0)})
     # 去重（按 raw）
@@ -549,8 +563,9 @@ def make_id(name_en: str, name_cn: str) -> str:
 
 
 def _strip_refs(s: str) -> str:
-    """去掉名字里的 <ref>注释</ref> 标签。"""
-    return re.sub(r"<ref[^>]*>.*?</ref>", "", s or "", flags=re.S).strip()
+    """去掉名字里的 <ref>注释</ref> 与自闭合 <ref name="x"/> 标签。"""
+    return re.sub(r"<ref\b[^>]*/\s*>|<ref\b[^>]*>.*?</ref\s*>", "", s or "",
+                  flags=re.S).strip()
 
 
 def _entry_from_params(params: dict, group: str, category: str) -> dict:
