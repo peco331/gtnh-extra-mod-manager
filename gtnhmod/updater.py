@@ -212,7 +212,7 @@ def reconcile_installed(cfg, db, installed) -> int:
     为空，若照常校正会把该端别的记录全部误删。返回清理的记录数。
     """
     scan = {side: files for side, files in scan_sides(cfg, db).items()
-            if cfg.mods_dir(side)}
+            if cfg.mods_dir(side) and cfg.mods_dir(side).is_dir()}
     if not scan:
         return 0
     before = sum(len(installed.all_ids(side)) for side in scan)
@@ -618,8 +618,11 @@ def version_status(current, latest) -> str:
 # ---------- 安装 / 更新 ----------
 
 def install_mod(cfg, db, installed, mod_id: str, side: str, *,
-                version: str = None, progress_cb=None) -> dict:
+                version: str = None, progress_cb=None, prefetched=None) -> dict:
     """安装 mod 到指定端别。version 指定时安装该版本（否则最新兼容版）。
+
+    prefetched: (options, err) 预取的版本列表——壳取完列表后传入，
+    避免内部再 force 查询一遍（省配额，消除所选版本被二次查询的 TOCTOU）。
 
     返回结果 dict（action: installed/manual/skipped_incompatible/error）。
     """
@@ -633,7 +636,10 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
     warn = _side_warning(entry, side)
     name = entry.get("name_en") or mod_id
     gtnh = (cfg.data.get("gtnh_version") or "").strip()
-    options, err = list_install_options(entry, cfg, db, force=True)
+    if prefetched is not None:
+        options, err = prefetched
+    else:
+        options, err = list_install_options(entry, cfg, db, force=True)
     if err:
         _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {name} 失败: {err}")
         return {"action": "error", "error": f"查询版本列表失败: {err}"}
@@ -651,6 +657,10 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
                           opt.get("published_at"))
     else:
         if not options:
+            if prefetched is not None:
+                # 预取列表已确认无版本，不再 force 重查（省配额）
+                return {"action": "manual", "note": "该mod无自动下载渠道",
+                        "entry": entry, "warning": warn}
             # 无任何版本：取源的说明（手动源/CurseForge 的引导文案）
             try:
                 info0 = Source.from_entry(entry, cfg).check(None, force=True)
@@ -843,6 +853,10 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
                           opt.get("published_at"))
     else:
         if not options:
+            if prefetched is not None:
+                # 预取列表已确认无版本，不再 force 重查（省配额）
+                return {"action": "manual", "note": "该mod无自动下载渠道",
+                        "entry": entry, "warning": warn}
             try:
                 info0 = Source.from_entry(entry, cfg).check(None, force=True)
             except Exception:

@@ -517,6 +517,49 @@ class TestSaveMerge(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestSaveTombstoneMerge(unittest.TestCase):
+    """save 与磁盘的记录级合并：他进程新装的不丢，本进程删除的不复活。"""
+
+    def _write_disk(self, p, installed: dict):
+        import json
+        p.write_text(json.dumps({"version": 1, "installed": installed}),
+                     encoding="utf-8")
+
+    def test_disk_only_records_merged_on_save(self):
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_tomb_"))
+        try:
+            p = tmp / "installed.json"
+            # 进程加载：只有 m1；随后另一进程（计划任务）新装了 m2
+            self._write_disk(p, {"client": {"m1": {"file_name": "M1.jar"}}})
+            db = InstalledDB(p)
+            self._write_disk(p, {"client": {
+                "m1": {"file_name": "M1.jar"},
+                "m2": {"file_name": "M2.jar", "locked": True}}})
+            db.set("client", "m1", enabled=True)  # 触发 save
+            db2 = InstalledDB(p)
+            self.assertIsNotNone(db2.get("client", "m2"))  # 他进程新装的没丢
+            self.assertTrue(db2.get("client", "m2")["locked"])
+            self.assertEqual(db2.get("client", "m1")["enabled"], True)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_removed_record_not_resurrected(self):
+        import json
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_tomb2_"))
+        try:
+            p = tmp / "installed.json"
+            self._write_disk(p, {"client": {"m1": {"file_name": "M1.jar"}}})
+            db = InstalledDB(p)
+            db.remove("client", "m1")  # 本进程删除（含墓碑）
+            # 另一进程的旧状态里 m1 还在（写回旧内容）
+            self._write_disk(p, {"client": {"m1": {"file_name": "M1.jar"}}})
+            db.save()
+            db2 = InstalledDB(p)
+            self.assertIsNone(db2.get("client", "m1"))  # 不复活
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestUpdateSideWarning(unittest.TestCase):
     """更新到端别标注不符的端时要有警告（对齐安装流程）。"""
 

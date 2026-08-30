@@ -42,13 +42,14 @@ def file_lock(path: Path, timeout: float = 10.0):
                 except OSError:
                     if time.time() >= deadline:
                         os.close(fd)
+                        fd = None  # 防 finally 里对已关闭 fd 再 close，抛 EBADF 吞掉 TimeoutError
                         raise TimeoutError(f"获取文件锁超时: {lock_path}")
                     time.sleep(0.05)
             _process_held.add(key)
         try:
             yield
         finally:
-            if need_file_lock:
+            if need_file_lock and fd is not None:
                 _process_held.discard(key)
                 try:
                     msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)

@@ -939,9 +939,9 @@ class GuiApp:
             self._log(f"已跳过 {m['name_en']}（未选择版本）")
             self._process_next_update()
             return
-        self._run_update_one(m, ver)
+        self._run_update_one(m, ver, prefetched=options)
 
-    def _run_update_one(self, m, ver):
+    def _run_update_one(self, m, ver, prefetched=None):
         self._set_busy(True)
 
         def job():
@@ -951,7 +951,8 @@ class GuiApp:
                     r = updater.update_mod(self.cfg, self.db, self.installed,
                                            m["mod_id"], side, version=ver,
                                            progress_cb=self._download_progress_cb(
-                                               f"下载 {m['name_en']}"))
+                                               f"下载 {m['name_en']}"),
+                                           prefetched=prefetched)
                 except Exception as e:  # 单个mod异常不影响其他
                     r = {"action": "error", "error": str(e)}
                 r["side"], r["mod_id"], r["name"] = side, m["mod_id"], m["name_en"]
@@ -1847,9 +1848,9 @@ class GuiApp:
                                    title=f"选择要安装的版本 - {e['name_en']}")
         if ver is None:
             return
-        self._run_install(e, sides, ver, note)
+        self._run_install(e, sides, ver, note, prefetched=options)
 
-    def _run_install(self, e, sides, ver, note=""):
+    def _run_install(self, e, sides, ver, note="", prefetched=None):
         self._set_busy(True)
         self._log(f"开始安装 {e['name_en']}（{ver or '最新'}）→ "
                   + "、".join(SIDE_LABELS[s] for s in sides) + "...")
@@ -1862,7 +1863,8 @@ class GuiApp:
                 r = updater.install_mod(self.cfg, self.db, self.installed, e["id"], side,
                                         version=ver,
                                         progress_cb=self._download_progress_cb(
-                                            f"下载 {e['name_en']}"))
+                                            f"下载 {e['name_en']}"),
+                                        prefetched=prefetched)
                 r["side"], r["name"] = side, e["name_en"] or e["id"]
                 out.append(r)
             return out

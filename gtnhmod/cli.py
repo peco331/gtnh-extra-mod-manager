@@ -16,6 +16,7 @@ from .config import Config
 from .db import ModsDB
 from .installed import InstalledDB
 from .ui import ConsoleUI
+from . import cookies
 
 def pad(s, width: int) -> str:
     """按显示宽度补齐（中文按2列宽）。"""
@@ -252,7 +253,7 @@ class CliApp:
         self.ui.info("正在下载...")
         for side in sides:
             r = updater.install_mod(self.cfg, self.db, self.installed, entry["id"], side,
-                                    version=version)
+                                    version=version, prefetched=options)
             self._print_install_result(r, side)
             if r["action"] in ("installed",):
                 if r.get("body"):
@@ -334,7 +335,7 @@ class CliApp:
                 self.ui.info(f"更新 {SIDE_LABELS[side]} {m['name_en']} 到 "
                              + (f"v{version}" if version else "最新") + "...")
                 r = updater.update_mod(self.cfg, self.db, self.installed, m["mod_id"], side,
-                                       version=version)
+                                       version=version, prefetched=options)
                 self._print_update_result(r, side, m["name_en"])
         elif a == 1:
             side_opts = [s for s in SIDES if s in m["sides"]]
@@ -484,7 +485,7 @@ class CliApp:
         self.ui.info(f"更新 {SIDE_LABELS[side]} {st['name_en']} 到 "
                      + (f"v{version}" if version else "最新") + "...")
         r = updater.update_mod(self.cfg, self.db, self.installed, st["mod_id"], side,
-                               version=version)
+                               version=version, prefetched=options)
         self._print_update_result(r, side, st["name_en"])
 
     def _print_update_result(self, r, side, name):
@@ -498,10 +499,11 @@ class CliApp:
             self.ui.info(f"{name} 已是最新版本")
         elif r["action"] == "manual":
             self.ui.warn(r.get("note") or "该mod无自动下载渠道，请手动下载后放入mods目录")
-            entry = r.get("entry")
-            if entry and (entry["urls"].get("curseforge") or entry["urls"].get("github")):
+            entry = r.get("entry") or {}
+            urls = entry.get("urls") or {}
+            if urls.get("curseforge") or urls.get("github"):
                 if self.ui.confirm("打开下载页面?"):
-                    webbrowser.open(entry["urls"]["curseforge"] or entry["urls"]["github"])
+                    webbrowser.open(urls["curseforge"] or urls["github"])
         elif r["action"] == "skipped_incompatible":
             self.ui.warn(r.get("note") or "版本与当前GTNH不兼容，未更新")
         else:
@@ -712,7 +714,11 @@ class CliApp:
                                           (self.cfg.proxy or {}).get("host", ""))
                 if host:
                     port = self.ui.input_text("端口", "7890")
-                    self.cfg.data["proxy"] = {"host": host, "port": int(port)}
+                    try:
+                        self.cfg.data["proxy"] = {"host": host, "port": int(port)}
+                    except ValueError:
+                        self.ui.error("端口必须是数字，代理未保存")
+                        continue
                 else:
                     self.cfg.data["proxy"] = None
                 self.cfg.save()
@@ -778,8 +784,14 @@ class CliApp:
                 if not cookie:
                     continue
                 ua = self.ui.input_text("粘贴同一请求的 User-Agent 整行", "")
+                parsed_cookie, parsed_ua = cookies.parse_paste(cookie)
+                if parsed_cookie:
+                    cookie = parsed_cookie  # 连头名/整段 cURL 粘贴时自动提取
+                if parsed_ua and not ua:
+                    ua = parsed_ua
                 self.cfg.set_wiki_cookie(cookie, ua)
-                self.ui.ok("已保存")
+                self.ui.ok(f"已保存（解析出 {len(cookie.split(';'))} 个 cookie"
+                           f"{'，UA 已自动提取' if parsed_ua and not ua else ''}）")
             elif idx == 1:
                 self.ui.info("正在测试 wiki 抓取...")
                 try:
