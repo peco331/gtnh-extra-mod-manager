@@ -2022,16 +2022,18 @@ class GuiApp:
         ttk.Label(btns, text=f" {idx + 1}/{len(nav_ids)} ").pack(side="left", padx=4)
         if idx > 0:
             ttk.Button(btns, text="◀ 上一个",
-                       command=lambda: self._reopen_addable_detail(nav_ids[idx - 1])
+                       command=lambda: self._reopen_addable_detail(nav_ids[idx - 1], top)
                        ).pack(side="left")
         if idx < len(nav_ids) - 1:
             ttk.Button(btns, text="下一个 ▶",
-                       command=lambda: self._reopen_addable_detail(nav_ids[idx + 1])
+                       command=lambda: self._reopen_addable_detail(nav_ids[idx + 1], top)
                        ).pack(side="left")
         ttk.Button(btns, text="关闭", command=top.destroy).pack(side="right")
 
-    def _reopen_addable_detail(self, mod_id):
-        """详情窗的上一个/下一个：选中目标行后重新打开详情。"""
+    def _reopen_addable_detail(self, mod_id, old_top=None):
+        """详情窗的上一个/下一个：先关掉旧窗（否则点一次叠一层），再开新窗。"""
+        if old_top is not None:
+            old_top.destroy()
         if mod_id in self.add_rows:
             self.add_tree.selection_set(mod_id)
             self.add_tree.see(mod_id)
