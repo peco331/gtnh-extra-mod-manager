@@ -77,20 +77,14 @@ class GuiApp:
         for t in (self.inst_tree, self.add_tree, self.um_tree, self.cust_tree):
             t.bind("<Control-a>", lambda _e, tree=t: tree.selection_set(tree.get_children("")))
 
-    @staticmethod
-    def _clamp_geometry(geo):
+    def _clamp_geometry(self, geo):
         """恢复记忆的窗口位置时 clamp 到当前屏幕内（换小屏后窗口跑到屏外）。"""
         import re
         m = re.match(r"(\d+)x(\d+)(?:([+-]\d+)([+-]\d+))?", geo or "")
         if not m:
             return geo
         w, h = int(m.group(1)), int(m.group(2))
-        try:
-            root = tk.Tk()
-            sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-            root.destroy()
-        except tk.TclError:
-            return geo
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         w, h = min(w, sw), min(h, sh)
         x = y = None
         if m.group(3) is not None:
@@ -288,7 +282,10 @@ class GuiApp:
         top.geometry(size)
         top.transient(self.root)
         try:
-            top.wait_visibility()
+            # 不用 wait_visibility：主窗最小化时它会无限等（表现为"卡住"）
+            top.deiconify()
+            top.lift()
+            top.focus_force()
             top.grab_set()
         except tk.TclError:
             pass
@@ -384,7 +381,8 @@ class GuiApp:
         self._make_sortable(self.inst_tree, desc_first_cols=("latest", "inst_time"))
         self.inst_tree.bind("<Double-1>", self._on_inst_double)
         self.inst_tree.bind("<Button-3>", lambda e: self._popup(self.inst_tree, self._inst_menu, e))
-        self.busy_buttons = (self.btn_check, self.btn_update, self.btn_update_all)
+        self.busy_buttons = (self.btn_check, self.btn_update, self.btn_update_all,
+                             self.btn_dirs)
 
     def _build_addable_tab(self, tab):
         bar = ttk.Frame(tab)
@@ -667,9 +665,13 @@ class GuiApp:
                 elif kind == "_error":
                     msg = payload[1]
                     if payload[0]:
+                        # 有回调的（批量流程逐项跳过等）由回调决定呈现方式，
+                        # 避免网络断开时 N 个失败连弹 N 个模态框
                         payload[0](None)
-                    messagebox.showerror("操作失败", msg)
-                    self._log(f"[错误] {msg}")
+                        self._log(f"[错误] {msg}")
+                    else:
+                        messagebox.showerror("操作失败", msg)
+                        self._log(f"[错误] {msg}")
         except queue.Empty:
             pass
         except Exception:
@@ -1320,6 +1322,9 @@ class GuiApp:
                 self._reveal(p)
 
         def do_delete():
+            if self.busy:
+                messagebox.showinfo("提示", "有更新/安装正在进行，请等它完成后再删除")
+                return
             got = selected()
             if not got:
                 return
@@ -1335,7 +1340,12 @@ class GuiApp:
                 except OSError as e:
                     messagebox.showerror("删除失败", f"{p.name}: {e}")
             if n:
-                updater.prune_all_backups(self.cfg)
+                # 只 prune 被删文件所属的目录（不越权清理其他 mod 的备份）
+                from gtnhmod import downloader as _dl
+                touched = {(side, mod) for side, mod, _ in got}
+                for side, mod in touched:
+                    _dl.prune_backups(self.cfg.backup_dir / side / mod,
+                                      self.cfg.backup_keep)
                 reload_rows()
                 self._log(f"已删除 {n} 个备份文件")
 
@@ -1432,13 +1442,21 @@ class GuiApp:
                     "确认恢复",
                     f"恢复 {SIDE_LABELS[side]} 的 {path.name}？\n当前文件会先自动备份。"):
                 return
-            r = updater.restore_backup(self.cfg, self.db, self.installed, side, path)
-            if r["action"] == "restored":
-                self._log(f"已恢复 {m['name_en']}（{SIDE_LABELS[side]}）→ {r['file']}")
-                top.destroy()
-                self.refresh_installed()
-            else:
-                messagebox.showerror("恢复失败", r.get("error") or "未知错误")
+            self._set_busy(True)
+
+            def job():
+                return updater.restore_backup(self.cfg, self.db, self.installed,
+                                              side, path)
+
+            def done(r):
+                self._set_busy(False)
+                if r["action"] == "restored":
+                    self._log(f"已恢复 {m['name_en']}（{SIDE_LABELS[side]}）→ {r['file']}")
+                    top.destroy()
+                    self.refresh_installed()
+                else:
+                    messagebox.showerror("恢复失败", r.get("error") or "未知错误")
+            self._run_async(job, on_done=done)
 
         def do_reveal():
             got = selected()
@@ -1757,7 +1775,7 @@ class GuiApp:
             nonlocal offset
             t.insert("end", line + "\n")
             if link_url:
-                start = offset + line.index(link_url)
+                start = offset + line.rindex(link_url)
                 tag = f"lnk{start}"
                 t.tag_configure(tag, foreground="#0a58ca", underline=True)
                 t.tag_add(tag, f"1.0+{start}c", f"1.0+{end_c(start, link_url)}c")
@@ -1951,6 +1969,13 @@ class GuiApp:
             lb.delete(0, "end")
             for o in shown:
                 lb.insert("end", row_text(o))
+            if not shown:
+                detail.configure(state="normal")
+                detail.delete("1.0", "end")
+                detail.insert("1.0", "（没有符合过滤条件的版本）")
+                detail.configure(state="disabled")
+                return
+            preselect()
 
         def on_sel(event):
             idx = lb.curselection()

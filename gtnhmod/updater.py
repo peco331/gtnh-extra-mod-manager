@@ -129,13 +129,15 @@ def list_install_options(entry: dict, cfg, db=None, *, force: bool = False) -> t
         })
     if not result:
         return [], None
-    # 推荐：第一个确认适配的；全部 unknown 时推荐最新
+    # 推荐：第一个确认适配的；全部 unknown 时推荐最新；
+    # 唯一候选本身 incompatible 时不打"推荐"（避免"推荐"与"不适配"同框）
     for r in result:
         if r["compat"] == "compatible":
             r["recommended"] = True
             break
     else:
-        result[0]["recommended"] = True
+        if any(r["compat"] != "incompatible" for r in result):
+            result[0]["recommended"] = True
     return result, None
 
 
