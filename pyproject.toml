@@ -1,7 +1,7 @@
 [project]
 name = "gtnh-extra-mod-manager"
 # 版本与 gtnhmod/__init__.py 的 __version__ 保持一致（发布 tag v* 以它为准）
-version = "1.4.0"
+version = "1.5.0"
 description = "GTNH 整合包额外 mod 管理工具：wiki 数据同步、双端安装/更新/备份"
 readme = "README.md"
 requires-python = ">=3.10"

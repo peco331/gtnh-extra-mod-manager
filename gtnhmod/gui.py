@@ -76,6 +76,12 @@ class GuiApp:
         # 树全选（Ctrl+A）
         for t in (self.inst_tree, self.add_tree, self.um_tree, self.cust_tree):
             t.bind("<Control-a>", lambda _e, tree=t: tree.selection_set(tree.get_children("")))
+        # 键盘导航：回车=详情，Delete=删除（有确认框兜底）
+        self.inst_tree.bind("<Return>", lambda _e: self._open_inst_detail_selection())
+        self.inst_tree.bind("<KP_Enter>", lambda _e: self._open_inst_detail_selection())
+        self.add_tree.bind("<Return>", lambda _e: self.show_addable_detail())
+        self.add_tree.bind("<KP_Enter>", lambda _e: self.show_addable_detail())
+        self.inst_tree.bind("<Delete>", lambda _e: self.delete_selected())
 
     def _clamp_geometry(self, geo):
         """恢复记忆的窗口位置时 clamp 到当前屏幕内（换小屏后窗口跑到屏外）。"""
@@ -98,6 +104,8 @@ class GuiApp:
             if getattr(self, attr, None):
                 self.root.after_cancel(getattr(self, attr))
         try:
+            for t in (self.inst_tree, self.add_tree, self.um_tree, self.cust_tree):
+                self._persist_view(t)
             self.cfg.data["window_geometry"] = self.root.geometry()
             self.cfg.save()
         except OSError:
@@ -224,8 +232,45 @@ class GuiApp:
         widget.configure(yscrollcommand=sb.set)
         return sb
 
+    # ---- 视图持久化（排序/列宽，存 config.tree_views） ----
+    def _view_cfg(self):
+        return self.cfg.data.setdefault("tree_views", {})
+
+    def _persist_view(self, tree):
+        key = getattr(tree, "_view_key", None)
+        if not key:
+            return
+        try:
+            widths = {c: tree.column(c, "width") for c in tree["columns"]}
+        except tk.TclError:
+            return
+        self._view_cfg()[key] = {
+            "sort_col": getattr(tree, "_sort_col", "") or "",
+            "sort_rev": bool(getattr(tree, "_sort_rev", False)),
+            "widths": widths,
+        }
+
+    def _restore_view(self, tree):
+        key = getattr(tree, "_view_key", None)
+        if not key:
+            return
+        vs = self._view_cfg().get(key) or {}
+        if vs.get("sort_col"):
+            tree._sort_col = vs["sort_col"]
+            tree._sort_rev = bool(vs.get("sort_rev"))
+        for c, w in (vs.get("widths") or {}).items():
+            if c in tree["columns"]:
+                try:
+                    tree.column(c, width=int(w))
+                except (tk.TclError, ValueError):
+                    pass
+
     # ---- 表头点击排序（通用，所有列表） ----
     def _make_sortable(self, tree, desc_first_cols=()):
+        # 排序选择持久化
+        key = getattr(tree, "_view_key", None)
+        if key:
+            self._view_cfg().setdefault(key, {})
         """表头点击按该列排序；再次点击反向。desc_first_cols 里的列首次点击为降序。"""
 
         def handler(col):
@@ -235,6 +280,7 @@ class GuiApp:
                 reverse = col in desc_first_cols
             tree._sort_col, tree._sort_rev = col, reverse
             self._sort_tree(tree, col, reverse)
+            self._persist_view(tree)
 
         for col in tree["columns"]:
             tree.heading(col, command=lambda c=col: handler(c))
@@ -378,7 +424,9 @@ class GuiApp:
         self.inst_tree.tag_configure("odd", background="#f4f5f7")
         self.inst_tree.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.inst_tree, tree_frame)
+        self.inst_tree._view_key = "installed"
         self._make_sortable(self.inst_tree, desc_first_cols=("latest", "inst_time"))
+        self._restore_view(self.inst_tree)
         self.inst_tree.bind("<Double-1>", self._on_inst_double)
         self.inst_tree.bind("<Button-3>", lambda e: self._popup(self.inst_tree, self._inst_menu, e))
         self.busy_buttons = (self.btn_check, self.btn_update, self.btn_update_all,
@@ -414,9 +462,12 @@ class GuiApp:
         self.add_tree.tag_configure("odd", background="#f4f5f7")
         self.add_tree.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.add_tree, tree_frame)
+        self.add_tree._view_key = "addable"
         self._make_sortable(self.add_tree, desc_first_cols=("updated",))
-        # 默认按更新时间降序（有日期的在前，无日期的最后）
-        self.add_tree._sort_col, self.add_tree._sort_rev = "updated", True
+        # 默认按更新时间降序（有日期的在前，无日期的最后）；有保存的排序则恢复
+        if not (self._view_cfg().get("addable") or {}).get("sort_col"):
+            self.add_tree._sort_col, self.add_tree._sort_rev = "updated", True
+        self._restore_view(self.add_tree)
         self.add_tree.bind("<Double-1>", lambda e: self.show_addable_detail())
         self.add_tree.bind("<Button-3>", lambda e: self._popup(self.add_tree, self._add_menu, e))
         self.only_uninstalled = tk.BooleanVar(value=False)
@@ -449,7 +500,9 @@ class GuiApp:
             self.um_tree.column(c, width=w, anchor="w")
         self.um_tree.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.um_tree, tree_frame)
+        self.um_tree._view_key = "unmanaged"
         self._make_sortable(self.um_tree, desc_first_cols=("mtime", "size"))
+        self._restore_view(self.um_tree)
         self.um_tree.bind("<Button-3>", lambda e: self._popup(self.um_tree, self._um_menu, e))
         self.um_tree.bind("<Double-1>", self._um_reveal)
         btns = ttk.Frame(tab)
@@ -472,7 +525,9 @@ class GuiApp:
             self.cust_tree.column(c, width=w, anchor="w")
         self.cust_tree.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.cust_tree, tree_frame)
+        self.cust_tree._view_key = "custom"
         self._make_sortable(self.cust_tree)
+        self._restore_view(self.cust_tree)
         self.cust_tree.bind("<Button-3>", lambda e: self._popup(self.cust_tree, self._cust_menu, e))
         btns = ttk.Frame(tab)
         btns.pack(fill="x", padx=6, pady=4)
@@ -602,6 +657,10 @@ class GuiApp:
         else:
             self.progress.stop()
             self.progress.configure(mode="determinate", value=0)
+            fn = getattr(self, "_pending_debounce", None)
+            if fn is not None:
+                self._pending_debounce = None
+                self.root.after(50, fn)  # 补执行 busy 期间挂起的刷新
 
     def _push_progress(self, done, total, label):
         """后台线程推送进度事件。"""
@@ -706,8 +765,10 @@ class GuiApp:
         self._debounce("_um_search_after", self.refresh_unmanaged)
 
     def _debounce(self, attr, fn):
-        """搜索防抖：200ms 内连续输入只触发最后一次刷新；busy 时跳过重扫。"""
+        """搜索防抖：200ms 内连续输入只触发最后一次刷新；busy 时记挂起，
+        操作结束后自动补执行（搜索词与列表不再不同步）。"""
         if self.busy:
+            self._pending_debounce = fn
             return
         if getattr(self, attr, None):
             self.root.after_cancel(getattr(self, attr))
@@ -725,7 +786,9 @@ class GuiApp:
                 continue
             if only_upd and m["status"] != "update_avail":
                 continue
-            if kw and kw not in m["name_en"].lower() and kw not in (m["name_cn"] or "").lower():
+            hay = " ".join((m["name_en"], m["name_cn"] or "", m["mod_id"],
+                            *(st.get("file_name") or "" for st in m["sides"].values()))).lower()
+            if kw and kw not in hay:
                 continue
             rows.append(m)
         return rows
@@ -768,8 +831,16 @@ class GuiApp:
             return c if c == s else f"客 {c} / 服 {s}"
         return c or s or "—"
 
+    def _open_inst_detail_selection(self):
+        """回车键：打开当前选中已安装mod的详情。"""
+        sel = self._selected_inst()
+        if sel:
+            self._show_inst_detail(sel[0])
+
     def _render_installed(self):
-        """用（缓存的）注册表重绘已安装列表，不改选中以外的状态。"""
+        """用（缓存的）注册表重绘已安装列表，尽量恢复选中与滚动位置。"""
+        keep_sel = set(self.inst_tree.selection())
+        keep_yview = self.inst_tree.yview()
         self.inst_tree.delete(*self.inst_tree.get_children())
         self.inst_rows = {}
         # 新手引导：两端目录均未配置时显示
@@ -817,6 +888,10 @@ class GuiApp:
                          f"已装受管mod: {len(merged)} 个"
                          f"（显示 {len(self.inst_rows)} 个）")
         self._reapply_sort(self.inst_tree)
+        if keep_sel:
+            self.inst_tree.selection_set([i for i in keep_sel if i in self.inst_rows])
+        if keep_yview[0] > 0:
+            self.inst_tree.yview_moveto(keep_yview[0])
 
     @staticmethod
     def _short_path(p: str, max_parts: int = 2) -> str:
@@ -1026,6 +1101,53 @@ class GuiApp:
                           "（请关闭游戏/服务端后右键「清理重复jar」）")
         self._log(f"完成：成功更新 {n_ok} 个")
         self.refresh_all()
+        if results:
+            self._update_summary_dialog(results)
+
+    def _update_summary_dialog(self, results):
+        """批量更新完成后的摘要窗：成功/失败/需手动分组，可看完整更新日志。"""
+        groups = {"updated": [], "error": [], "manual": [], "other": []}
+        for r in results:
+            name = f"{SIDE_LABELS.get(r.get('side', '?'), '?')} {r.get('name') or r.get('mod_id', '?')}"
+            if r["action"] == "updated":
+                groups["updated"].append((name, r))
+            elif r["action"] in ("manual", "skipped_incompatible"):
+                groups["manual"].append((name + f"：{r.get('note') or '需手动'}", r))
+            elif r["action"] != "uptodate":
+                groups["error"].append((name + f"：{r.get('error') or '失败'}", r))
+        top = tk.Toplevel(self.root)
+        top.bind("<Escape>", lambda _e: top.destroy())
+        top.title("批量更新完成")
+        top.geometry("720x480")
+        top.transient(self.root)
+        frame = ttk.Frame(top)
+        frame.pack(fill="both", expand=True, padx=8, pady=8)
+        t = tk.Text(frame, wrap="word", font=FONT)
+        t.pack(side="left", fill="both", expand=True)
+        self._attach_scrollbar(t, frame)
+
+        def section(title, items, with_body=False):
+            if not items:
+                return
+            nl = chr(10)
+            t.insert("end", f"■ {title}（{len(items)} 个）" + nl, "h")
+            for name, r in items:
+                t.insert("end", "  ● " + name + nl)
+                if with_body and r.get("body"):
+                    indented = nl + "    ".join(("    " + r["body"].strip()[:600]).split(nl))
+                    t.insert("end", "    " + indented.strip() + nl)
+            t.insert("end", nl)
+        t.tag_configure("h", font=(FONT[0], FONT[1], "bold"))
+        section("已更新", groups["updated"], with_body=True)
+        section("需手动处理", groups["manual"])
+        section("失败", groups["error"])
+        n_upd = len(groups["updated"])
+        n_fail = len(groups["error"]) + len(groups["manual"])
+        t.insert("end", f"合计：成功 {n_upd}，需手动 {len(groups['manual'])}，失败 {len(groups['error'])}")
+        t.configure(state="disabled")
+        btns = ttk.Frame(top)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(btns, text="关闭", command=top.destroy).pack(side="right")
 
     def _check_not_busy(self) -> bool:
         """操作前检查；busy 时给出反馈而不是静默吞掉。"""
@@ -1146,11 +1268,13 @@ class GuiApp:
             return
         if not self._check_not_busy():
             return
-        for m in sel:
-            if not messagebox.askyesno("确认删除", f"删除 {m['name_en']}？\n"
-                                       f"（影响端别：{INSTALL_SIDE_CN[m['install_side']]}；\n"
-                                       "jar 会移入 data/backup 备份目录并加 .deleted 后缀，可手动恢复）"):
-                return
+        names = "\n".join("  " + m["name_en"]
+                          + f"（{INSTALL_SIDE_CN[m['install_side']]}）" for m in sel)
+        if not messagebox.askyesno(
+                "确认删除",
+                f"删除选中的 {len(sel)} 个mod？\n{names}\n\n"
+                "jar 会移入 data/backup 备份目录并加 .deleted 后缀，可手动恢复"):
+            return
         self._set_busy(True)
 
         def job():
@@ -1171,8 +1295,48 @@ class GuiApp:
 
     def open_link_selected(self):
         sel = self._selected_inst()
+        items = []
         for m in sel:
-            self._open_link_mod(m)
+            entry = self.db.get(m["mod_id"]) or {}
+            url = (entry.get("urls") or {}).get("github") or (entry.get("urls") or {}).get("curseforge")
+            if url:
+                items.append((m["name_en"], url))
+        self._open_link_items(items)
+
+    def _open_link_items(self, items):
+        """单个直接打开；多个弹链接清单（避免一次炸开 N 个浏览器标签）。"""
+        if not items:
+            messagebox.showinfo("提示", "选中的mod没有可用下载链接")
+            return
+        if len(items) == 1:
+            webbrowser.open(items[0][1])
+            self._log(f"已打开下载页: {items[0][0]}")
+            return
+        top = self._dialog(f"链接清单（{len(items)} 个）", "680x380")
+        ttk.Label(top, text="双击行打开；「复制全部链接」可批量粘贴。").pack(
+            anchor="w", padx=8, pady=(8, 2))
+        lb = tk.Listbox(top, width=92, height=14, font=FONT, exportselection=False)
+        lb.pack(fill="both", expand=True, padx=8, pady=4)
+        for label, url in items:
+            lb.insert("end", f"{label} - {url}")
+
+        def open_sel():
+            i = lb.curselection()
+            if i:
+                webbrowser.open(items[i[0]][1])
+                self._log(f"已打开下载页: {items[i[0]][0]}")
+        lb.bind("<Double-Button-1>", lambda _e: open_sel())
+        btns = ttk.Frame(top)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(btns, text="打开选中", command=open_sel).pack(side="left")
+
+        def copy_all():
+            text = (chr(10) + "").join(u for _, u in items)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self._log(f"已复制 {len(items)} 个链接到剪贴板")
+        ttk.Button(btns, text="复制全部链接", command=copy_all).pack(side="left", padx=6)
+        ttk.Button(btns, text="关闭", command=top.destroy).pack(side="right")
 
     def _open_link_mod(self, m):
         entry = self.db.get(m["mod_id"]) or {}
@@ -1390,6 +1554,24 @@ class GuiApp:
         t.configure(state="disabled")
         t.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(t, frame)
+        # 操作按钮（更新/回滚/下载页/定位），先关窗再触发避免模态叠加
+        btns = ttk.Frame(top)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+        first_side = next(iter(m["sides"]), "client")
+        ttk.Button(btns, text="更新…",
+                   command=lambda: (top.destroy(), self._start_single_update(m))
+                   ).pack(side="left")
+        ttk.Button(btns, text="回滚…",
+                   command=lambda: (top.destroy(), self._rollback_mods([m]))
+                   ).pack(side="left", padx=6)
+        entry = self.db.get(m["mod_id"]) or {}
+        url = updater.current_source_url(entry) or (entry.get("urls") or {}).get("curseforge")
+        if url:
+            ttk.Button(btns, text="打开下载页",
+                       command=lambda u=url: webbrowser.open(u)).pack(side="left", padx=6)
+        ttk.Button(btns, text="打开目录",
+                   command=lambda: self.reveal_mod(m, first_side)).pack(side="left", padx=6)
+        ttk.Button(btns, text="关闭", command=top.destroy).pack(side="right")
 
     def _backup_dialog(self, m):
         """备份管理：列出该mod的全部备份，可恢复任意版本（对齐 CLI 菜单9）。"""
@@ -1721,13 +1903,17 @@ class GuiApp:
             if cats:
                 self.cat_var.set(cats[0])
         self.cat_combo["values"] = cats
+        keep_sel = set(self.add_tree.selection())
+        keep_yview = self.add_tree.yview()
         self.add_tree.delete(*self.add_tree.get_children())
         cur = self.cat_var.get()
         kw = self.add_search.get().strip().lower()
         marks = self._installed_marks()
         self.add_rows = {}
         for i, e in enumerate(sorted(groups.get(cur, []), key=lambda x: x["id"])):
-            if kw and kw not in e["name_en"].lower() and kw not in (e["name_cn"] or "").lower():
+            hay = " ".join((e["name_en"], e["name_cn"] or "", e["desc"] or "",
+                            e["category"] or "")).lower()
+            if kw and kw not in hay:
                 continue
             if self.only_uninstalled.get() and e["id"] in marks:
                 continue
@@ -1747,6 +1933,10 @@ class GuiApp:
                          f"，显示 {len(self.add_rows)} 个"
                          + (f"，本次新增 {n_new} 个（🆕）" if n_new else ""))
         self._reapply_sort(self.add_tree)
+        if keep_sel:
+            self.add_tree.selection_set([i for i in keep_sel if i in self.add_rows])
+        if keep_yview[0] > 0:
+            self.add_tree.yview_moveto(keep_yview[0])
 
     def _selected_addable(self):
         sel = self.add_tree.selection()
@@ -1758,6 +1948,7 @@ class GuiApp:
             return
         e = sel[0]
         self._clear_new_mark(e)  # 查看过详情后不再高亮"新增"
+        nav_ids = list(self.add_tree.get_children(""))  # 当前视图顺序（上一个/下一个导航用）
         marks = self._installed_marks()
         installed_txt = INSTALL_SIDE_CN.get(marks.get(e["id"]), "未安装")
         top = self._dialog(f"{e['name_en']} {e['name_cn']}", "680x520")
@@ -1823,7 +2014,28 @@ class GuiApp:
         ttk.Button(btns, text="绑定源…",
                    command=lambda: (top.destroy(), self._bind_source_dialog(e))
                    ).pack(side="left", padx=6)
+        ttk.Button(btns, text="安装…",
+                   command=lambda: (top.destroy(), self._batch_install([e]))
+                   ).pack(side="left", padx=6)
+        # 上一个/下一个：配合 🆕 新增审阅流，在当前视图顺序内翻页
+        idx = nav_ids.index(e["id"]) if e["id"] in nav_ids else 0
+        ttk.Label(btns, text=f" {idx + 1}/{len(nav_ids)} ").pack(side="left", padx=4)
+        if idx > 0:
+            ttk.Button(btns, text="◀ 上一个",
+                       command=lambda: self._reopen_addable_detail(nav_ids[idx - 1])
+                       ).pack(side="left")
+        if idx < len(nav_ids) - 1:
+            ttk.Button(btns, text="下一个 ▶",
+                       command=lambda: self._reopen_addable_detail(nav_ids[idx + 1])
+                       ).pack(side="left")
         ttk.Button(btns, text="关闭", command=top.destroy).pack(side="right")
+
+    def _reopen_addable_detail(self, mod_id):
+        """详情窗的上一个/下一个：选中目标行后重新打开详情。"""
+        if mod_id in self.add_rows:
+            self.add_tree.selection_set(mod_id)
+            self.add_tree.see(mod_id)
+            self.show_addable_detail()
 
     def install_addable(self):
         """安装：按mod端别声明自动选择端别。"""
@@ -2022,14 +2234,12 @@ class GuiApp:
         sel = self._selected_addable()
         if not sel:
             return
-        opened = 0
+        items = []
         for e in sel:
             url = (e["urls"] or {}).get("github") or (e["urls"] or {}).get("curseforge")
             if url:
-                webbrowser.open(url)
-                opened += 1
-        if not opened:
-            messagebox.showinfo("提示", "选中的mod没有可用下载链接")
+                items.append((e["name_en"], url))
+        self._open_link_items(items)
 
     def refresh_wiki(self):
         if self.busy:
@@ -2092,6 +2302,7 @@ class GuiApp:
         if not hasattr(self, "um_tree"):
             return
         kw = getattr(self, "um_search", tk.StringVar()).get().strip().lower()
+        keep_yview = self.um_tree.yview()
         self.um_tree.delete(*self.um_tree.get_children())
         self.um_rows = []
         for side in SIDES:
@@ -2110,6 +2321,8 @@ class GuiApp:
                 self.um_rows.append((iid, side, f))
         self._set_status(f"未受管文件：{len(self.um_rows)} 个")
         self._reapply_sort(self.um_tree)
+        if keep_yview[0] > 0:
+            self.um_tree.yview_moveto(keep_yview[0])
 
     def _um_reveal(self, event):
         """双击未受管文件 → 资源管理器定位。"""
