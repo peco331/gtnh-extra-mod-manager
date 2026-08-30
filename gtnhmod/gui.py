@@ -1807,8 +1807,12 @@ class GuiApp:
             self.refresh_all()
         self._run_async(job, on_done=done)
 
-    def _bind_source_dialog(self, e):
-        """选择该mod的一个下载链接绑定为下载源（检查更新/下载用它）。"""
+    def _bind_source_dialog(self, e, on_close=None):
+        """选择该mod的一个下载链接绑定为下载源（检查更新/下载用它）。
+
+        on_close: 绑定窗关闭（无论成功/取消）后的回调——调用方（如详情窗）
+        用它把模态还给自己并刷新内容。
+        """
         cand = updater.bindable_links(e)
         if not cand:
             if messagebox.askyesno("链接列表缺失",
@@ -1818,6 +1822,13 @@ class GuiApp:
             return
         cur = updater.current_source_url(e)
         top = self._dialog(f"选择下载源 - {e['name_en']}", "640x360")
+        if on_close is not None:
+            # 窗口销毁（取消/Esc/绑定成功）后异步回调：放在主 root 上执行，
+            # 那时绑定窗已完全销毁，调用方重新 grab/刷新才安全
+            def _on_destroy(_e):
+                if _e.widget is top:
+                    self.root.after(10, on_close)
+            top.bind("<Destroy>", _on_destroy)
         var = tk.StringVar(value=cur)
         for l in cand:
             mark = "  ← 当前绑定" if l["url"] == cur else ""
@@ -1950,7 +1961,6 @@ class GuiApp:
         self._clear_new_mark(e)  # 查看过详情后不再高亮"新增"
         nav_ids = list(self.add_tree.get_children(""))  # 当前视图顺序（上一个/下一个导航用）
         marks = self._installed_marks()
-        installed_txt = INSTALL_SIDE_CN.get(marks.get(e["id"]), "未安装")
         top = self._dialog(f"{e['name_en']} {e['name_cn']}", "680x520")
         frame = ttk.Frame(top)
         frame.pack(fill="both", expand=True, padx=8, pady=8)
@@ -1958,52 +1968,60 @@ class GuiApp:
         t.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(t, frame)
 
-        # 逐行写入并记录链接位置（双击打开）
+        # 逐行写入并记录链接位置（双击打开）；绑定源后 fill() 原地重填（下载源行会变）
         links = (e.get("urls") or {}).get("links") or []
-        offset = 0
 
-        def emit(line, link_url=None):
-            nonlocal offset
-            t.insert("end", line + "\n")
-            if link_url:
-                start = offset + line.rindex(link_url)
-                tag = f"lnk{start}"
-                t.tag_configure(tag, foreground="#0a58ca", underline=True)
-                t.tag_add(tag, f"1.0+{start}c", f"1.0+{end_c(start, link_url)}c")
-                t.tag_bind(tag, "<Double-Button-1>",
-                           lambda _e, u=link_url: webbrowser.open(u))
-                t.tag_bind(tag, "<Enter>",
-                           lambda _e: t.configure(cursor="hand2"))
-                t.tag_bind(tag, "<Leave>",
-                           lambda _e: t.configure(cursor=""))
-            offset += len(line) + 1
+        def fill():
+            t.configure(state="normal")
+            t.delete("1.0", "end")
+            offset = 0
+            installed_now = INSTALL_SIDE_CN.get(
+                (self._installed_marks().get(e["id"])), "未安装")
+
+            def emit(line, link_url=None):
+                nonlocal offset
+                t.insert("end", line + "\n")
+                if link_url:
+                    start = offset + line.rindex(link_url)
+                    tag = f"lnk{offset}{start}"
+                    t.tag_configure(tag, foreground="#0a58ca", underline=True)
+                    t.tag_add(tag, f"1.0+{start}c", f"1.0+{end_c(start, link_url)}c")
+                    t.tag_bind(tag, "<Double-Button-1>",
+                               lambda _e, u=link_url: webbrowser.open(u))
+                    t.tag_bind(tag, "<Enter>",
+                               lambda _e: t.configure(cursor="hand2"))
+                    t.tag_bind(tag, "<Leave>",
+                               lambda _e: t.configure(cursor=""))
+                offset += len(line) + 1
+
+            emit(f"名称: {e['name_en']} {e['name_cn']}")
+            emit(f"分类: {e['group']} / {e['category']}")
+            emit("端别: " + SIDE_LABELS.get(e["side"], e["side"])
+                 + ("（wiki标注不确定）" if e["side_uncertain"] else ""))
+            emit(f"已安装: {installed_now}")
+            emit("发布时间: " + (((e.get("release_date") or "").replace("T", " "))[:16]
+                                or "（未知，检查更新后获取）"))
+            emit("下载源: " + (updater.current_source_url(e) or "（默认第一个GitHub链接）"))
+            if e.get("compat"):
+                emit("兼容性（wiki 标注）:")
+                for r in e["compat"]:
+                    emit("  - " + (r.get("raw") or str(r)))
+            if links:
+                emit("链接（双击打开）:")
+                for l in links:
+                    emit(f"  - {l['label']}: {l['url']}", link_url=l["url"])
+            if e.get("desc"):
+                emit("")
+                emit("简介: " + e["desc"])
+            emit("")
+            emit("详细信息:")
+            emit(e.get("detail") or "（无）")
+            t.configure(state="disabled")
 
         def end_c(start, url):
             return start + len(url)
 
-        emit(f"名称: {e['name_en']} {e['name_cn']}")
-        emit(f"分类: {e['group']} / {e['category']}")
-        emit("端别: " + SIDE_LABELS.get(e["side"], e["side"])
-             + ("（wiki标注不确定）" if e["side_uncertain"] else ""))
-        emit(f"已安装: {installed_txt}")
-        emit("发布时间: " + (((e.get("release_date") or "").replace("T", " "))[:16]
-                            or "（未知，检查更新后获取）"))
-        emit("下载源: " + (updater.current_source_url(e) or "（默认第一个GitHub链接）"))
-        if e.get("compat"):
-            emit("兼容性（wiki 标注）:")
-            for r in e["compat"]:
-                emit("  - " + (r.get("raw") or str(r)))
-        if links:
-            emit("链接（双击打开）:")
-            for l in links:
-                emit(f"  - {l['label']}: {l['url']}", link_url=l["url"])
-        if e.get("desc"):
-            emit("")
-            emit("简介: " + e["desc"])
-        emit("")
-        emit("详细信息:")
-        emit(e.get("detail") or "（无）")
-        t.configure(state="disabled")
+        fill()
 
         btns = ttk.Frame(top)
         btns.pack(fill="x", padx=8, pady=(0, 8))
@@ -2012,7 +2030,8 @@ class GuiApp:
             ttk.Button(btns, text="打开下载页",
                        command=lambda u=url: webbrowser.open(u)).pack(side="left")
         ttk.Button(btns, text="绑定源…",
-                   command=lambda: (top.destroy(), self._bind_source_dialog(e))
+                   command=lambda: self._bind_source_dialog(
+                       e, on_close=lambda: (top.grab_set(), fill()))
                    ).pack(side="left", padx=6)
         ttk.Button(btns, text="安装…",
                    command=lambda: (top.destroy(), self._batch_install([e]))
