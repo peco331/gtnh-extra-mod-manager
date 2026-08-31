@@ -10,6 +10,7 @@ import tkinter as tk
 import unittest
 from pathlib import Path
 from tkinter import ttk
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -54,7 +55,7 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertTrue(self.app.inst_tree["columns"])
 
     def test_version_picker_opens_and_confirms(self):
-        """选择器打开不抛异常（前向引用 NameError 回归），确认返回版本。"""
+        """更新选择器预选最新版，且确认/双击/回车绑定完整。"""
         bindings = {}
         # 打开后自动确认（等待窗口内事件循环处理 preselect/重绘）
         def auto_confirm():
@@ -68,15 +69,37 @@ class TestGuiSmoke(unittest.TestCase):
                                and c.cget("text") == "使用选中版本")
                 bindings["double_click"] = bool(lb.bind("<Double-Button-1>"))
                 bindings["return"] = bool(w.bind("<Return>"))
-                lb.selection_clear(0, "end")
-                lb.selection_set(0)
+                bindings["selected"] = lb.curselection()
                 confirm.invoke()
                 return
         self.app.root.after(150, auto_confirm)
-        ver = self.app._version_picker(_opts(), current=None, title="测试")
+        ver = self.app._version_picker(_opts(), current="1.7.50", title="测试",
+                                       prefer_latest=True)
         self.assertEqual(ver, "1.7.52")
+        self.assertEqual(bindings.get("selected"), (0,))
         self.assertTrue(bindings.get("double_click"))
         self.assertTrue(bindings.get("return"))
+
+    def test_update_picker_passes_prefetched_pair(self):
+        """批量手选版本后仍向更新器传递 (options, error) 二元组。"""
+        result = (_opts(), None)
+        mod = {"mod_id": "demo", "name_en": "Demo",
+               "sides": {"client": {"version": "1.7.50"}}}
+        with mock.patch.object(self.app, "_version_picker", return_value="1.7.52") as picker:
+            with mock.patch.object(self.app, "_run_update_one") as run_update:
+                self.app._on_versions_for_update(result, mod)
+        self.assertTrue(picker.call_args.kwargs["prefer_latest"])
+        self.assertEqual(picker.call_args.kwargs["current"], "1.7.50")
+        self.assertIs(run_update.call_args.kwargs["prefetched"], result)
+
+    def test_install_picker_passes_prefetched_pair(self):
+        """手选安装版本也保留版本列表的二元组契约。"""
+        result = (_opts(), None)
+        entry = {"id": "demo", "name_en": "Demo"}
+        with mock.patch.object(self.app, "_version_picker", return_value="1.7.52"):
+            with mock.patch.object(self.app, "_run_install") as run_install:
+                self.app._on_versions_for_install(result, entry, ["client"], "")
+        self.assertIs(run_install.call_args.kwargs["prefetched"], result)
 
     def test_version_picker_filter_and_compat(self):
         """「仅显示适配」过滤掉不适配版本后，仍能正常打开/关闭。"""

@@ -1010,13 +1010,15 @@ class GuiApp:
             self._run_update_one(m, None)
             return
         cur = m["sides"].get("client") or next(iter(m["sides"].values()))
-        ver = self._version_picker(options, current=cur["version"],
+        ver = self._version_picker(options, current=cur["version"], prefer_latest=True,
                                    title=f"选择要更新到的版本 - {m['name_en']}")
         if ver is None:
             self._log(f"已跳过 {m['name_en']}（未选择版本）")
             self._process_next_update()
             return
-        self._run_update_one(m, ver, prefetched=options)
+        # update_mod 的预取参数固定为 (options, error)，不能只传 options 列表；
+        # 否则版本数大于 2 时会在内部解包时报 too many values to unpack。
+        self._run_update_one(m, ver, prefetched=result)
 
     def _run_update_one(self, m, ver, prefetched=None):
         self._set_busy(True)
@@ -2099,7 +2101,7 @@ class GuiApp:
                                    title=f"选择要安装的版本 - {e['name_en']}")
         if ver is None:
             return
-        self._run_install(e, sides, ver, note, prefetched=options)
+        self._run_install(e, sides, ver, note, prefetched=result)
 
     def _run_install(self, e, sides, ver, note="", prefetched=None):
         self._set_busy(True)
@@ -2143,8 +2145,8 @@ class GuiApp:
                           "（请关闭游戏/服务端后右键「清理重复jar」）")
         self.refresh_all()
 
-    def _version_picker(self, options, current=None, title="选择版本"):
-        """模态版本选择对话框：过滤、仅显示适配、预选推荐/已装版本。返回版本或 None。"""
+    def _version_picker(self, options, current=None, title="选择版本", prefer_latest=False):
+        """模态版本选择对话框：更新时可优先预选最新版，否则预选已装/推荐版。"""
         top = self._dialog(title, "640x500")
         gtnh = self.cfg.data.get("gtnh_version") or ""
         ttk.Label(top, text=f"你的整合包版本: {gtnh or '（未设置，设置页可填写以获得推荐标记）'}",
@@ -2218,7 +2220,10 @@ class GuiApp:
 
         def preselect():
             prefer = None
-            if current:
+            if prefer_latest:
+                prefer = next((o for o in shown if o["latest"]),
+                              shown[0] if shown else None)
+            if prefer is None and current:
                 prefer = next((o for o in shown if o["version"] == current), None)
             if prefer is None:
                 prefer = next((o for o in shown if o["recommended"]),

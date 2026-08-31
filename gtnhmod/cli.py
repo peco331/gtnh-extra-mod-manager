@@ -253,7 +253,7 @@ class CliApp:
         self.ui.info("正在下载...")
         for side in sides:
             r = updater.install_mod(self.cfg, self.db, self.installed, entry["id"], side,
-                                    version=version, prefetched=options)
+                                    version=version, prefetched=(options, verr))
             self._print_install_result(r, side)
             if r["action"] in ("installed",):
                 if r.get("body"):
@@ -335,7 +335,7 @@ class CliApp:
                 self.ui.info(f"更新 {SIDE_LABELS[side]} {m['name_en']} 到 "
                              + (f"v{version}" if version else "最新") + "...")
                 r = updater.update_mod(self.cfg, self.db, self.installed, m["mod_id"], side,
-                                       version=version, prefetched=options)
+                                       version=version, prefetched=(options, verr))
                 self._print_update_result(r, side, m["name_en"])
         elif a == 1:
             side_opts = [s for s in SIDES if s in m["sides"]]
@@ -485,7 +485,7 @@ class CliApp:
         self.ui.info(f"更新 {SIDE_LABELS[side]} {st['name_en']} 到 "
                      + (f"v{version}" if version else "最新") + "...")
         r = updater.update_mod(self.cfg, self.db, self.installed, st["mod_id"], side,
-                               version=version, prefetched=options)
+                               version=version, prefetched=(options, verr))
         self._print_update_result(r, side, st["name_en"])
 
     def _print_update_result(self, r, side, name):
