@@ -2215,9 +2215,6 @@ class GuiApp:
             if idx:
                 show_body(shown[idx[0]])
         lb.bind("<<ListboxSelect>>", on_sel)
-        filter_var.trace_add("write", lambda *a: repopulate())
-        only_compat.trace_add("write", lambda *a: repopulate())
-        repopulate()
 
         def preselect():
             prefer = None
@@ -2231,21 +2228,37 @@ class GuiApp:
                 lb.selection_set(i)
                 lb.see(i)
                 show_body(prefer)
-        preselect()
 
         result = {"version": None}
 
         def ok():
             idx = lb.curselection()
-            if idx:
-                result["version"] = shown[idx[0]]["version"]
+            if not idx:
+                # 无选中（如刚输入过滤条件）→ 回退推荐行而不是静默取消
+                prefer = next((o for o in shown if o["recommended"]),
+                              shown[0] if shown else None)
+                if prefer is None:
+                    top.destroy()
+                    return
+                i = shown.index(prefer)
+                lb.selection_set(i)
+                lb.see(i)
+            result["version"] = shown[lb.curselection()[0]]["version"]
             top.destroy()
+
         btns = ttk.Frame(top)
         btns.pack(fill="x", padx=10, pady=8)
         ttk.Button(btns, text="使用选中版本", command=ok).pack(side="left", padx=2)
         ttk.Button(btns, text="取消", command=top.destroy).pack(side="left", padx=6)
         lb.bind("<Double-Button-1>", lambda e: ok())   # 双击即确认
         top.bind("<Return>", lambda e: ok())           # 回车即确认
+
+        # 初始化必须在 preselect/ok 及全部控件绑定完成之后；repopulate 会调用
+        # preselect，顺序放错会让确认按钮和双击绑定都无法创建（v1.5.0 回归）。
+        filter_var.trace_add("write", lambda *a: repopulate())
+        only_compat.trace_add("write", lambda *a: repopulate())
+        repopulate()
+
         top.transient(self.root)
         top.grab_set()
         top.wait_window()
