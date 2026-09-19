@@ -140,7 +140,7 @@ wiki 站开启 Cloudflare 人机验证后，程序直连会收到"请稍候…"�
 ## 开发与测试
 
 ```
-py -m unittest discover -s tests -v    # 160 个单元/E2E测试（离线，含真实wiki样例解析）
+py -m unittest discover -s tests -v    # 176 个单元/E2E测试（离线，含真实wiki样例解析）
 ```
 
 结构：核心库 `gtnhmod/`（versions/wiki/net/sources/scanner/downloader/updater...）
