@@ -15,10 +15,12 @@ import os
 import re
 import time
 import urllib.parse
+from pathlib import Path
 
 from . import net
 
 TEMPLATE_NAME = "可添加MOD表格行"
+TEMPLATE_NAMES = ("可添加MOD表格行", "额外项目")
 HEAD_TEMPLATE = TEMPLATE_NAME + "/头"
 TAIL_TEMPLATE = TEMPLATE_NAME + "/尾"
 
@@ -156,12 +158,12 @@ def _validate_wikitext(text: str) -> None:
     """
     if "Just a moment" in text or "_cf_chl_opt" in text:
         raise net.HttpError(-3, "wiki 站点要求 Cloudflare 人机验证，暂时无法抓取")
-    if TEMPLATE_NAME not in text:
-        raise net.HttpError(-3, "返回内容不是页面 wikitext（缺少模板「可添加MOD表格行」），"
+    if not any(t in text for t in TEMPLATE_NAMES):
+        raise net.HttpError(-3, "返回内容不是页面 wikitext（缺少模板「可添加MOD表格行」或「额外项目」），"
                                 "可能被反爬拦截或页面结构变更")
 
 
-def fetch_wikitext(cfg):
+def fetch_wikitext(cfg, *, interactive: bool = False, progress_cb=None):
     """抓取页面 wikitext，返回 (wikitext, 缓存说明|None)。
 
     依次尝试 curl_cffi(浏览器TLS指纹) → api.php → curl+action=raw →
@@ -197,6 +199,21 @@ def fetch_wikitext(cfg):
             time.sleep(4 + i * 4)  # 4s、8s、12s 退避（该站限流对连续请求敏感）
     # 全部失败 → 最近一次成功抓取的本地缓存兜底（同样要过校验：
     # 截断/被污染的缓存解析出"子集"会绕过空防护，重演误删事故）
+    cache_file = _wiki_cache_file(cfg)
+    if cache_file.exists():
+        try:
+            cached = cache_file.read_text(encoding="utf-8")
+            _validate_wikitext(cached)
+            return cached, "wiki 请求被临时限流，已使用最近一次成功抓取的数据"
+        except (OSError, net.HttpError):
+            pass
+    if interactive:
+        try:
+            text = fetch_wikitext_via_browser(cfg, progress_cb=progress_cb)
+            return text, None
+        except Exception as be:
+            errors.append(f"浏览器验证失败: {be}")
+
     cache_file = _wiki_cache_file(cfg)
     if cache_file.exists():
         try:
@@ -256,12 +273,12 @@ def _extract_blocks(text: str, template_name: str = TEMPLATE_NAME) -> list:
     return blocks
 
 
-def _parse_params(inner: str) -> dict | None:
+def _parse_params(inner: str, template_name: str = TEMPLATE_NAME) -> dict | None:
     """模板块内容 → 参数 dict；头/尾模板返回 None。"""
     inner = inner.strip()
-    if inner in (HEAD_TEMPLATE, TAIL_TEMPLATE):
+    if any(inner in (t + "/头", t + "/尾") for t in TEMPLATE_NAMES):
         return None
-    m = re.match(re.escape(TEMPLATE_NAME) + r"\s*(?P<body>.*)$", inner, re.S)
+    m = re.match(re.escape(template_name) + r"\s*(?P<body>.*)$", inner, re.S)
     if not m:
         return None
     params = {}
@@ -571,7 +588,7 @@ def _strip_refs(s: str) -> str:
 def _entry_from_params(params: dict, group: str, category: str) -> dict:
     name_en = _strip_refs(params.get("模组英文名") or "")
     name_cn = _strip_refs(params.get("模组中文名") or "")
-    side, uncertain = parse_side(params.get("运行环境") or "", "both")
+    side, uncertain = parse_side(params.get("运行环境") or params.get("标签") or "", "both")
     urls = parse_urls(params.get("相关地址") or "")
     # 默认下载源：优先带"推荐/特供"等标记的链接，其次第一个github链接
     repo = github_repo_from_url(urls["preferred"]) or github_repo_from_url(urls["github"])
@@ -604,18 +621,19 @@ def _entry_from_params(params: dict, group: str, category: str) -> dict:
 
 def _parse_entries(body: str, group: str, category: str, out: list) -> None:
     seen = {e["id"] for e in out}
-    for block in _extract_blocks(body):
-        params = _parse_params(block)
-        if not params:
-            continue
-        entry = _entry_from_params(params, group, category)
-        if entry["id"] in seen:  # id 冲突时加序号
-            n = 2
-            while f'{entry["id"]}-{n}' in seen:
-                n += 1
-            entry["id"] = f'{entry["id"]}-{n}'
-        seen.add(entry["id"])
-        out.append(entry)
+    for tname in TEMPLATE_NAMES:
+        for block in _extract_blocks(body, template_name=tname):
+            params = _parse_params(block, template_name=tname)
+            if not params:
+                continue
+            entry = _entry_from_params(params, group, category)
+            if entry["id"] in seen:  # id 冲突时加序号
+                n = 2
+                while f'{entry["id"]}-{n}' in seen:
+                    n += 1
+                entry["id"] = f'{entry["id"]}-{n}'
+            seen.add(entry["id"])
+            out.append(entry)
 
 
 def parse_wikitext(text: str):
@@ -643,10 +661,141 @@ def parse_wikitext(text: str):
     return mods, warnings
 
 
-def fetch_and_parse(cfg):
+def fetch_and_parse(cfg, *, interactive: bool = False, progress_cb=None):
     """抓取并解析，返回 (mods, warnings)。网络失败但命中缓存时 warnings 说明。"""
-    text, cached = fetch_wikitext(cfg)
+    text, cached = fetch_wikitext(cfg, interactive=interactive, progress_cb=progress_cb)
     mods, warnings = parse_wikitext(text)
     if cached:
         warnings.append(cached)
     return mods, warnings
+
+
+def _find_system_browser() -> Path | None:
+    candidates = [
+        Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+        Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
+        Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def _get_free_port() -> int:
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None) -> str:
+    """打开系统浏览器窗口供用户完成一次人机验证，并自动读取验证通过后的 wikitext。"""
+    import json
+    import subprocess
+    import urllib.request
+    try:
+        import websocket
+    except ImportError as e:
+        raise net.HttpError(-1, f"缺少 websocket 依赖，无法连接浏览器调试会话: {e}")
+
+    browser = _find_system_browser()
+    if not browser:
+        raise net.HttpError(-1, "未找到系统 Edge 或 Chrome 浏览器，请手动导入离线 Wiki 文本")
+
+    user_data = cfg.data_dir / "cache" / "browser_profile"
+    user_data.mkdir(parents=True, exist_ok=True)
+    port = _get_free_port()
+
+    # 直接打开带验证的 wiki 页面
+    page_url = cfg.wiki_url.rsplit("/api.php", 1)[0] + f"/wiki/{urllib.parse.quote(cfg.wiki_page)}"
+    cmd = [
+        str(browser),
+        f"--user-data-dir={user_data.resolve()}",
+        f"--remote-debugging-port={port}",
+        "--remote-allow-origins=*",
+        "--no-first-run",
+        "--no-default-browser-check",
+        page_url,
+    ]
+    if cfg.proxy and cfg.proxy.get("host"):
+        p = cfg.proxy
+        cmd.append(f"--proxy-server=http://{p['host']}:{p.get('port', 8080)}")
+
+    if progress_cb:
+        progress_cb("已弹出网页窗口，请在浏览器中完成人机验证...")
+
+    proc = subprocess.Popen(cmd)
+    try:
+        # 等待 CDP 调试端口就绪
+        ws_url = None
+        t0 = time.time()
+        while time.time() - t0 < 15:
+            time.sleep(0.5)
+            try:
+                tabs = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=2).read().decode())
+                target = next((t for t in tabs if "huijiwiki" in t.get("url", "") or t.get("type") == "page"), None)
+                if target and target.get("webSocketDebuggerUrl"):
+                    ws_url = target["webSocketDebuggerUrl"]
+                    break
+            except Exception:
+                pass
+        if not ws_url:
+            raise net.HttpError(-1, "未能连接到浏览器调试会话")
+
+        ws = websocket.create_connection(ws_url, timeout=5)
+        raw_url = f"/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw"
+        js = f"""
+        (async () => {{
+            try {{
+                const resp = await fetch({json.dumps(raw_url)});
+                if (resp.status === 200) {{
+                    const text = await resp.text();
+                    return {{status: 200, text: text}};
+                }}
+                return {{status: resp.status}};
+            }} catch (e) {{
+                return {{error: e.toString()}};
+            }}
+        }})()
+        """
+
+        poll_start = time.time()
+        while time.time() - poll_start < timeout_seconds:
+            time.sleep(1.5)
+            # 检查浏览器窗口是否已被用户主动关闭
+            if proc.poll() is not None:
+                raise net.HttpError(-1, "浏览器验证窗口已关闭")
+            try:
+                ws.send(json.dumps({
+                    "id": int(time.time() * 1000) % 100000,
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": js, "awaitPromise": True, "returnByValue": True}
+                }))
+                res = json.loads(ws.recv())
+                val = res.get("result", {}).get("result", {}).get("value") or {}
+                if val.get("status") == 200:
+                    text = val.get("text", "")
+                    if any(t in text for t in TEMPLATE_NAMES):
+                        _validate_wikitext(text)
+                        # 保存本地缓存
+                        cache_file = _wiki_cache_file(cfg)
+                        cache_file.parent.mkdir(parents=True, exist_ok=True)
+                        tmp = cache_file.with_suffix(".tmp")
+                        tmp.write_text(text, encoding="utf-8")
+                        os.replace(tmp, cache_file)
+                        return text
+            except (websocket.WebSocketException, OSError):
+                pass
+        raise net.HttpError(-1, "等待浏览器人机验证超时（120秒）")
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            pass

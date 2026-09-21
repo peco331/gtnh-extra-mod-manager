@@ -2372,8 +2372,9 @@ class GuiApp:
             return
         self._set_busy(True)
         self._log("正在抓取 wiki 数据...")
+        progress_cb = lambda msg: self.queue.put(("log", msg))
         self._run_async(
-            lambda: (wikimod.fetch_and_parse(self.cfg), ),
+            lambda: (wikimod.fetch_and_parse(self.cfg, interactive=True, progress_cb=progress_cb), ),
             on_done=lambda r: self._on_wiki_done(r))
 
     def _on_wiki_done(self, r):
