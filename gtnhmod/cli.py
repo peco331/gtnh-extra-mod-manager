@@ -95,10 +95,13 @@ class CliApp:
         except Exception as e:
             self.ui.error(f"合并失败: {e}")
             return
-        if not changes:
-            self.ui.ok("wiki 数据已是最新，无变化")
-            return
-        self.ui.info(f"wiki 数据已更新（共 {len(self.db.wiki_mods())} 个mod）：")
+        used_cache = any("使用最近一次成功抓取的数据" in w for w in warnings)
+        source_label = "缓存回退" if used_cache else "在线"
+        wiki_count = len(self.db.wiki_mods())
+        custom_count = len(self.db.custom_mods())
+        delta = f"{len(changes)} 处变化" if changes else "内容没有变化"
+        self.ui.info(f"Wiki {source_label}完成：目录 {wiki_count} 个条目，{delta}；"
+                     f"自定义源 {custom_count} 个")
         for c in changes:
             self.ui.info(f"  - {c}")
 

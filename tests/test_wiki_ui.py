@@ -13,6 +13,7 @@ class TestWikiRefreshUiContract(unittest.TestCase):
             mods=[],
             merge_wiki=mock.Mock(return_value=[]),
             wiki_mods=mock.Mock(return_value=[entry]),
+            custom_mods=mock.Mock(return_value=[]),
         )
         stub = SimpleNamespace(
             db=db,
@@ -29,7 +30,7 @@ class TestWikiRefreshUiContract(unittest.TestCase):
 
         self.assertEqual(stub.busy_states[-1], False)
         stub.refresh_addable.assert_called_once()
-        self.assertTrue(any("wiki 数据已更新" in msg for msg in stub.logs))
+        self.assertTrue(any("Wiki 在线完成" in msg for msg in stub.logs))
 
 
 if __name__ == "__main__":

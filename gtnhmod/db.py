@@ -57,7 +57,9 @@ class ModsDB:
         return list(self.mods)
 
     def wiki_mods(self) -> list:
-        return [m for m in self.mods if not m.get("wiki_removed")]
+        # 自定义源也可能没有 wiki_removed 字段，但不应混入 Wiki 目录。
+        return [m for m in self.mods
+                if m.get("group") in WIKI_GROUPS and not m.get("wiki_removed")]
 
     def custom_mods(self) -> list:
         return [m for m in self.mods if m.get("group") == "自定义"]
@@ -196,6 +198,10 @@ class ModsDB:
                         changes.append(f'{fe["name_en"] or fe["id"]}: {label} {old.get(k)} → {fe.get(k)}')
                 if old.get("source_type") != fe.get("source_type") or old.get("source") != fe.get("source"):
                     changes.append(f'{fe["name_en"] or fe["id"]}: 下载源发生变化')
+                if any(old.get(k) != fe.get(k)
+                       for k in ("name_en", "name_cn", "side_uncertain",
+                                 "desc", "detail", "urls", "compat")):
+                    changes.append(f'{fe["name_en"] or fe["id"]}: Wiki资料已更新')
             else:
                 changes.append(f'新增: {fe["name_en"] or fe["id"]}（{fe["group"]}/{fe["category"]}）')
             new_mods.append(fe)

@@ -16,6 +16,7 @@ class TestWikiRefreshCliContract(unittest.TestCase):
         db = SimpleNamespace(
             merge_wiki=mock.Mock(return_value=[]),
             wiki_mods=mock.Mock(return_value=[]),
+            custom_mods=mock.Mock(return_value=[]),
         )
         stub = SimpleNamespace(ui=ui, cfg=object(), db=db)
 

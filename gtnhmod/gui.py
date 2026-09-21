@@ -2524,7 +2524,13 @@ class GuiApp:
         if self._new_ids:
             self._log(f"本次新增 {len(self._new_ids)} 个mod，已在可添加列表中高亮"
                       "（🆕 标记，查看详情后取消）")
-        self._log(f"wiki 数据已更新，共 {len(self.db.wiki_mods())} 个mod，{len(changes)} 处变化")
+        used_cache = any("使用最近一次成功抓取的数据" in w for w in warnings)
+        source_label = "缓存回退" if used_cache else "在线"
+        wiki_count = len(self.db.wiki_mods())
+        custom_count = len(self.db.custom_mods())
+        delta = f"{len(changes)} 处变化" if changes else "内容没有变化"
+        self._log(f"Wiki {source_label}完成：目录 {wiki_count} 个条目，{delta}；"
+                  f"自定义源 {custom_count} 个")
         for c in changes[:30]:
             self._log(f"  - {c}")
         self.refresh_addable()
