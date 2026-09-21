@@ -156,6 +156,12 @@ def prune_backups(backup_dir: Path, keep: int) -> int:
     return removed
 
 
+def _cand_cache_path(cand, dl_cache_dir: Path) -> Path:
+    import hashlib
+    url_hash = hashlib.sha256(cand.url.encode('utf-8')).hexdigest()[:12]
+    return dl_cache_dir / f"{url_hash}_{cand.file_name}"
+
+
 def update_with_backup(cand, dest_dir: Path, backup_dir: Path, *,
                        old_file: Path = None, backup_keep: int = 3,
                        progress_cb=None, proxy=None, dl_cache_dir: Path = None) -> tuple:
@@ -169,17 +175,41 @@ def update_with_backup(cand, dest_dir: Path, backup_dir: Path, *,
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp_dir = Path(dl_cache_dir) if dl_cache_dir else dest_dir
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    tmp = tmp_dir / (".dl_" + cand.file_name)
-    net.download(cand.url, tmp, progress_cb=progress_cb, proxy=proxy)
-    try:
-        verify_jar(tmp)
-        verify_target_jar(tmp)
-    except VerifyError:
+    cached_jar = _cand_cache_path(cand, tmp_dir) if dl_cache_dir else None
+
+    # 若下载缓存中已有该资产且校验完好，直接复用（消除双端或重复下载）
+    reused = False
+    if cached_jar and cached_jar.exists():
         try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+            verify_jar(cached_jar)
+            verify_target_jar(cached_jar)
+            reused = True
+        except VerifyError:
+            try:
+                cached_jar.unlink()
+            except OSError:
+                pass
+
+    if not reused:
+        tmp = tmp_dir / (".dl_" + cand.file_name)
+        net.download(cand.url, tmp, progress_cb=progress_cb, proxy=proxy)
+        try:
+            verify_jar(tmp)
+            verify_target_jar(tmp)
+        except VerifyError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+        if cached_jar:
+            try:
+                shutil.copy2(tmp, cached_jar)
+            except OSError:
+                pass
+    else:
+        tmp = tmp_dir / (".reused_" + cand.file_name)
+        shutil.copy2(cached_jar, tmp)
     target = dest_dir / cand.file_name
     # 备份旧文件（若与新文件同名，replace 前先留档）
     victims = []

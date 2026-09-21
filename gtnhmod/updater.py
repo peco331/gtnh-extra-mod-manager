@@ -483,14 +483,20 @@ def refresh_release_dates(cfg, db, *, progress_cb=None) -> dict:
 
 def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
                   progress_cb=None, only=None) -> list:
-    """对已安装（未锁定）mod 逐一查询最新版本。only=指定mod_id集合时只查这些。
+    """对已安装（未锁定）mod 跨端去重并并发查询最新版本。only=指定mod_id集合时只查这些。
 
     返回 [(side, mod_id, UpdateInfo|None, error_str|None)]。
     """
+    import concurrent.futures
+
     results = []
     db_dirty = False
     inst_dirty = False
     ignored = set(cfg.data.get("ignored_files") or [])
+
+    # 第一步：先扫描各端，搜集需要检查的目标并按 mod_id 去重跨端任务
+    # items: mod_id -> {"entry": entry, "targets": [(side, version)]}
+    to_check = {}
     for side in sides:
         folder = cfg.mods_dir(side)
         if not folder:
@@ -503,35 +509,66 @@ def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
             if only is not None and f.mod_id not in only:
                 continue
             if not f.enabled:
-                continue  # 已禁用的不查，省 API 配额
+                continue
             entry = db.get(f.mod_id)
             if not entry:
                 continue
             inst = installed.get(side, f.mod_id) or {}
             if inst.get("locked"):
                 continue
-            source = Source.from_entry(entry, cfg)
-            try:
-                info = source.check(f.version, force=force)
-                if info.latest_version:
-                    # 批量模式：收尾一次性保存（N个mod = N次全文件重写太浪费）
-                    installed.touch_checked(side, f.mod_id, info.latest_version,
-                                            remote_date=info.published_at, save=False)
-                    inst_dirty = True
-                if info.candidates:
-                    _learn_asset_name(db, entry, info.candidates[0].file_name)
-                if info.published_at and entry.get("release_date") != info.published_at:
-                    entry["release_date"] = info.published_at
-                    db_dirty = True
-                results.append((side, f.mod_id, info, None))
-            except Exception as e:  # 单个失败不影响整体
-                results.append((side, f.mod_id, None, str(e)))
+            item = to_check.setdefault(f.mod_id, {"entry": entry, "targets": []})
+            item["targets"].append((side, f.version))
+
+    if not to_check:
+        return []
+
+    def _query_mod(mod_id, data):
+        entry = data["entry"]
+        source = Source.from_entry(entry, cfg)
+        # 用首个目标版本作为参考版本
+        ref_version = data["targets"][0][1] if data["targets"] else None
+        try:
+            info = source.check(ref_version, force=force)
+            return mod_id, info, None
+        except Exception as e:
+            return mod_id, None, str(e)
+
+    # 第二步：使用受控线程池（最多4并发）查询各 mod 源
+    max_workers = min(4, max(1, len(to_check)))
+    query_results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_query_mod, mid, data): mid for mid, data in to_check.items()}
+        for future in concurrent.futures.as_completed(futures):
+            mid, info, err = future.result()
+            query_results[mid] = (info, err)
+            # 对该 mod 关联的所有端别通知进度
             if progress_cb:
-                progress_cb(side, f.mod_id)
+                for side, _ in to_check[mid]["targets"]:
+                    progress_cb(side, mid)
+
+    # 第三步：按原来的端别和文件顺序聚合结果并记录 DB/installed
+    for mod_id, data in to_check.items():
+        info, err = query_results.get(mod_id, (None, "未获取到检查结果"))
+        entry = data["entry"]
+        if info:
+            if info.latest_version:
+                for side, _ in data["targets"]:
+                    installed.touch_checked(side, mod_id, info.latest_version,
+                                            remote_date=info.published_at, save=False)
+                inst_dirty = True
+            if info.candidates:
+                _learn_asset_name(db, entry, info.candidates[0].file_name)
+            if info.published_at and entry.get("release_date") != info.published_at:
+                entry["release_date"] = info.published_at
+                db_dirty = True
+
+        for side, _ in data["targets"]:
+            results.append((side, mod_id, info, err))
+
     if inst_dirty:
         try:
             installed.save()
-        except Exception as e:  # 保存失败不丢检查结果，仅记录（下次会重查）
+        except Exception as e:
             _log_op(cfg, f"保存已安装记录失败: {e}")
     if db_dirty:
         try:
