@@ -587,21 +587,41 @@ class GuiApp:
         path_row(2, "服务端 mods 目录", "server_entry")
         f.columnconfigure(1, weight=1)
 
-        # ---- 网络（GitHub / 代理）----
-        nf = ttk.LabelFrame(tab, text="网络（GitHub 访问）")
+        # ---- 网络（GitHub / 代理模式）----
+        nf = ttk.LabelFrame(tab, text="网络与代理连接")
         nf.pack(fill="x", padx=12, pady=6)
-        ttk.Label(nf, text="GitHub Token（可选，提高API限额；匿名 60 次/时）").grid(
-            row=0, column=0, sticky="w", pady=6)
-        self.token_entry = ttk.Entry(nf, width=46, show="*")
-        self.token_entry.grid(row=0, column=1, sticky="we", padx=6)
-        ttk.Label(nf, text="代理地址（host:port，留空跟随系统）").grid(
-            row=1, column=0, sticky="w", pady=6)
-        self.proxy_entry = ttk.Entry(nf, width=46)
-        self.proxy_entry.grid(row=1, column=1, sticky="we", padx=6)
-        ttk.Button(nf, text="测试连接", command=self.test_network_settings).grid(
-            row=0, column=2, rowspan=2, padx=6)
+
+        ttk.Label(nf, text="代理模式:").grid(row=0, column=0, sticky="w", pady=4)
+        self.proxy_mode = tk.StringVar(value="system")
+        pm_frame = ttk.Frame(nf)
+        pm_frame.grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        
+        def on_proxy_mode_change():
+            state = "normal" if self.proxy_mode.get() == "custom" else "disabled"
+            self.proxy_entry.configure(state=state)
+
+        ttk.Radiobutton(pm_frame, text="跟随系统代理", variable=self.proxy_mode,
+                        value="system", command=on_proxy_mode_change).pack(side="left", padx=(0, 8))
+        ttk.Radiobutton(pm_frame, text="直接连接（不走代理）", variable=self.proxy_mode,
+                        value="direct", command=on_proxy_mode_change).pack(side="left", padx=8)
+        ttk.Radiobutton(pm_frame, text="自定义代理", variable=self.proxy_mode,
+                        value="custom", command=on_proxy_mode_change).pack(side="left", padx=8)
+
+        ttk.Label(nf, text="自定义代理地址（host:port）:").grid(row=1, column=0, sticky="w", pady=4)
+        self.proxy_entry = ttk.Entry(nf, width=38)
+        self.proxy_entry.grid(row=1, column=1, sticky="we", padx=6, pady=4)
+
+        ttk.Label(nf, text="GitHub Token（可选，提高限额）:").grid(row=2, column=0, sticky="w", pady=4)
+        self.token_entry = ttk.Entry(nf, width=38, show="*")
+        self.token_entry.grid(row=2, column=1, sticky="we", padx=6, pady=4)
+
+        tbtns = ttk.Frame(nf)
+        tbtns.grid(row=0, column=2, rowspan=3, sticky="ns", padx=8)
+        ttk.Button(tbtns, text="测试 GitHub API", command=self.test_network_settings).pack(fill="x", pady=2)
+        ttk.Button(tbtns, text="测试下载连通性", command=self.test_download_connectivity).pack(fill="x", pady=2)
+
         ttk.Label(nf, text="获取 Token: github.com/settings/tokens（只需公开仓库读取权限）",
-                  foreground="#666").grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 4))
+                  foreground="#666").grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 4))
         nf.columnconfigure(1, weight=1)
 
         # ---- 常规 ----
@@ -669,7 +689,16 @@ class GuiApp:
         self.server_entry.insert(0, str(self.cfg.server_mods_dir or ""))
         self.token_entry.insert(0, self.cfg.github_token)
         p = self.cfg.proxy
-        self.proxy_entry.insert(0, f'{p["host"]}:{p.get("port", "")}' if p else "")
+        if p and not p.get("host"):
+            self.proxy_mode.set("direct")
+            self.proxy_entry.configure(state="disabled")
+        elif p and p.get("host"):
+            self.proxy_mode.set("custom")
+            self.proxy_entry.insert(0, f'{p["host"]}:{p.get("port", "")}')
+            self.proxy_entry.configure(state="normal")
+        else:
+            self.proxy_mode.set("system")
+            self.proxy_entry.configure(state="disabled")
         self.interval_entry.insert(0, str(self.cfg.check_interval_hours))
         self.backup_entry.insert(0, str(self.cfg.backup_keep))
         self.gtnh_entry.insert(0, self.cfg.data.get("gtnh_version") or "")
@@ -1002,6 +1031,54 @@ class GuiApp:
                   + (f"，{counts['error']} 个出错" if counts["error"] else ""))
         self.refresh_installed()
 
+
+    def _show_update_plan_dialog(self, plan: list, on_confirm):
+        """展示更新计划表格，用户一次确认后执行，不逐个弹窗打扰。"""
+        if not plan:
+            messagebox.showinfo("提示", "没有需要更新的 mod（全部已是最新或已锁定）。")
+            return
+
+        top = self._dialog("确认更新计划", "760x450")
+        f = ttk.Frame(top)
+        f.pack(fill="both", expand=True, padx=10, pady=8)
+
+        # 统计
+        updatable = [p for p in plan if p["action"] == "update"]
+        ttk.Label(f, text=f"共检查 {len(plan)} 个 mod，其中 {len(updatable)} 个发现新版本（默认均选用最新发布，含测试版）。",
+                  font=FONT).pack(anchor="w", pady=(0, 6))
+
+        cols = ("name", "sides", "cur", "target", "prerelease", "status")
+        heads = ("Mod 名称", "端别", "当前版本", "目标版本", "测试版", "说明/状态")
+        widths = (220, 80, 110, 110, 60, 150)
+
+        tree_frame = ttk.Frame(f)
+        tree_frame.pack(fill="both", expand=True)
+        tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="browse")
+        for c, h, w in zip(cols, heads, widths):
+            tree.heading(c, text=h)
+            tree.column(c, width=w, anchor="w")
+        tree.pack(side="left", fill="both", expand=True)
+        self._attach_scrollbar(tree, tree_frame)
+
+        for p in plan:
+            side_txt = "、".join(SIDE_LABELS.get(s, s) for s in p["sides"])
+            pre_txt = "✓ 是" if p["prerelease"] else "否"
+            tree.insert("", "end", values=(
+                p["name"], side_txt, p["current_version"],
+                p["target_version"] or "—", pre_txt, p["note"]
+            ))
+
+        btns = ttk.Frame(top)
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+
+        def execute():
+            top.destroy()
+            on_confirm(plan)
+
+        if updatable:
+            ttk.Button(btns, text=f"立即执行更新 ({len(updatable)} 个)", command=execute).pack(side="left")
+        ttk.Button(btns, text="取消", command=top.destroy).pack(side="right")
+
     def update_selected(self):
         sel = self._selected_inst()
         if not sel:
@@ -1009,14 +1086,22 @@ class GuiApp:
             return
         if self.busy:
             return
-        ans = messagebox.askyesnocancel(
-            "确认更新", f"更新选中的 {len(sel)} 个mod（所有已装端别）？\n\n"
-                       "「是」：逐个弹出版本选择器，可精确挑选\n"
-                       "「否」：全部使用最新 GTNH 发布（含测试版），不再逐个询问\n"
-                       "「取消」：返回\n\n旧版本自动备份到 data/backup。")
-        if ans is None:
-            return
-        self._start_update_flow(list(sel), mode="pick" if ans else "recommend")
+        target_ids = {m["mod_id"] for m in sel}
+        self._set_busy(True)
+        self._log(f"正在生成更新计划（选中 {len(sel)} 个mod）...")
+
+        def job():
+            reg = updater.build_registry(self.cfg, self.db, self.installed)
+            return updater.build_update_plan(self.cfg, self.db, self.installed,
+                                             target_mod_ids=target_ids, registry=reg)
+
+        def on_plan_ready(plan):
+            self._set_busy(False)
+            if plan is None:
+                return
+            self._show_update_plan_dialog(plan, self._execute_update_plan)
+
+        self._run_async(job, on_done=on_plan_ready)
 
     def _start_update_flow(self, mods, mode="pick"):
         """逐个处理：弹版本选择器 → 更新 → 下一个（单个mod失败不影响其他）。
@@ -1101,20 +1186,49 @@ class GuiApp:
     def update_all(self):
         if self.busy:
             return
-        if not messagebox.askyesno(
-                "确认", "更新所有已安装且未锁定、启用的mod？\n"
-                       "只更新有新版本的（已最新/禁用/锁定的跳过），一律装最新 GTNH 发布（含测试版），\n"
-                       "旧版本会自动备份。"):
-            return
         self._set_busy(True)
+        self._log("正在扫描所有 mod 并生成更新计划...")
 
         def job():
             reg = updater.build_registry(self.cfg, self.db, self.installed)
-
             def cb(done, total, name):
-                self._push_progress(done, total, f"全部更新 {done}/{total}: {name}")
-            return updater.update_all(self.cfg, self.db, self.installed,
-                                      progress_cb=cb, registry=reg)
+                self._push_progress(done, total, f"检查更新 {done}/{total}: {name}")
+            return updater.build_update_plan(self.cfg, self.db, self.installed,
+                                             progress_cb=cb, registry=reg)
+
+        def on_plan_ready(plan):
+            self._set_busy(False)
+            if plan is None:
+                return
+            self._show_update_plan_dialog(plan, self._execute_update_plan)
+
+        self._run_async(job, on_done=on_plan_ready)
+
+    def _execute_update_plan(self, plan: list):
+        """一次确认后执行计划中的所有更新项，消除二次联网与多余弹窗。"""
+        updatable = [p for p in plan if p["action"] == "update"]
+        if not updatable:
+            return
+        self._set_busy(True)
+        self._log(f"开始执行更新计划（共 {len(updatable)} 个 mod）...")
+
+        def job():
+            results = []
+            for i, p in enumerate(updatable, 1):
+                self._push_progress(i, len(updatable), f"更新中 {i}/{len(updatable)}: {p['name']}")
+                for side in p["sides"]:
+                    try:
+                        r = updater.update_mod(
+                            self.cfg, self.db, self.installed, p["mod_id"], side,
+                            version=p["target_version"],
+                            progress_cb=self._download_progress_cb(f"下载 {p['name']}"),
+                            prefetched=p["prefetched"]
+                        )
+                    except Exception as e:
+                        r = {"action": "error", "error": str(e)}
+                    r["side"], r["mod_id"], r["name"] = side, p["mod_id"], p["name"]
+                    results.append(r)
+            return results
 
         self._run_async(job, on_done=lambda rs: self._on_update_done(rs or []))
 
@@ -2803,18 +2917,59 @@ class GuiApp:
             self._log("[失败] 抓取到内容但解析不到mod（Cookie 可能已过期，或页面结构变更）")
             messagebox.showwarning("测试失败", "抓取内容解析不到mod，请重新导入有效的 Cookie")
 
+
+    def test_download_connectivity(self):
+        """测试文件下载链路连通性。"""
+        proxy = self._current_proxy_from_ui()
+        if self.busy:
+            return
+        self._set_busy(True)
+        self._log("测试文件下载链路...")
+
+        def job():
+            import time
+            t0 = time.time()
+            # 测一个轻量公开下载点
+            url = "https://raw.githubusercontent.com/GTNewHorizons/GT-New-Horizons-Modpack/master/README.md"
+            raw = net.http_get(url, proxy=proxy, retries=0, timeout=15)
+            elapsed = time.time() - t0
+            return len(raw), elapsed
+
+        def done(res):
+            self._set_busy(False)
+            if isinstance(res, tuple):
+                sz, el = res
+                msg = f"下载链路测试通过！耗时 {el:.2f} 秒（读取 {sz} 字节）"
+                self._log(f"[OK] {msg}")
+                messagebox.showinfo("下载连通性正常", msg)
+            else:
+                self._log(f"[失败] 下载测试失败: {res}")
+                messagebox.showerror("下载失败", f"无法下载文件: {res}")
+
+        self._run_async(job, on_done=done)
+
+    def _current_proxy_from_ui(self):
+        mode = getattr(self, "proxy_mode", None)
+        if not mode:
+            return self.cfg.proxy
+        m = mode.get()
+        if m == "direct":
+            return {"host": "", "port": 0} # 直连
+        if m == "custom":
+            p = self.proxy_entry.get().strip()
+            if p:
+                host, _, port = p.partition(":")
+                try:
+                    return {"host": host, "port": int(port or 8080)}
+                except ValueError:
+                    return None
+            return None
+        return None # 跟随系统
+
     def test_network_settings(self):
         """用输入框当前的 Token/代理请求 GitHub API，报告连通性与剩余配额。"""
         token = self.token_entry.get().strip()
-        proxy = None
-        p = self.proxy_entry.get().strip()
-        if p:
-            host, _, port = p.partition(":")
-            try:
-                proxy = {"host": host, "port": int(port or 8080)}
-            except ValueError:
-                messagebox.showerror("错误", "代理端口必须是数字")
-                return
+        proxy = self._current_proxy_from_ui()
         headers = {"Accept": "application/vnd.github+json"}
         if token:
             headers["Authorization"] = "Bearer " + token
@@ -2850,9 +3005,12 @@ class GuiApp:
                         f"{side} mods 目录不存在：\n{p}\n仍要保存吗？（之后可再改）"):
                     return
         self.cfg.data["github_token"] = self.token_entry.get().strip()
-        p = self.proxy_entry.get().strip()
-        if p:
-            if ":" in p:
+        m = self.proxy_mode.get()
+        if m == "direct":
+            self.cfg.data["proxy"] = {"host": "", "port": 0}
+        elif m == "custom":
+            p = self.proxy_entry.get().strip()
+            if p:
                 host, _, port = p.partition(":")
                 try:
                     self.cfg.data["proxy"] = {"host": host, "port": int(port or 8080)}
@@ -2860,7 +3018,7 @@ class GuiApp:
                     messagebox.showerror("错误", "代理端口必须是数字")
                     return
             else:
-                self.cfg.data["proxy"] = {"host": p, "port": 8080}
+                self.cfg.data["proxy"] = None
         else:
             self.cfg.data["proxy"] = None
         try:

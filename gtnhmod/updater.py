@@ -1214,3 +1214,139 @@ def unignore(cfg, file_name: str) -> None:
         ignored.remove(file_name)
         cfg.data["ignored_files"] = ignored
         cfg.save()
+
+
+def build_update_plan(cfg, db, installed, *, target_mod_ids=None, sides=SIDES,
+                      progress_cb=None, registry=None) -> list:
+    """构建更新计划：扫描各端并并发获取目标版本，生成结构化计划列表供用户确认。
+
+    返回 [plan_item]:
+      {
+        "mod_id": str,
+        "name": str,
+        "sides": [str],
+        "current_version": str,
+        "target_version": str | None,
+        "prerelease": bool,
+        "action": "update" | "uptodate" | "manual" | "manual_downgrade" | "error",
+        "note": str,
+        "prefetched": (options, err),
+        "options": list,
+      }
+    """
+    import concurrent.futures
+
+    reg = registry if registry is not None else build_registry(cfg, db, installed)
+    order = []  # [mod_id, name, [sides], cur_version]
+    for side in sides:
+        for mod_id, st in reg.get(side, {}).items():
+            if target_mod_ids is not None and mod_id not in target_mod_ids:
+                continue
+            if not st["enabled"] or st["locked"]:
+                continue
+            hit = next((x for x in order if x[0] == mod_id), None)
+            if hit is None:
+                order.append([mod_id, st["name_en"], [side], st.get("version") or "未知"])
+            else:
+                hit[2].append(side)
+
+    if not order:
+        return []
+
+    def _query_item(item):
+        mod_id, name, mod_sides, cur_ver = item
+        entry = db.get(mod_id) or {}
+        options, err = list_install_options(entry, cfg, db, force=True)
+        return mod_id, name, mod_sides, cur_ver, options, err
+
+    max_workers = min(4, max(1, len(order)))
+    raw_results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_query_item, item): item[0] for item in order}
+        done_count = 0
+        for future in concurrent.futures.as_completed(futures):
+            mid, name, mod_sides, cur_ver, options, err = future.result()
+            raw_results[mid] = (name, mod_sides, cur_ver, options, err)
+            done_count += 1
+            if progress_cb:
+                progress_cb(done_count, len(order), name)
+
+    plan = []
+    for mod_id, name, mod_sides, _ in order:
+        name, mod_sides, cur_ver, options, err = raw_results[mod_id]
+        if err:
+            plan.append({
+                "mod_id": mod_id,
+                "name": name,
+                "sides": mod_sides,
+                "current_version": cur_ver,
+                "target_version": None,
+                "prerelease": False,
+                "action": "error",
+                "note": f"查询失败: {err}",
+                "prefetched": (options, err),
+                "options": [],
+            })
+            continue
+
+        if not options:
+            plan.append({
+                "mod_id": mod_id,
+                "name": name,
+                "sides": mod_sides,
+                "current_version": cur_ver,
+                "target_version": None,
+                "prerelease": False,
+                "action": "manual",
+                "note": "该 mod 无自动下载渠道",
+                "prefetched": (options, err),
+                "options": [],
+            })
+            continue
+
+        chosen, note = _pick_default_option(options, old_version=cur_ver)
+        if chosen is None:
+            plan.append({
+                "mod_id": mod_id,
+                "name": name,
+                "sides": mod_sides,
+                "current_version": cur_ver,
+                "target_version": options[0]["version"],
+                "prerelease": options[0].get("prerelease", False),
+                "action": "manual",
+                "note": note or "无可用目标版本",
+                "prefetched": (options, err),
+                "options": options,
+            })
+            continue
+
+        action = "update"
+        if cur_ver and cur_ver != "未知":
+            try:
+                comp = compare(chosen["version"], cur_ver)
+                if comp == 0:
+                    action = "uptodate"
+                elif comp < 0:
+                    action = "manual_downgrade"
+                    note = "发布版本低于当前已安装版本，需手动确认"
+            except VersionParseError:
+                action = "manual"
+                note = f"版本格式无法比较（已装 {cur_ver}，目标 {chosen['version']}）"
+
+        if not chosen.get("candidates"):
+            action = "manual"
+            note = note or "该版本无自动下载资产，需手动下载"
+
+        plan.append({
+            "mod_id": mod_id,
+            "name": name,
+            "sides": mod_sides,
+            "current_version": cur_ver,
+            "target_version": chosen["version"],
+            "prerelease": bool(chosen.get("prerelease")),
+            "action": action,
+            "note": note or ("可更新" if action == "update" else "已最新"),
+            "prefetched": (options, err),
+            "options": options,
+        })
+    return plan
