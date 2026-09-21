@@ -118,3 +118,53 @@ class Config:
     @property
     def backup_dir(self) -> Path:
         return self.data_dir / "backup"
+
+
+def detect_instance_paths(path) -> dict:
+    """智能从所选目录（实例根目录或 mods 目录）识别客户端/服务端 mods 路径与整合包版本。"""
+    import re
+    p = Path(path) if path else None
+    res = {"client_mods": None, "server_mods": None, "gtnh_version": None}
+    if not p or not p.exists():
+        return res
+
+    # 1. 直接选了 mods 目录
+    if p.name.lower() == "mods" and p.is_dir():
+        res["client_mods"] = p
+        # 尝试看上一级是否有 instance.cfg 或 version
+        cfg_cand = p.parent / "instance.cfg"
+        if not cfg_cand.exists() and p.parent.name.lower() in (".minecraft", "minecraft"):
+            cfg_cand = p.parent.parent / "instance.cfg"
+        if cfg_cand.exists():
+            for line in cfg_cand.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if "name=" in line.lower() and "2." in line:
+                    m = re.search(r"2\.\d+(?:\.\d+)?(?:[-\s]?(?:beta|rc|pre)\s*\d*)?", line, re.I)
+                    if m:
+                        res["gtnh_version"] = m.group(0).strip()
+        return res
+
+    # 2. 实例根目录：探测客户端 mods
+    for cand in (p / "mods", p / ".minecraft" / "mods", p / "minecraft" / "mods"):
+        if cand.is_dir():
+            res["client_mods"] = cand
+            break
+
+    # 3. 探测服务端 mods
+    for cand in (p / "server" / "mods", p.parent / "server" / "mods"):
+        if cand.is_dir():
+            res["server_mods"] = cand
+            break
+
+    # 4. 尝试探测 GTNH 版本
+    for cfg_cand in (p / "instance.cfg", p / "mmc-pack.json"):
+        if cfg_cand.exists():
+            for line in cfg_cand.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if "name" in line.lower() and "2." in line:
+                    m = re.search(r"2\.\d+(?:\.\d+)?(?:[-\s]?(?:beta|rc|pre)\s*\d*)?", line, re.I)
+                    if m:
+                        res["gtnh_version"] = m.group(0).strip()
+                        break
+            if res["gtnh_version"]:
+                break
+
+    return res

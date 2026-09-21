@@ -553,8 +553,38 @@ class GuiApp:
                     e.insert(0, p)
             ttk.Button(f, text="浏览...", command=browse).grid(row=row, column=2)
 
-        path_row(0, "客户端 mods 目录", "client_entry")
-        path_row(1, "服务端 mods 目录", "server_entry")
+        def auto_detect_instance():
+            p = filedialog.askdirectory(title="选择整合包实例根目录（如 Prism/HMCL 实例文件夹）或 mods 目录")
+            if not p:
+                return
+            from gtnhmod.config import detect_instance_paths
+            res = detect_instance_paths(p)
+            found = []
+            if res["client_mods"]:
+                self.client_entry.delete(0, "end")
+                self.client_entry.insert(0, str(res["client_mods"]))
+                found.append("客户端 mods: " + res["client_mods"].name)
+            if res["server_mods"]:
+                self.server_entry.delete(0, "end")
+                self.server_entry.insert(0, str(res["server_mods"]))
+                found.append("服务端 mods: " + res["server_mods"].name)
+            if res["gtnh_version"]:
+                self.gtnh_entry.delete(0, "end")
+                self.gtnh_entry.insert(0, res["gtnh_version"])
+                found.append("GTNH 版本: " + res["gtnh_version"])
+            if found:
+                messagebox.showinfo("识别成功", "已自动识别并填入:\n" + "\n".join(found))
+            else:
+                messagebox.showwarning("提示", "未在该目录或子目录下识别到 mods 文件夹，请手动选择具体路径。")
+
+        auto_bar = ttk.Frame(f)
+        auto_bar.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        ttk.Button(auto_bar, text="智能识别实例目录...", command=auto_detect_instance).pack(side="left")
+        ttk.Label(auto_bar, text="（直接选取 Prism/MultiMC/HMCL 实例根目录，自动探测 mods 路径与版本）",
+                  foreground="#666").pack(side="left", padx=6)
+
+        path_row(1, "客户端 mods 目录", "client_entry")
+        path_row(2, "服务端 mods 目录", "server_entry")
         f.columnconfigure(1, weight=1)
 
         # ---- 网络（GitHub / 代理）----
@@ -600,9 +630,29 @@ class GuiApp:
         ttk.Label(wf, text="配套 User-Agent").grid(row=1, column=0, sticky="w", pady=4)
         self.wiki_ua_entry = ttk.Entry(wf, width=60)
         self.wiki_ua_entry.grid(row=1, column=1, sticky="we", padx=6)
+        def import_local_wiki_file():
+            p = filedialog.askopenfilename(
+                title="选择本地 Wiki 离线文本文件（如 wiki_sample.txt 或保存的 wikitext）",
+                filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")]
+            )
+            if not p:
+                return
+            try:
+                data = Path(p).read_text(encoding="utf-8", errors="replace")
+                from gtnhmod.wiki import _validate_wikitext, _wiki_cache_file
+                _validate_wikitext(data)
+                cache_file = _wiki_cache_file(self.cfg)
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                cache_file.write_text(data, encoding="utf-8")
+                messagebox.showinfo("导入成功", "已成功导入 Wiki 离线数据！请回到「可添加MOD」页面点击刷新。")
+                self._log("已手动导入 Wiki 离线数据: " + Path(p).name)
+            except Exception as e:
+                messagebox.showerror("导入失败", f"文件内容未通过 Wiki 结构校验: {e}")
+
         wbtns = ttk.Frame(wf)
         wbtns.grid(row=2, column=0, columnspan=2, sticky="w", padx=2, pady=4)
         ttk.Button(wbtns, text="从剪贴板导入 cURL", command=self.import_wiki_curl).pack(side="left")
+        ttk.Button(wbtns, text="导入本地 Wiki 离线文件...", command=import_local_wiki_file).pack(side="left", padx=6)
         ttk.Button(wbtns, text="测试抓取", command=self.test_wiki_fetch).pack(side="left", padx=6)
         ttk.Button(wbtns, text="清除", command=self.clear_wiki_cookie).pack(side="left")
         ttk.Label(wf, text="获取方法：浏览器打开 wiki 并通过人机验证 → F12 → Network → 刷新页面 → "
