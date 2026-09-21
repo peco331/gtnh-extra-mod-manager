@@ -80,7 +80,11 @@ class CliApp:
     def do_refresh_wiki(self):
         self.ui.info("正在抓取 wiki 数据（gtnh.huijiwiki.com）...")
         try:
-            mods, warnings = wikimod.fetch_and_parse(self.cfg)
+            mods, warnings = wikimod.fetch_and_parse(
+                self.cfg,
+                interactive=True,
+                progress_cb=lambda msg: self.ui.info(msg),
+            )
         except Exception as e:
             self.ui.error(f"抓取失败: {e}")
             return
@@ -817,7 +821,11 @@ class CliApp:
             elif idx == 1:
                 self.ui.info("正在测试 wiki 抓取...")
                 try:
-                    mods, warnings = wikimod.fetch_and_parse(self.cfg)
+                    mods, warnings = wikimod.fetch_and_parse(
+                        self.cfg,
+                        interactive=True,
+                        progress_cb=lambda msg: self.ui.info(msg),
+                    )
                 except Exception as e:
                     self.ui.error(f"抓取失败: {e}")
                     continue

@@ -93,6 +93,16 @@ def _fetch_impersonate_wikitext(cfg) -> str:
     except Exception as e:
         raise net.HttpError(-1, f"curl_cffi 请求失败: {e}")
     if r.status_code != 200:
+        # Cloudflare 的验证页经常以 403 + Cf-Mitigated: challenge 返回。
+        # 把它标记为“需要人工验证”，交互刷新即可立即切到浏览器流程，
+        # 不再把验证页当普通限流连续重试。
+        headers = getattr(r, "headers", {}) or {}
+        body = getattr(r, "text", "") or ""
+        cf_mitigated = str(headers.get("Cf-Mitigated", "")).lower()
+        if ("challenge" in cf_mitigated
+                or "just a moment" in body.lower()
+                or "_cf_chl_opt" in body):
+            raise net.HttpError(-3, f"{url} -> 需要 Cloudflare 人机验证")
         raise net.HttpError(r.status_code if r.status_code < 500 else -1,
                             f"{url} -> HTTP {r.status_code}")
     return r.text
@@ -149,6 +159,19 @@ def _wiki_cache_file(cfg):
     return cfg.data_dir / "cache" / "wiki_wikitext.txt"
 
 
+def _write_wiki_cache(cfg, text: str) -> None:
+    """原子写入最近一次通过校验的 Wiki 原文。"""
+    try:
+        cache_file = _wiki_cache_file(cfg)
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_file.with_suffix(".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, cache_file)
+    except OSError:
+        # 缓存不可写不应让已经成功抓取的结果变成失败。
+        pass
+
+
 def _validate_wikitext(text: str) -> None:
     """校验抓到的确实是页面 wikitext，不是验证页/错误页。
 
@@ -167,8 +190,8 @@ def fetch_wikitext(cfg, *, interactive: bool = False, progress_cb=None):
     """抓取页面 wikitext，返回 (wikitext, 缓存说明|None)。
 
     依次尝试 curl_cffi(浏览器TLS指纹) → api.php → curl+action=raw →
-    urllib+action=raw，带 4s/8s 退避（该站对连续请求限流敏感）；
-    全部失败时回退到最近一次成功抓取的本地缓存。
+    urllib+action=raw；非交互调用在通道之间带退避并回退到缓存。
+    交互刷新检测到验证/拒绝时立即弹出隔离浏览器，浏览器失败后才回退缓存。
     内容先经 _validate_wikitext 校验，未通过不写缓存、继续换下一通道。
     """
     fetchers = (_fetch_impersonate_wikitext, _fetch_api_wikitext,
@@ -179,49 +202,48 @@ def fetch_wikitext(cfg, *, interactive: bool = False, progress_cb=None):
         try:
             text = fn(cfg)
             _validate_wikitext(text)
-            try:  # 成功后原子写本地缓存（失败兜底用；进程被杀不留撕裂缓存）
-                cache_file = _wiki_cache_file(cfg)
-                cache_file.parent.mkdir(parents=True, exist_ok=True)
-                tmp = cache_file.with_suffix(".tmp")
-                tmp.write_text(text, encoding="utf-8")
-                os.replace(tmp, cache_file)
-            except OSError:
-                pass
+            _write_wiki_cache(cfg, text)
             return text, None
         except net.HttpError as e:
             if e.code not in (403, 404, 429, -1, -3, -4):
                 raise
             code = e.code
             errors.append(str(e))
+            # 交互刷新遇到 Cloudflare/拒绝响应时，人工浏览器才是正确的
+            # 验证边界。不要继续打剩余通道，也不要先返回旧缓存。
+            if interactive and e.code in (403, 429, -3):
+                break
         except (ValueError, KeyError) as e:
             errors.append(str(e))
-        if i < len(fetchers) - 1 and code != -4:  # 未装可选依赖时不退避
+        if (not interactive and i < len(fetchers) - 1 and code != -4):
             time.sleep(4 + i * 4)  # 4s、8s、12s 退避（该站限流对连续请求敏感）
-    # 全部失败 → 最近一次成功抓取的本地缓存兜底（同样要过校验：
-    # 截断/被污染的缓存解析出"子集"会绕过空防护，重演误删事故）
-    cache_file = _wiki_cache_file(cfg)
-    if cache_file.exists():
-        try:
-            cached = cache_file.read_text(encoding="utf-8")
-            _validate_wikitext(cached)
-            return cached, "wiki 请求被临时限流，已使用最近一次成功抓取的数据"
-        except (OSError, net.HttpError):
-            pass
+
+    browser_error = None
     if interactive:
         try:
             text = fetch_wikitext_via_browser(cfg, progress_cb=progress_cb)
+            _validate_wikitext(text)
+            _write_wiki_cache(cfg, text)
             return text, None
         except Exception as be:
-            errors.append(f"浏览器验证失败: {be}")
+            browser_error = str(be)
+            errors.append(f"浏览器验证失败: {browser_error}")
 
+    # 全部失败（或浏览器验证失败）→ 最近一次成功抓取的本地缓存兜底，
+    # 同样要过校验：截断/被污染的缓存解析出“子集”会绕过空防护，
+    # 重演误删事故。交互模式必须在浏览器之后才走到这里。
     cache_file = _wiki_cache_file(cfg)
     if cache_file.exists():
         try:
             cached = cache_file.read_text(encoding="utf-8")
             _validate_wikitext(cached)
-            return cached, "wiki 请求被临时限流，已使用最近一次成功抓取的数据"
+            note = "wiki 请求被临时限流或需要验证，已使用最近一次成功抓取的数据"
+            if browser_error:
+                note += f"（{browser_error}）"
+            return cached, note
         except (OSError, net.HttpError):
             pass
+
     raise net.HttpError(403, f"wiki 抓取失败（可能被临时限流，请稍后重试）: {'; '.join(errors)}")
 
 
@@ -690,9 +712,36 @@ def _get_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _cdp_eval(ws, expression: str, timeout_seconds: float = 5.0):
+    """执行一条 CDP Runtime.evaluate，并跳过先到达的异步事件。"""
+    request_id = time.time_ns() % 2_000_000_000
+    ws.send(json.dumps({
+        "id": request_id,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": expression,
+            "awaitPromise": True,
+            "returnByValue": True,
+        },
+    }))
+    deadline = time.time() + timeout_seconds
+    try:
+        ws.settimeout(timeout_seconds)
+    except (AttributeError, OSError):
+        pass
+    while time.time() < deadline:
+        message = json.loads(ws.recv())
+        if message.get("id") != request_id:
+            continue
+        result = message.get("result", {}).get("result", {})
+        if result.get("subtype") == "error" or message.get("error"):
+            return {}
+        return result.get("value") or {}
+    raise TimeoutError("等待浏览器脚本响应超时")
+
+
 def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None) -> str:
     """打开系统浏览器窗口供用户完成一次人机验证，并自动读取验证通过后的 wikitext。"""
-    import json
     import subprocess
     import urllib.request
     try:
@@ -714,6 +763,7 @@ def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None
         str(browser),
         f"--user-data-dir={user_data.resolve()}",
         f"--remote-debugging-port={port}",
+        "--remote-debugging-address=127.0.0.1",
         "--remote-allow-origins=*",
         "--no-first-run",
         "--no-default-browser-check",
@@ -768,25 +818,19 @@ def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None
             if proc.poll() is not None:
                 raise net.HttpError(-1, "浏览器验证窗口已关闭")
             try:
-                ws.send(json.dumps({
-                    "id": int(time.time() * 1000) % 100000,
-                    "method": "Runtime.evaluate",
-                    "params": {"expression": js, "awaitPromise": True, "returnByValue": True}
-                }))
-                res = json.loads(ws.recv())
-                val = res.get("result", {}).get("result", {}).get("value") or {}
+                val = _cdp_eval(ws, js)
                 if val.get("status") == 200:
                     text = val.get("text", "")
                     if any(t in text for t in TEMPLATE_NAMES):
                         _validate_wikitext(text)
-                        # 保存本地缓存
-                        cache_file = _wiki_cache_file(cfg)
-                        cache_file.parent.mkdir(parents=True, exist_ok=True)
-                        tmp = cache_file.with_suffix(".tmp")
-                        tmp.write_text(text, encoding="utf-8")
-                        os.replace(tmp, cache_file)
+                        _write_wiki_cache(cfg, text)
                         return text
-            except (websocket.WebSocketException, OSError):
+            except (websocket.WebSocketTimeoutException, TimeoutError):
+                # 页面仍在验证/加载时，下一轮继续询问。
+                continue
+            except websocket.WebSocketException as e:
+                raise net.HttpError(-1, f"浏览器调试会话断开: {e}")
+            except OSError:
                 pass
         raise net.HttpError(-1, "等待浏览器人机验证超时（120秒）")
     finally:

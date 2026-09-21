@@ -1,6 +1,6 @@
 # GTNH 额外MOD管理工具
 
-纯 Python 标准库（无第三方依赖）实现的 GTNH 整合包额外 mod 管理工具。
+核心功能使用 Python 标准库实现；Wiki 的快速请求与浏览器验证使用可选依赖。
 同时管理**客户端**与**服务端**的 mods 文件夹：安装、一键检查更新、更新（自动备份旧版本）、
 启用/禁用开关，并区分客户端/服务端/双端 mod。
 
@@ -14,7 +14,7 @@ wiki 没有的 mod 可通过**自定义源**（GitHub 仓库 / 本地文件夹 /
 - 双击 `run_gui.bat` → 图形界面
 - 或命令行：`py -m gtnhmod cli` / `py -m gtnhmod gui`
 
-要求：Windows + Python 3.10+（安装时勾选 py 启动器）。**不需要 pip 安装任何包。**
+要求：Windows + Python 3.10+（安装时勾选 py 启动器）。基础功能不需要 pip 安装额外包。
 
 ### 免安装版（exe）
 
@@ -22,12 +22,12 @@ wiki 没有的 mod 可通过**自定义源**（GitHub 仓库 / 本地文件夹 /
 下载 `GTNHModManager-<版本>-win64.zip`：解压后 `GTNHModManager.exe` 是图形界面、
 `gtnh-cli.exe` 是命令行（参数同下）。数据目录在 exe 旁的 `data/`
 （可用环境变量 `GTNHMOD_DATA_DIR` 指到别处）。push tag `v*` 时 CI 自动构建发布；
-本地打包：`scripts\build_exe.bat`（需 `py -m pip install pyinstaller curl_cffi`）。
+本地打包：`scripts\build_exe.bat`（需 `py -m pip install pyinstaller curl_cffi websocket-client`）。
 
-推荐（可选）：`py -m pip install --user curl_cffi`。wiki 站开启 Cloudflare 人机验证后，
-程序直连会按 TLS 指纹被拦截；装了 curl_cffi 后刷新会模拟浏览器指纹直连（首选通道，
-无需人工过验证）。未安装时依次尝试 api.php / 系统 curl / 原始通道，均被拦截则回退
-本地缓存；也可在设置里导入浏览器 Cookie（cf_clearance + 配套 UA）绕过，见下方「Wiki 反爬」。
+推荐（可选）：`py -m pip install --user curl_cffi websocket-client`。wiki 站开启 Cloudflare
+人机验证后，程序先尝试模拟浏览器指纹直连；如果仍需要验证，会自动打开应用专用的
+Edge/Chrome 窗口，用户完成验证后程序从同一浏览器会话读取 Wiki 原文。验证窗口关闭后才
+会使用最近一次成功缓存；缓存回退会在日志中明确标记。
 
 非交互模式（可配合 Windows 任务计划每日自动检查）：
 
@@ -111,16 +111,17 @@ py -m gtnhmod cli --update-all   # 直接更新全部可更新的mod（有失败
 
 ## Wiki 反爬（Cloudflare）
 
-wiki 站开启 Cloudflare 人机验证后，程序直连会收到"请稍候…"验证页或 403。三层应对：
+wiki 站开启 Cloudflare 人机验证后，程序直连会收到"请稍候…"验证页或 403。处理顺序为：
 
-1. **curl_cffi 通道（推荐）**：`py -m pip install --user curl_cffi`，刷新时模拟浏览器
-   TLS 指纹直连，实测无需人工过验证。
-2. **浏览器 Cookie 导入**：在浏览器里打开 wiki 并通过一次验证 → F12 → Network →
-   刷新页面 → 点第一个文档请求 → 右键 Copy → Copy as cURL → GUI 设置页
-   「从剪贴板导入 cURL」（CLI 菜单 10 → Wiki反爬Cookie）。cf_clearance 与浏览器的
-   User-Agent/出口 IP 绑定，过期后重新导入即可。
-3. **本地缓存兜底**：全部通道失败时自动使用最近一次成功抓取的数据，并在刷新时提示。
-   解析结果为空时刷新会直接中止合并，绝不误删本地条目。
+1. **快速通道**：安装 `curl_cffi` 后模拟浏览器 TLS 指纹请求。
+2. **人工验证窗口**：检测到验证页或 403 时自动打开隔离的 Edge/Chrome 窗口；完成验证后，
+   程序通过同一会话读取 raw Wiki 内容。浏览器会话保存在 `data/cache/browser_profile/`，
+   不读取现有浏览器的 Cookie 数据库。
+3. **本地缓存兜底**：浏览器验证失败或网络暂时不可用时使用最近一次成功抓取的数据，
+   并在刷新日志中明确提示。解析结果为空时刷新会直接中止合并，绝不误删本地条目。
+
+高级兼容入口仍可在设置页导入浏览器 Cookie（cf_clearance + 配套 UA），但普通刷新不需要
+手工复制 Cookie。
 
 ## GTNH 发布筛选边界
 

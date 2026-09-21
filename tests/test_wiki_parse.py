@@ -280,6 +280,52 @@ class TestFetchFallback(unittest.TestCase):
             with self.assertRaises(W.net.HttpError):
                 W.fetch_wikitext(self._cfg())
 
+    def test_interactive_browser_runs_before_stale_cache(self):
+        """交互刷新遇到验证时必须先弹浏览器，不能直接返回旧缓存。"""
+        import gtnhmod.wiki as W
+        cfg = self._cfg()
+        cache = W._wiki_cache_file(cfg)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        old = "cached {{可添加MOD表格行}} old"
+        fresh = "fresh {{可添加MOD表格行}} wikitext"
+        cache.write_text(old, encoding="utf-8")
+
+        blocked = W.net.HttpError(-3, "需要人工验证")
+        with mock.patch.object(W, "_fetch_impersonate_wikitext", side_effect=blocked), \
+                mock.patch.object(W, "_fetch_api_wikitext", side_effect=blocked), \
+                mock.patch.object(W, "_fetch_curl_wikitext", side_effect=blocked), \
+                mock.patch.object(W, "_fetch_raw_wikitext", side_effect=blocked), \
+                mock.patch.object(W, "fetch_wikitext_via_browser", return_value=fresh) as browser, \
+                mock.patch.object(W.time, "sleep"):
+            text, cached = W.fetch_wikitext(cfg, interactive=True)
+
+        self.assertEqual(text, fresh)
+        self.assertIsNone(cached)
+        browser.assert_called_once()
+        self.assertEqual(cache.read_text(encoding="utf-8"), fresh)
+
+    def test_interactive_http_403_switches_to_browser_without_retry_storm(self):
+        """交互刷新遇到 403 时直接进入人工验证，不再串行等待多个通道。"""
+        import gtnhmod.wiki as W
+        cfg = self._cfg()
+        fresh = "fresh {{可添加MOD表格行}} wikitext"
+        blocked = W.net.HttpError(403, "challenge")
+        with mock.patch.object(W, "_fetch_impersonate_wikitext", side_effect=blocked), \
+                mock.patch.object(W, "_fetch_api_wikitext",
+                                  side_effect=AssertionError("不应继续请求 API")), \
+                mock.patch.object(W, "_fetch_curl_wikitext",
+                                  side_effect=AssertionError("不应继续请求 curl")), \
+                mock.patch.object(W, "_fetch_raw_wikitext",
+                                  side_effect=AssertionError("不应继续请求 raw")), \
+                mock.patch.object(W, "fetch_wikitext_via_browser", return_value=fresh) as browser, \
+                mock.patch.object(W.time, "sleep") as sleep:
+            text, cached = W.fetch_wikitext(cfg, interactive=True)
+
+        self.assertEqual(text, fresh)
+        self.assertIsNone(cached)
+        browser.assert_called_once()
+        sleep.assert_not_called()
+
 
 class TestWikiHeaders(unittest.TestCase):
     """反爬 Cookie/UA 应合并进各通道请求头（未配置时不添加）。"""

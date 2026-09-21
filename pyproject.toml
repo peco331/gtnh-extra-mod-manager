@@ -7,8 +7,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 
 [project.optional-dependencies]
-# 可选：wiki 站开启 Cloudflare 反爬后，模拟浏览器 TLS 指纹直连（首选抓取通道）
-fast-wiki = ["curl_cffi>=0.7"]
+# 可选：wiki 站开启 Cloudflare 反爬后，模拟浏览器 TLS 指纹直连，
+# 并在需要时连接应用专用浏览器会话供人工完成验证。
+fast-wiki = ["curl_cffi>=0.7", "websocket-client>=1.7"]
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -2487,15 +2487,28 @@ class GuiApp:
         self._set_busy(True)
         self._log("正在抓取 wiki 数据...")
         progress_cb = lambda msg: self.queue.put(("log", msg))
-        self._run_async(
-            lambda: (wikimod.fetch_and_parse(self.cfg, interactive=True, progress_cb=progress_cb), ),
-            on_done=lambda r: self._on_wiki_done(r))
+        def job():
+            try:
+                return wikimod.fetch_and_parse(self.cfg, interactive=True,
+                                               progress_cb=progress_cb)
+            except Exception as e:
+                # 让 Wiki 刷新自己的完成回调呈现错误；不把失败变成
+                # “回调收到 None 后静默结束”的假成功体验。
+                return {"error": str(e)}
+        self._run_async(job, on_done=self._on_wiki_done)
 
     def _on_wiki_done(self, r):
         if r is None:
             self._set_busy(False)
+            self._log("[错误] Wiki 刷新未返回结果")
             return
-        mods, warnings = r[0]
+        if isinstance(r, dict) and r.get("error"):
+            self._set_busy(False)
+            msg = r["error"]
+            self._log(f"[错误] Wiki 刷新失败: {msg}")
+            messagebox.showerror("刷新Wiki失败", msg)
+            return
+        mods, warnings = r
         for w in warnings:
             self._log(f"[警告] {w}")
         try:
@@ -2515,11 +2528,10 @@ class GuiApp:
         for c in changes[:30]:
             self._log(f"  - {c}")
         self.refresh_addable()
-        # Wiki刷新不只更新条目，也同步刷新下载页最新版发布时间。
-        self._log("正在更新下载页最新版发布时间...")
-        self._run_async(
-            lambda: updater.refresh_release_dates(self.cfg, self.db),
-            on_done=self._on_release_dates_done)
+        # 目录同步与 GitHub 发布时间查询解耦：刷新完成后立即可浏览，
+        # 发布时间按后续更新检查/缓存策略获取，避免 80+ 源串行拖住 Wiki。
+        self._set_busy(False)
+        self._log("Wiki 刷新完成；下载页发布时间将在需要时后台获取")
 
     def _on_release_dates_done(self, result):
         self._set_busy(False)
@@ -2901,14 +2913,25 @@ class GuiApp:
         self._save_wiki_cookie_from_ui()
         self._set_busy(True)
         self._log("正在测试 wiki 抓取...")
-        self._run_async(lambda: (wikimod.fetch_and_parse(self.cfg), ),
-                        on_done=lambda r: self._on_wiki_test_done(r))
+        progress_cb = lambda msg: self.queue.put(("log", msg))
+        def job():
+            try:
+                return wikimod.fetch_and_parse(self.cfg, interactive=True,
+                                               progress_cb=progress_cb)
+            except Exception as e:
+                return {"error": str(e)}
+        self._run_async(job, on_done=self._on_wiki_test_done)
 
     def _on_wiki_test_done(self, r):
         self._set_busy(False)
         if r is None:
+            self._log("[错误] Wiki 测试未返回结果")
             return
-        mods, warnings = r[0]
+        if isinstance(r, dict) and r.get("error"):
+            self._log(f"[错误] Wiki 测试失败: {r['error']}")
+            messagebox.showerror("测试抓取失败", r["error"])
+            return
+        mods, warnings = r
         if mods:
             msg = f"抓取成功，解析到 {len(mods)} 个mod"
             self._log(f"[OK] {msg}" + (f"（警告：{'；'.join(warnings)}）" if warnings else ""))
