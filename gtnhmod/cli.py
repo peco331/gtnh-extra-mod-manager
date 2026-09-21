@@ -157,7 +157,7 @@ class CliApp:
                                ("mcmod", "mcmod"), ("bilibili", "bilibili")):
                 if entry["urls"].get(key):
                     links.append((label, entry["urls"][key]))
-            actions = ["安装（自动选择端别）", "打开下载页面", "绑定下载源", "编辑中文名"]
+            actions = ["安装（自动选择端别）", "打开下载页面", "绑定下载源", "编辑中文名", "确认/撤销 GTNH 下载源"]
             idx = self.ui.choose("操作:", actions)
             if idx is None:
                 return
@@ -181,6 +181,21 @@ class CliApp:
                 else:
                     self.ui.error(r.get("error") or "保存失败")
 
+            elif idx == 4:
+                self._confirm_gtnh_source(entry)
+
+    def _confirm_gtnh_source(self, entry):
+        confirmed = (entry.get("source") or {}).get("target_profile") == "gtnh"
+        source = updater.current_source_url(entry) or (entry.get("source") or {}).get("path", "")
+        prompt = ("撤销此源的 GTNH 确认？" if confirmed else
+                  f"已核实此源用于 GTNH？{source}（将接受无平台标识的文件；明确冲突仍排除）")
+        if self.ui.confirm(prompt):
+            result = updater.confirm_gtnh_source(self.db, entry["id"], not confirmed)
+            if result["action"] == "confirmed":
+                self.ui.ok("源确认已保存，请重新检查更新")
+            else:
+                self.ui.error(result.get("error") or "确认失败")
+
     def _bind_source_flow(self, entry):
         """列出该mod的全部下载链接，选择其一绑定为下载源（检查更新/下载用它）。"""
         cand = updater.bindable_links(entry)
@@ -203,25 +218,32 @@ class CliApp:
             self.ui.error(r.get("error") or "绑定失败")
 
     def _pick_version_from(self, options, current=None, title="选择版本"):
-        """版本选择器（[推荐]标记适配整合包版本的版本）。返回版本字符串或 None。"""
+        """版本选择器（[默认]标记最新 GTNH 发布，兼容描述仅供参考）。返回版本字符串或 None。"""
         gtnh = self.cfg.data.get("gtnh_version") or ""
         lines = []
         for o in options:
             marks = []
             if o["recommended"]:
-                marks.append("推荐")
+                marks.append("默认")
             if o["latest"]:
                 marks.append("最新")
+            if o.get("prerelease"):
+                marks.append("测试版")
+            if o.get("target_status", "eligible") != "eligible":
+                marks.append("游戏平台需确认")
             if o["compat"] == "incompatible":
-                marks.append("不适配当前GTNH")
+                marks.append("兼容说明警告·仅供参考")
             if current and o["version"] == current:
                 marks.append("已安装")
             tag = f"  [{'/'.join(marks)}]" if marks else ""
             lines.append(f"{o['version']}{tag}")
         head = title + (f"（你的整合包版本: {gtnh}）" if gtnh
-                        else "（未设置整合包版本，菜单10设置后可获得推荐标记）")
+                        else "（未设置整合包版本，不影响选版）")
         idx = self.ui.choose(head, lines)
         if idx is None:
+            return None
+        if options[idx].get("target_status", "eligible") != "eligible":
+            self.ui.warn(options[idx].get("target_reason") or "请先核实并确认 GTNH 下载源")
             return None
         return options[idx]["version"]
 
@@ -685,7 +707,7 @@ class CliApp:
                 f"代理: {self.cfg.proxy or '（跟随系统）'}",
                 f"检查结果缓存时长: {self.cfg.check_interval_hours} 小时",
                 f"每mod保留备份数: {self.cfg.backup_keep}",
-                f"GTNH整合包版本（兼容推荐用）: {self.cfg.data.get('gtnh_version') or '（未设置）'}",
+                f"GTNH整合包版本（仅供说明提示）: {self.cfg.data.get('gtnh_version') or '（未设置）'}",
                 f"Wiki反爬Cookie: {'已配置' if self.cfg.wiki_cookie else '（未配置，站点开启Cloudflare验证时需要）'}",
                 "恢复已排除/忽略的文件（重新显示）",
                 "打开操作日志文件",

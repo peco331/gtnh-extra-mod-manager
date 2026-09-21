@@ -54,6 +54,19 @@ class TestGuiSmoke(unittest.TestCase):
     def test_app_builds(self):
         self.assertTrue(self.app.inst_tree["columns"])
 
+    def test_source_confirmation_requires_explicit_yes(self):
+        entry = {'id': 'demo', 'name_en': 'Demo', 'source_type': 'github',
+                 'source': {'owner': 'owner', 'repo': 'demo'}}
+        with mock.patch.object(gui.messagebox, 'askyesno', return_value=False), \
+                mock.patch.object(gui.updater, 'confirm_gtnh_source') as confirm:
+            self.app._confirm_gtnh_source(entry)
+            confirm.assert_not_called()
+        with mock.patch.object(gui.messagebox, 'askyesno', return_value=True), \
+                mock.patch.object(gui.updater, 'confirm_gtnh_source',
+                                  return_value={'action': 'confirmed'}) as confirm:
+            self.app._confirm_gtnh_source(entry)
+            confirm.assert_called_once_with(self.app.db, 'demo', True)
+
     def test_version_picker_opens_and_confirms(self):
         """更新选择器预选最新版，且确认/双击/回车绑定完整。"""
         bindings = {}

@@ -583,7 +583,7 @@ class GuiApp:
         ttk.Label(gf, text="每mod备份保留数").grid(row=1, column=0, sticky="w", pady=6)
         self.backup_entry = ttk.Entry(gf, width=10)
         self.backup_entry.grid(row=1, column=1, sticky="w", padx=6)
-        ttk.Label(gf, text="GTNH整合包版本（兼容推荐用）").grid(row=2, column=0, sticky="w", pady=6)
+        ttk.Label(gf, text="GTNH整合包版本（仅供说明提示）").grid(row=2, column=0, sticky="w", pady=6)
         self.gtnh_entry = ttk.Entry(gf, width=10)
         self.gtnh_entry.grid(row=2, column=1, sticky="w", padx=6)
         act = ttk.Frame(gf)
@@ -944,6 +944,8 @@ class GuiApp:
                 self._log(f"{SIDE_LABELS[side]} {name}: v{cur} 已最新")
             else:
                 self._log(f"{SIDE_LABELS[side]} {name}: 当前v{cur}，最新v{info.latest_version}（请手动判断）")
+            if info.note:
+                self._log(f"  提示：{info.note}")
             if info.candidates is None and info.latest_version:
                 self._log(f"  （{name} 无自动下载资产，需手动下载）")
         self._log(f"检查完成：发现 {counts['update']} 个可更新"
@@ -960,7 +962,7 @@ class GuiApp:
         ans = messagebox.askyesnocancel(
             "确认更新", f"更新选中的 {len(sel)} 个mod（所有已装端别）？\n\n"
                        "「是」：逐个弹出版本选择器，可精确挑选\n"
-                       "「否」：全部使用推荐版本（最新兼容版），不再逐个询问\n"
+                       "「否」：全部使用最新 GTNH 发布（含测试版），不再逐个询问\n"
                        "「取消」：返回\n\n旧版本自动备份到 data/backup。")
         if ans is None:
             return
@@ -969,7 +971,7 @@ class GuiApp:
     def _start_update_flow(self, mods, mode="pick"):
         """逐个处理：弹版本选择器 → 更新 → 下一个（单个mod失败不影响其他）。
 
-        mode="recommend" 跳过版本选择器，直接用推荐版本（最新兼容版）。
+        mode="recommend" 跳过版本选择器，直接用最新 GTNH 发布（含测试版）。
         """
         self._pending_updates = list(mods)
         self._update_total = len(mods)
@@ -1051,7 +1053,7 @@ class GuiApp:
             return
         if not messagebox.askyesno(
                 "确认", "更新所有已安装且未锁定、启用的mod？\n"
-                       "只更新有新版本的（已最新/禁用/锁定的跳过），一律装最新兼容版，\n"
+                       "只更新有新版本的（已最新/禁用/锁定的跳过），一律装最新 GTNH 发布（含测试版），\n"
                        "旧版本会自动备份。"):
             return
         self._set_busy(True)
@@ -1087,7 +1089,7 @@ class GuiApp:
                 if r.get("warning"):
                     self._log(f"  [端别提示] {r['warning']}")
             elif r["action"] == "uptodate":
-                self._log(f"{label} {name}: 已是最新")
+                self._log(f"{label} {name}: {r.get('note') or '已是最新'}")
             elif r["action"] == "manual":
                 self._log(f"{label} {name}: {r.get('note') or '需手动下载'}")
                 if not self.busy:
@@ -1373,6 +1375,7 @@ class GuiApp:
         if not m:
             menu.add_command(label="（未选中mod）", state="disabled")
             return
+        self._add_target_menu(menu, self.db.get(m["mod_id"]))
         sel = self._selected_inst()
         multi = len(sel) > 1
         tag = f"（选中{len(sel)}个）" if multi else ""
@@ -1722,6 +1725,7 @@ class GuiApp:
         if not e:
             menu.add_command(label="（未选中mod）", state="disabled")
             return
+        self._add_target_menu(menu, e)
         sel = self._selected_addable()
         menu.add_command(label="查看详情", command=self.show_addable_detail)
         if len(sel) > 1:
@@ -1809,6 +1813,30 @@ class GuiApp:
             self.refresh_all()
         self._run_async(job, on_done=done)
 
+    def _confirm_gtnh_source(self, entry):
+        if not self._check_not_busy():
+            return
+        confirmed = (entry.get("source") or {}).get("target_profile") == "gtnh"
+        if confirmed:
+            prompt = "撤销此源的 GTNH 确认？无游戏平台标识的文件将再次要求确认。"
+        else:
+            source = updater.current_source_url(entry) or (entry.get("source") or {}).get("path", "")
+            prompt = (f"请先核实此源确实用于 GTNH：\n{source}\n\n"
+                      "确认后允许使用未写游戏平台的文件；明确属于其他 Minecraft 版本或加载器的文件仍会被排除。")
+        if not messagebox.askyesno("下载源的游戏平台", prompt):
+            return
+        result = updater.confirm_gtnh_source(self.db, entry["id"], not confirmed)
+        if result["action"] == "confirmed":
+            self._log("源确认已保存，请重新检查更新；" + ("已撤销确认" if confirmed else "已确认用于 GTNH"))
+        else:
+            messagebox.showerror("无法确认", result.get("error"))
+
+    def _add_target_menu(self, menu, entry):
+        if entry and entry.get("source_type") in ("github", "local_folder"):
+            confirmed = (entry.get("source") or {}).get("target_profile") == "gtnh"
+            menu.add_command(label="撤销 GTNH 源确认…" if confirmed else "确认此源用于 GTNH…",
+                             command=lambda: self._confirm_gtnh_source(entry))
+
     def _bind_source_dialog(self, e, on_close=None):
         """选择该mod的一个下载链接绑定为下载源（检查更新/下载用它）。
 
@@ -1870,6 +1898,7 @@ class GuiApp:
         if not e:
             menu.add_command(label="（未选中条目）", state="disabled")
             return
+        self._add_target_menu(menu, e)
         menu.add_command(label="编辑", command=lambda: self._custom_source_dialog(e))
         menu.add_command(label="删除", command=self.remove_custom)
 
@@ -2149,7 +2178,7 @@ class GuiApp:
         """模态版本选择对话框：更新时可优先预选最新版，否则预选已装/推荐版。"""
         top = self._dialog(title, "640x500")
         gtnh = self.cfg.data.get("gtnh_version") or ""
-        ttk.Label(top, text=f"你的整合包版本: {gtnh or '（未设置，设置页可填写以获得推荐标记）'}",
+        ttk.Label(top, text=f"你的整合包版本: {gtnh or '（未设置，不影响选版）'}",
                   font=FONT).pack(anchor="w", padx=10, pady=(10, 2))
         bar = ttk.Frame(top)
         bar.pack(fill="x", padx=10)
@@ -2169,13 +2198,15 @@ class GuiApp:
         def row_text(o):
             marks = []
             if o["recommended"]:
-                marks.append("推荐")
+                marks.append("默认")
             if o["latest"]:
                 marks.append("最新")
+            if o.get("target_status", "eligible") != "eligible":
+                marks.append("游戏平台需确认")
             if o.get("prerelease"):
                 marks.append("预发布")
             if o["compat"] == "incompatible":
-                marks.append("不适配当前GTNH")
+                marks.append("兼容说明警告·仅供参考")
             if current and o["version"] == current:
                 marks.append("已安装")
             pub = (o.get("published_at") or "")[:10]
@@ -2191,6 +2222,7 @@ class GuiApp:
             if o["compat"] == "incompatible":
                 body = ("⚠ 按 wiki 兼容表可能与 GTNH " + gtnh
                         + " 不适配" + chr(10) * 2) + body
+            body = (o.get("target_reason") or "") + chr(10) + body
             detail.insert("1.0", body)
             detail.configure(state="disabled")
 
@@ -2248,7 +2280,12 @@ class GuiApp:
                 i = shown.index(prefer)
                 lb.selection_set(i)
                 lb.see(i)
-            result["version"] = shown[lb.curselection()[0]]["version"]
+            selected = shown[lb.curselection()[0]]
+            if selected.get("target_status", "eligible") != "eligible":
+                messagebox.showinfo("游戏平台需确认", selected.get("target_reason") or
+                                    "请在列表右键菜单中核实并确认下载源，再重新获取版本。", parent=top)
+                return
+            result["version"] = selected["version"]
             top.destroy()
 
         btns = ttk.Frame(top)

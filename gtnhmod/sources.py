@@ -1,6 +1,6 @@
 """更新源抽象。
 
-GitHubSource：查 releases/latest（ETag 条件缓存，304 不计数），404 时回退 tags 列表
+GitHubSource：检查与安装共用 GTNH 发布列表（ETag 条件缓存），404 时回退 tags 列表
   取最新 tag 再查该 tag 的 release；匿名限流 60次/时，配合缓存与可选 token。
 LocalFolderSource：本地目录，最新版本=目录内可解析的最新 jar。
 ManualSource：无上游，手动替换。CurseForgeSource：无 API key，仅返回页面链接供浏览器打开。
@@ -10,6 +10,9 @@ import time
 import urllib.parse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
+
+from .targets import classify_target
 from pathlib import Path
 
 from . import net, utils
@@ -46,7 +49,9 @@ class VersionOption:
     body: str | None = None
     published_at: str | None = None
     candidates: list | None = None   # None = 该版本无自动下载资产
-    prerelease: bool = False         # GitHub prerelease（默认路径自动跳过）
+    prerelease: bool = False         # 默认包含测试发布
+    target_status: str = "eligible"
+    target_reason: str = ""
 
 
 def sort_version_options(options: list) -> list:
@@ -91,9 +96,11 @@ class Source(ABC):
                 exclude_regex=src.get("exclude_regex") or "",
                 tag_regex=src.get("tag_regex") or "",
                 token=cfg.github_token, cache_dir=cfg.cache_dir,
-                ttl_hours=cfg.check_interval_hours, proxy=cfg.proxy)
+                ttl_hours=cfg.check_interval_hours, proxy=cfg.proxy,
+                target_profile=src.get("target_profile", "unknown"))
         if st == "local_folder":
-            return LocalFolderSource(src.get("path") or "", src.get("name_regex") or "")
+            return LocalFolderSource(src.get("path") or "", src.get("name_regex") or "",
+                                     target_profile=src.get("target_profile", "unknown"))
         if st == "curseforge":
             return CurseForgeSource((entry.get("urls") or {}).get("curseforge"))
         return ManualSource()
@@ -135,7 +142,8 @@ def _score_asset(name: str, tag: str, tag_clean: str, repo: str) -> int:
 
 
 def pick_assets(assets: list, tag: str, repo: str,
-                asset_regex: str = "", exclude_regex: str = "") -> list:
+                asset_regex: str = "", exclude_regex: str = "", *,
+                target_profile: str = "unknown") -> list:
     """从 release assets 中挑 jar 候选（评分排序，下载失败可降级）。"""
     tag_clean = (tag or "").lstrip("v")
     cands = []
@@ -146,6 +154,10 @@ def pick_assets(assets: list, tag: str, repo: str,
         if exclude_regex and re.search(exclude_regex, name, re.I):
             continue
         if asset_regex and not re.search(asset_regex, name, re.I):
+            continue
+        if re.search(r"(?i)(?:^|[-_.])(sources|deobf|javadoc|api|dev)(?:[-_.]|$)", name):
+            continue
+        if classify_target(name, release_tag=tag, target_profile=target_profile).status != "eligible":
             continue
         score = _score_asset(name, tag, tag_clean, repo)
         cands.append((score, len(name), a))
@@ -160,7 +172,8 @@ class GitHubSource(Source):
     def __init__(self, owner: str, repo: str, *, asset_regex: str = "",
                  exclude_regex: str = "", tag_regex: str = "", token: str = "",
                  cache_dir: Path = None, ttl_hours: float = 6.0,
-                 api_base: str = "https://api.github.com", proxy=None):
+                 api_base: str = "https://api.github.com", proxy=None,
+                 target_profile: str = "unknown"):
         self.owner, self.repo = owner, repo
         self.asset_regex, self.exclude_regex = asset_regex, exclude_regex
         self.tag_regex = tag_regex
@@ -169,6 +182,7 @@ class GitHubSource(Source):
         self.ttl_hours = ttl_hours
         self.api_base = api_base.rstrip("/")
         self.proxy = proxy
+        self.target_profile = target_profile
 
     # ---- 内部 ----
     def _api(self, path: str, cache_key: str, *, force: bool = False):
@@ -209,16 +223,13 @@ class GitHubSource(Source):
         return ""
 
     def _from_release(self, rel: dict, fallback_tag: str = "") -> UpdateInfo:
-        tag = rel.get("tag_name") or fallback_tag
-        version = extract_version(tag)
-        assets = rel.get("assets") or []
-        cands = pick_assets(assets, tag, self.repo, self.asset_regex, self.exclude_regex)
-        note = self._rate_note()
-        if not cands:
-            note = "；".join(x for x in (note, "该Release无可用jar资产，需手动下载") if x)
-        return UpdateInfo(version or None, cands or None, rel.get("body"),
-                          utils.now_str(), note,
-                          rel.get("published_at") or rel.get("created_at"))
+        if not rel.get("tag_name"):
+            rel = dict(rel, tag_name=fallback_tag)
+        option = self._release_option(rel)
+        if option is None or option.target_status != "eligible":
+            raise SourceError("标签对应发布不适用于 GTNH 或游戏平台需确认")
+        return UpdateInfo(option.version, option.candidates, option.body, utils.now_str(),
+                          option.target_reason, option.published_at)
 
     def _check_via_tags(self) -> UpdateInfo:
         tags_data, _ = self._api(f"/repos/{self.owner}/{self.repo}/tags", "tags")
@@ -244,81 +255,95 @@ class GitHubSource(Source):
         return info
 
     def check(self, current_version: str | None, *, force: bool = False) -> UpdateInfo:
-        if self.tag_regex:
-            # 仓库混装多版本：releases/latest 可能是不匹配的版本（如其他MC版本），
-            # 需按 tag 过滤后取最新
-            return self._check_via_releases(force)
-        try:
-            rel, src = self._api(f"/repos/{self.owner}/{self.repo}/releases/latest", "latest",
-                                 force=force)
-        except net.HttpError as e:
-            if e.code != 404:
-                raise
-            # releases/latest 404（如仓库只有 prerelease 版本）→ 查 release 列表兜底
-            return self._check_via_releases(force)
-        return self._from_release(rel)
+        options = self.list_versions(force=force)
+        if not options:
+            return UpdateInfo(None, None, None, utils.now_str(), "没有找到 GTNH 发布")
+        option = options[0]
+        if option.target_status != "eligible":
+            raise SourceError(option.target_reason or "游戏平台需确认")
+        return UpdateInfo(option.version, option.candidates, option.body, utils.now_str(),
+                          "；".join(x for x in (option.target_reason, self._rate_note()) if x),
+                          option.published_at)
 
-    def _check_via_releases(self, force: bool = False) -> UpdateInfo:
-        """查最近30个 release（优先非 prerelease，按 tag_regex 过滤），无匹配再退 tags 列表。"""
-        try:
-            releases, _ = self._api(f"/repos/{self.owner}/{self.repo}/releases?per_page=30",
-                                    "releases", force=force)
-        except net.HttpError as e:
-            if e.code != 404:
-                raise
-            releases = []
-        if isinstance(releases, list):
-            rel = next((r for r in releases
-                        if self._tag_ok(r.get("tag_name") or "") and not r.get("prerelease")),
-                       None)
-            if rel is None:
-                rel = next((r for r in releases
-                            if self._tag_ok(r.get("tag_name") or "")), None)
-            if rel is not None:
-                return self._from_release(rel)
-        return self._check_via_tags()
+    def _release_option(self, rel):
+        if not isinstance(rel, dict) or rel.get("draft"):
+            return None
+        tag = rel.get("tag_name") or ""
+        if not self._tag_ok(tag):
+            return None
+        ver = extract_version(tag)
+        if not ver:
+            return None
+        decision = classify_target("", release_tag=tag, target_profile=self.target_profile)
+        assets = rel.get("assets") or []
+        jars = [a for a in assets if isinstance(a, dict)
+                and (a.get("name") or "").lower().endswith(".jar")
+                and not re.search(r"(?i)(?:^|[-_.])(sources|deobf|javadoc|api|dev)(?:[-_.]|$)", a["name"])
+                and (not self.exclude_regex or not re.search(self.exclude_regex, a["name"], re.I))
+                and (not self.asset_regex or re.search(self.asset_regex, a["name"], re.I))]
+        cands = pick_assets(jars, tag, self.repo, self.asset_regex, self.exclude_regex,
+                            target_profile=self.target_profile)
+        states = [classify_target(a["name"], release_tag=tag,
+                                 target_profile=self.target_profile).status for a in jars]
+        if decision.status == "excluded" or (states and all(s == "excluded" for s in states)):
+            return None
+        status = "eligible" if cands else decision.status
+        if not cands and "unknown" in states:
+            status = "unknown"
+        reason = "" if cands else ("该 GTNH 发布无可用 jar，需手动处理" if status == "eligible"
+                                    else "游戏平台未确定，请确认此下载源用于 GTNH")
+        return VersionOption(ver, tag, rel.get("body"), rel.get("published_at"),
+                             cands or None, bool(rel.get("prerelease")), status, reason)
 
     def list_versions(self, *, force: bool = False) -> list:
-        """列出最近发布（最多30个），最新在前，含每个版本的资产候选。"""
-        try:
-            releases, _ = self._api(f"/repos/{self.owner}/{self.repo}/releases?per_page=30",
-                                    "releases", force=force)
-        except net.HttpError as e:
-            if e.code != 404:
-                raise
-            info = self._check_via_tags()
-            if not info.latest_version:
-                return []
-            return [VersionOption(info.latest_version, info.latest_version,
-                                  info.release_body, None, info.candidates)]
+        """同一份发布列表供检查和安装使用；平台筛选先于排序和去重。"""
         options = []
-        for rel in releases if isinstance(releases, list) else []:
-            tag = rel.get("tag_name") or ""
-            if not self._tag_ok(tag):
-                continue
-            ver = extract_version(tag)
-            if not ver:
-                continue
-            cands = pick_assets(rel.get("assets") or [], tag, self.repo,
-                                self.asset_regex, self.exclude_regex)
-            options.append(VersionOption(ver, tag, rel.get("body"),
-                                         rel.get("published_at"), cands or None,
-                                         bool(rel.get("prerelease"))))
-        # 按版本去重（保留最新发布的那条）
-        seen, uniq = set(), []
-        for o in options:
-            if o.version in seen:
-                continue
-            seen.add(o.version)
-            uniq.append(o)
-        if not uniq and self.tag_regex:
-            # 最近30个 release 无匹配 → 查 tags 列表兜底（可能有更老但匹配的版本）
+        for page in range(1, 6):
+            try:
+                releases, _ = self._api(
+                    f"/repos/{self.owner}/{self.repo}/releases?per_page=30&page={page}",
+                    f"releases_page_{page}", force=force)
+            except net.HttpError as e:
+                if e.code != 404 or page != 1:
+                    raise
+                releases = []
+            if not isinstance(releases, list) or any(not isinstance(r, dict) for r in releases):
+                raise SourceError("发布列表格式错误，无法确认最新 GTNH 发布")
+            options.extend(o for r in releases if (o := self._release_option(r)) is not None)
+            if len(releases) < 30:
+                break
+        else:
+            raise SourceError("发布搜索范围已达 150 条，请缩小下载源或手动选择；不能确认最新版本")
+        if not options and (self.tag_regex or not releases):
+            # 标签后备也必须走相同的平台筛选，不能绕过资产检查。
             info = self._check_via_tags()
-            if not info.latest_version:
-                return []
-            return [VersionOption(info.latest_version, info.latest_version,
-                                  info.release_body, None, info.candidates)]
-        return sort_version_options(uniq)
+            if info.latest_version:
+                status = "eligible" if info.candidates else "unknown"
+                options.append(VersionOption(info.latest_version, info.latest_version,
+                    info.release_body, info.published_at, info.candidates, False, status, info.note))
+        def date_key(option):
+            try:
+                dt = datetime.fromisoformat((option.published_at or "").replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    raise ValueError("missing timezone")
+                return dt.timestamp()
+            except (ValueError, TypeError, OverflowError, AttributeError):
+                return None
+        dates = [date_key(option) for option in options]
+        if any(date is None for date in dates):
+            # 部分缺失时不能仅把这些项排到最后：可能漏掉真正较新的发布。
+            for option in options:
+                option.target_reason = "；".join(x for x in (option.target_reason,
+                    "发布时间不完整，按上游顺序显示，无法确认时间顺序") if x)
+        else:
+            options = [option for _, option in sorted(zip(dates, options),
+                       key=lambda pair: pair[0], reverse=True)]
+        seen, unique = set(), []
+        for option in options:
+            if option.version not in seen:
+                seen.add(option.version)
+                unique.append(option)
+        return unique
 
 
 # ---------- 本地目录 ----------
@@ -326,9 +351,10 @@ class GitHubSource(Source):
 class LocalFolderSource(Source):
     source_type = "local_folder"
 
-    def __init__(self, path: str, name_regex: str = ""):
+    def __init__(self, path: str, name_regex: str = "", *, target_profile="unknown"):
         self.path = Path(path) if path else None
         self.name_regex = name_regex or ""
+        self.target_profile = target_profile
 
     def _scan_versions(self) -> dict:
         """扫描目录，返回 {版本: jar路径}。"""
@@ -343,6 +369,9 @@ class LocalFolderSource(Source):
             if not p.is_file() or not p.name.lower().endswith(".jar"):
                 continue
             if self.name_regex and not re.search(self.name_regex, p.name, re.I):
+                continue
+            decision = classify_target(p.name, target_profile=self.target_profile)
+            if decision.status == "excluded":
                 continue
             name, mc, ver = split_mc_mod_version(p.name[:-4])
             if not ver:
@@ -364,6 +393,9 @@ class LocalFolderSource(Source):
                               f"目录 {self.path} 中未发现可识别的jar")
         best = max_version(list(versions))
         p = versions[best]
+        decision = classify_target(p.name, target_profile=self.target_profile)
+        if decision.status != "eligible":
+            raise SourceError(decision.reason)
         cand = DownloadCandidate(str(p), p.name, p.stat().st_size)
         note = f"本地目录: {self.path}（共 {len(versions)} 个版本）"
         # 本地源"最新版发布时间"以最新 jar 文件时间为准
@@ -376,7 +408,9 @@ class LocalFolderSource(Source):
     def list_versions(self, *, force: bool = False) -> list:
         versions = self._scan_versions()
         options = [VersionOption(v, v, None, None,
-                                 [DownloadCandidate(str(p), p.name, p.stat().st_size)])
+                                 [DownloadCandidate(str(p), p.name, p.stat().st_size)],
+                                 target_status=classify_target(p.name, target_profile=self.target_profile).status,
+                                 target_reason=classify_target(p.name, target_profile=self.target_profile).reason)
                    for v, p in versions.items()]
         return sort_version_options(options)
 

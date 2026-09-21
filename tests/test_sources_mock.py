@@ -107,12 +107,13 @@ class TestGitHubSource(unittest.TestCase):
         cls.tmp = Path(tempfile.mkdtemp(prefix="gtnh_src_"))
         routes = {}
         cls.srv, cls.port = start_server(routes)
-        routes[("GET", "/repos/owner/FakeMod/releases/latest")] = (
-            release_body(cls.port), {"etag": '"e1"', "headers": {"X-RateLimit-Remaining": "59"}})
+        routes[("GET", "/repos/owner/FakeMod/releases")] = (
+            b"[" + release_body(cls.port) + b"]", {"etag": '"e1"', "headers": {"X-RateLimit-Remaining": "59"}})
 
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def test_check_latest(self):
@@ -169,6 +170,7 @@ class TestGitHubTagsFallback(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def test_tags_fallback(self):
@@ -211,6 +213,7 @@ class TestGitHubTagFilter(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _route_releases(self, releases):

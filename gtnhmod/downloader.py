@@ -2,6 +2,8 @@
 import os
 import shutil
 import zipfile
+import json
+import re
 from pathlib import Path
 
 from . import net, utils
@@ -69,6 +71,32 @@ def verify_jar(path: Path) -> None:
         raise VerifyError(f"jar 压缩结构损坏（可能下载不完整）: {path.name}（{e}）")
     if bad is not None:
         raise VerifyError(f"jar 内部文件损坏: {path.name}（{bad}）")
+
+
+def verify_target_jar(path: Path) -> None:
+    """仅检查明确的平台冲突，不执行 jar，不把元数据缺失当作冲突。"""
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+        if names.intersection({'fabric.mod.json', 'quilt.mod.json',
+                               'META-INF/neoforge.mods.toml', 'META-INF/mods.toml'}):
+            raise VerifyError('下载文件属于非 GTNH 加载器/现代 Forge，已阻止替换')
+        if 'mcmod.info' not in names:
+            return
+        info = z.getinfo('mcmod.info')
+        if info.file_size > 1024 * 1024:
+            raise VerifyError('jar 平台元数据过大，需手动确认')
+        try:
+            metadata = json.loads(z.read(info).decode('utf-8-sig'))
+        except (ValueError, UnicodeError) as e:
+            raise VerifyError('无法读取 jar 平台元数据，需手动确认') from e
+        if isinstance(metadata, dict):
+            metadata = metadata.get('modList', [metadata])
+        if not isinstance(metadata, list) or any(not isinstance(m, dict) for m in metadata):
+            raise VerifyError('jar 平台元数据结构异常，需手动确认')
+        for mod in metadata:
+            version = str(mod.get('mcversion') or '').strip()
+            if re.fullmatch(r'1\.\d+(?:\.\d+)?', version) and version != '1.7.10':
+                raise VerifyError(f'jar 要求 Minecraft {version}，已阻止替换')
 
 
 def _unique_backup_path(backup_dir: Path, file_name: str) -> Path:
@@ -145,6 +173,7 @@ def update_with_backup(cand, dest_dir: Path, backup_dir: Path, *,
     net.download(cand.url, tmp, progress_cb=progress_cb, proxy=proxy)
     try:
         verify_jar(tmp)
+        verify_target_jar(tmp)
     except VerifyError:
         try:
             tmp.unlink()

@@ -262,8 +262,8 @@ class TestNameCnAndAutoSides(unittest.TestCase):
                 U.Source.from_entry = orig
             by_ver = {o["version"]: o for o in opts}
             self.assertEqual(by_ver["0.7.16"]["compat"], "compatible")
-            self.assertTrue(by_ver["0.7.16"]["recommended"])
-            self.assertFalse(by_ver["0.8.0"]["recommended"])
+            self.assertFalse(by_ver["0.7.16"]["recommended"])
+            self.assertTrue(by_ver["0.8.0"]["recommended"])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -519,7 +519,7 @@ class TestDefaultPathCompat(unittest.TestCase):
                              "source": {"path": str(src), "name_regex": "^VerMod"}})
         return mid
 
-    def test_install_falls_back_to_compatible(self):
+    def test_install_uses_latest_despite_compat_note(self):
         tmp, cfg = self._setup()
         try:
             from gtnhmod.db import ModsDB
@@ -532,12 +532,12 @@ class TestDefaultPathCompat(unittest.TestCase):
             db.update_entry(mid, {"compat": self._RULE_10})
             r = updater.install_mod(cfg, db, inst, mid, "client")
             self.assertEqual(r["action"], "installed", r)
-            self.assertEqual(r["version"], "0.9.0")  # 1.0.0 不兼容 → 退回 0.9.0
+            self.assertEqual(r["version"], "1.0.0")  # 兼容说明仅提示
             self.assertIn("不兼容", r.get("note") or "")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_install_all_incompatible_skipped(self):
+    def test_install_all_compat_warnings_are_advisory(self):
         tmp, cfg = self._setup()
         try:
             from gtnhmod.db import ModsDB
@@ -548,13 +548,13 @@ class TestDefaultPathCompat(unittest.TestCase):
             mid = self._add_local_mod(db, src)
             db.update_entry(mid, {"compat": self._RULE_10})
             r = updater.install_mod(cfg, db, inst, mid, "client")
-            self.assertEqual(r["action"], "skipped_incompatible", r)
+            self.assertEqual(r["action"], "installed", r)
             self.assertIn("不兼容", r.get("note") or "")
-            self.assertEqual(list((tmp / "mods").glob("*.jar")), [])  # 未安装
+            self.assertEqual(len(list((tmp / "mods").glob("*.jar"))), 1)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_update_falls_back_to_compatible(self):
+    def test_update_uses_latest_despite_compat_note(self):
         tmp, cfg = self._setup()
         try:
             from gtnhmod.db import ModsDB
@@ -570,7 +570,7 @@ class TestDefaultPathCompat(unittest.TestCase):
             self.assertEqual(r["action"], "installed", r)
             r = updater.update_mod(cfg, db, inst, mid, "client")
             self.assertEqual(r["action"], "updated", r)
-            self.assertEqual(r["to"], "0.9.5")  # 跳过不兼容的 1.0.0
+            self.assertEqual(r["to"], "1.0.0")  # 不因兼容提示跳过
             self.assertIn("不兼容", r.get("note") or "")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)

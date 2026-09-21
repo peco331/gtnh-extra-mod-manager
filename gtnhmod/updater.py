@@ -124,20 +124,16 @@ def list_install_options(entry: dict, cfg, db=None, *, force: bool = False) -> t
             "compat": compat,
             "recommended": False,
             "latest": i == 0,
+            "target_status": o.target_status,
+            "target_reason": o.target_reason,
             "prerelease": o.prerelease,
             "published_at": o.published_at,
         })
     if not result:
         return [], None
-    # 推荐：第一个确认适配的；全部 unknown 时推荐最新；
-    # 唯一候选本身 incompatible 时不打"推荐"（避免"推荐"与"不适配"同框）
-    for r in result:
-        if r["compat"] == "compatible":
-            r["recommended"] = True
-            break
-    else:
-        if any(r["compat"] != "incompatible" for r in result):
-            result[0]["recommended"] = True
+    # 默认仅标记最新 GTNH 目标；兼容描述不影响选择。
+    if result[0].get("target_status") == "eligible":
+        result[0]["recommended"] = True
     return result, None
 
 
@@ -147,44 +143,16 @@ def get_available_versions(entry: dict, cfg, db=None, *, force: bool = False) ->
 
 
 def _pick_default_option(options: list, old_version: str | None = None) -> tuple:
-    """默认（不指定版本）路径选版：最新正式版优先，跳过不兼容版本。
-
-    旧逻辑用 releases/latest（不含 prerelease）；仓库只有 prerelease 时
-    退回全量候选（对齐旧 _check_via_releases 的兜底行为）。
-    同版本号的变体构建互为判等（如 v1.85 / v1.85-Multi / v1.85-Multiplayer）：
-    排序最高者若与当前已装版本判等，但同组里有严格更新的变体，优先选它。
-    返回 (选中option|None, 说明note)；None 表示所有候选均不兼容。
-    """
-    latest = options[0]
-    pool = [o for o in options if not o.get("prerelease")] or options
-    chosen = next((o for o in pool if o["compat"] != "incompatible"), None)
-    if chosen is None:
-        return None, ""
-    if old_version:
-        try:
-            # 同组判等的变体里取"最大"的（order_key 全序），而不是列表顺序第一个
-            group = [o for o in pool
-                     if o["compat"] != "incompatible"
-                     and compare(o["version"], chosen["version"]) == 0]
-            if group:
-                chosen = max(group, key=lambda o: order_key(o["version"]))
-        except VersionParseError:
-            pass
-    if chosen["version"] != latest["version"]:
-        try:
-            same_ver = compare(chosen["version"], latest["version"]) == 0
-        except VersionParseError:
-            same_ver = False
-        if latest["compat"] == "incompatible":
-            note = (f"最新版 {latest['version']} 按 wiki 兼容表可能与当前 GTNH 不兼容，"
-                    f"已选择标注适配的 {chosen['version']}")
-        elif same_ver:
-            note = f"同版本号存在多个构建，已选择新于当前版本的 {chosen['version']}"
-        else:
-            note = (f"最新版 {latest['version']} 为 prerelease，"
-                    f"已选择最新正式版 {chosen['version']}")
-        return chosen, note
-    return chosen, ""
+    """发布顺序已经由源确定；平台限制是硬约束，兼容描述仅提示。"""
+    if not options:
+        return None, "没有可用发布"
+    chosen = options[0]
+    if chosen.get("target_status", "unknown") != "eligible":
+        return None, chosen.get("target_reason") or "游戏平台需确认"
+    note = chosen.get("target_reason") or ""
+    if chosen.get("compat") == "incompatible":
+        note = "；".join(x for x in (note, "发布说明提示可能不兼容（仅供参考，仍使用最新 GTNH 发布）") if x)
+    return chosen, note
 
 
 def scan_sides(cfg, db) -> dict:
@@ -621,7 +589,7 @@ def version_status(current, latest) -> str:
 
 def install_mod(cfg, db, installed, mod_id: str, side: str, *,
                 version: str = None, progress_cb=None, prefetched=None) -> dict:
-    """安装 mod 到指定端别。version 指定时安装该版本（否则最新兼容版）。
+    """安装 mod 到指定端别。version 指定时安装该版本（否则最新 GTNH 发布，含测试版）。
 
     prefetched: (options, err) 预取的版本列表——壳取完列表后传入，
     避免内部再 force 查询一遍（省配额，消除所选版本被二次查询的 TOCTOU）。
@@ -650,6 +618,9 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
         if not opt:
             _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {name} 失败: 版本 {version} 不可用")
             return {"action": "error", "error": f"版本 {version} 不可用（列表可能已过期，请重试）"}
+        if opt.get("target_status", "unknown") != "eligible":
+            return {"action": "manual", "note": opt.get("target_reason") or "游戏平台需确认",
+                    "entry": entry, "warning": warn}
         if not opt["candidates"]:
             return {"action": "manual", "note": f"版本 {version} 无自动下载资产，需手动下载",
                     "entry": entry, "warning": warn}
@@ -672,11 +643,7 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
             return {"action": "manual", "note": note, "entry": entry, "warning": warn}
         chosen, note = _pick_default_option(options)
         if chosen is None:
-            msg = (f"现有版本按 wiki 兼容表可能与 GTNH {gtnh} 均不兼容，未自动安装"
-                   f"（最新版 {options[0]['version']}），可在版本列表中手动选择")
-            _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {name}: {msg}")
-            return {"action": "skipped_incompatible", "note": msg,
-                    "entry": entry, "warning": warn}
+            return {"action": "manual", "note": note, "entry": entry, "warning": warn}
         if not chosen["candidates"]:
             return {"action": "manual", "note": note or "该mod无自动下载渠道",
                     "entry": entry, "warning": warn}
@@ -729,6 +696,17 @@ def current_source_url(entry: dict) -> str:
     return ""
 
 
+def confirm_gtnh_source(db, mod_id: str, confirmed: bool) -> dict:
+    """仅显式确认的源接受缺少游戏平台标识的资产；不能覆盖明确冲突。"""
+    entry = db.get(mod_id)
+    if not entry or entry.get("source_type") not in ("github", "local_folder"):
+        return {"action": "error", "error": "此源不支持游戏平台确认"}
+    source = dict(entry.get("source") or {})
+    source["target_profile"] = "gtnh" if confirmed else "unknown"
+    db.update_entry(mod_id, {"source": source})
+    return {"action": "confirmed"}
+
+
 def bind_source(db, mod_id: str, url: str) -> dict:
     """把某mod的下载源绑定到指定链接（GitHub仓库/CurseForge页面）。
 
@@ -753,6 +731,10 @@ def bind_source(db, mod_id: str, url: str) -> dict:
         fields["source"] = {"owner": repo[0], "repo": repo[1], "asset_regex": "",
                             "exclude_regex": wikimod.DEFAULT_EXCLUDE_REGEX,
                             "tag_regex": tag_regex}
+        if old_src.get("owner") == repo[0] and old_src.get("repo") == repo[1]:
+            for key in ("target_profile", "asset_regex", "exclude_regex"):
+                if key in old_src:
+                    fields["source"][key] = old_src[key]
         fields["urls"]["github"] = url
     elif "curseforge.com" in url:
         fields["source_type"] = "curseforge"
@@ -814,7 +796,7 @@ def _cleanup_extras(cfg, db, side: str, mod_id: str, dest: Path,
 
 def update_mod(cfg, db, installed, mod_id: str, side: str, *,
                version: str = None, progress_cb=None, prefetched=None) -> dict:
-    """更新已安装 mod。version 指定时更新到该版本（否则最新兼容版）。
+    """更新已安装 mod。version 指定时更新到该版本（否则最新 GTNH 发布，含测试版）。
 
     prefetched: (options, err) 预取的版本列表——update_all 逐mod复用一次查询，
     双端不再各查一遍。返回结果 dict（action: updated/uptodate/manual/
@@ -847,6 +829,9 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
             _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id} 失败: 版本 {version} 不可用")
             return {"action": "error", "error": f"版本 {version} 不可用（列表可能已过期，请重试）",
                     "warning": warn}
+        if opt.get("target_status", "unknown") != "eligible":
+            return {"action": "manual", "note": opt.get("target_reason") or "游戏平台需确认",
+                    "entry": entry, "warning": warn}
         if not opt["candidates"]:
             return {"action": "manual", "note": f"版本 {version} 无自动下载资产，需手动下载",
                     "entry": entry, "warning": warn}
@@ -868,21 +853,16 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
         latest = options[0]
         chosen, note = _pick_default_option(options, old_version=old.version)
         if chosen is None:
-            msg = (f"现有版本按 wiki 兼容表可能与 GTNH {gtnh} 均不兼容，未自动更新"
-                   f"（最新版 {latest['version']}），可在版本列表中手动选择")
-            _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id}: {msg}")
-            return {"action": "skipped_incompatible", "note": msg, "entry": entry,
-                    "warning": warn}
+            return {"action": "manual", "note": note, "entry": entry, "warning": warn}
         if old.version:
             try:
-                if compare(chosen["version"], old.version) <= 0:
-                    if compare(latest["version"], old.version) > 0:
-                        # 有更新的版本但 wiki 兼容表未标注适配——如实说明，而不是"已是最新"
-                        note = (note or f"最新版 {latest['version']} 按 wiki 兼容表"
-                                f"可能与当前 GTNH {gtnh} 不兼容，保持 v{old.version}；"
-                                f"需要的话在版本选择器中手动安装")
+                comparison = compare(chosen["version"], old.version)
+                if comparison < 0:
+                    return {"action": "manual", "note": "最新发布的版本号低于已安装版本，需手动确认降级",
+                            "entry": entry, "warning": warn}
+                if comparison == 0:
                     return {"action": "uptodate", "version": old.version,
-                            "note": note or "已是最新版本"}
+                            "note": "已是最新 GTNH 发布"}
             except VersionParseError:
                 # 版本格式无法比较（如 dev-build 类 tag）：不盲目重装，交用户判断
                 return {"action": "manual",

@@ -170,6 +170,12 @@ class ModsDB:
                     fe["source"] = old.get("source") or fe.get("source")
                     fe["source_type"] = old.get("source_type") or fe.get("source_type")
                     fe["source_override"] = True
+                old_source, fresh_source = old.get("source") or {}, fe.get("source") or {}
+                if (old.get("source_type") == fe.get("source_type") == "github"
+                        and old_source.get("owner") == fresh_source.get("owner")
+                        and old_source.get("repo") == fresh_source.get("repo")
+                        and old_source.get("target_profile") == "gtnh"):
+                    fresh_source["target_profile"] = "gtnh"
                 # 用户配置的版本过滤（如 GitHub 只取带 GTNH 的版本）在刷新后保留
                 old_tag_regex = (old.get("source") or {}).get("tag_regex")
                 if old_tag_regex:
