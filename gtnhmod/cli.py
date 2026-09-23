@@ -18,6 +18,18 @@ from .installed import InstalledDB
 from .ui import ConsoleUI
 from . import cookies
 
+
+def _configure_redirected_output():
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            if not stream.isatty():
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def pad(s, width: int) -> str:
     """按显示宽度补齐（中文按2列宽）。"""
     w = sum(2 if ord(c) > 0x2E80 else 1 for c in str(s))
@@ -863,6 +875,7 @@ class CliApp:
 
 
 def run(argv=None):
+    _configure_redirected_output()
     argv = list(argv or sys.argv[1:])
     data_dir = utils.resolve_data_dir()
     app = CliApp(data_dir)

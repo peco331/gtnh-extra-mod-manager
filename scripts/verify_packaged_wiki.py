@@ -62,6 +62,8 @@ def main():
                 proc = subprocess.run(command, input=b"1\n11\n", env=env,
                                       capture_output=True, timeout=180 if live else 60)
                 assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+                output = proc.stdout.decode("utf-8")
+                assert "Wiki 在线完成" in output, "CLI did not report an online refresh"
                 saved = json.loads((root / "mods_db.json").read_text(encoding="utf-8"))
                 assert saved.get("meta", {}).get("wiki_fetched_at"), (
                     "online Wiki timestamp missing; refresh did not persist an online result")
