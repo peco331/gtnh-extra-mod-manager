@@ -5,6 +5,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -352,6 +353,32 @@ class TestEmptyFreshGuard(unittest.TestCase):
 
 
 class TestRefreshReleaseDates(unittest.TestCase):
+    def test_fetch_release_dates_is_concurrent_and_does_not_mutate_entries(self):
+        """后台抓取只返回结果；DB 写入必须留在调用线程。"""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from gtnhmod.config import Config
+        entries = [
+            {"id": f"mod{i}", "source_type": "github",
+             "source": {"owner": "o", "repo": f"r{i}"}}
+            for i in range(4)
+        ]
+
+        def slow_check(*args, **kwargs):
+            time.sleep(0.1)
+            return SimpleNamespace(published_at="2026-08-17T12:00:00Z")
+
+        with tempfile.TemporaryDirectory() as td, \
+             patch("gtnhmod.updater.Source.from_entry") as factory:
+            factory.return_value.check.side_effect = slow_check
+            started = time.perf_counter()
+            result = updater.fetch_release_dates(Config(Path(td) / "data"), entries)
+            elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 0.35)
+        self.assertEqual(result["dates"], {f"mod{i}": "2026-08-17T12:00:00Z" for i in range(4)})
+        self.assertEqual(result["failed"], 0)
+        self.assertFalse(any("release_date" in entry for entry in entries))
+
     def test_refreshes_github_dates_without_downloading(self):
         tmp = Path(tempfile.mkdtemp(prefix="gtnh_release_date_"))
         try:

@@ -80,27 +80,31 @@ class CliApp:
     def do_refresh_wiki(self):
         self.ui.info("正在抓取 wiki 数据（gtnh.huijiwiki.com）...")
         try:
-            mods, warnings = wikimod.fetch_and_parse(
+            result = wikimod.sync_wiki(
                 self.cfg,
+                self.db,
                 interactive=True,
                 progress_cb=lambda msg: self.ui.info(msg),
+                apply_merge=True,
             )
         except Exception as e:
             self.ui.error(f"抓取失败: {e}")
             return
-        for w in warnings:  # 合并前打印（缓存/限流提示是合并失败时的重要上下文）
+        for w in result.warnings:
             self.ui.warn(w)
-        try:
-            changes = self.db.merge_wiki(mods)
-        except Exception as e:
-            self.ui.error(f"合并失败: {e}")
+        self.ui.info(
+            f"Wiki 读取证据：发起 {result.request_count} 个网络请求；"
+            f"通道={result.channel}；响应={result.response_bytes} 字节；"
+            f"内容指纹={result.text_hash[:12]}")
+        if result.source != "online":
+            self.ui.info("Wiki 未在线同步：已保留本地目录和上次在线成功时间；"
+                         "本次读取的是最近缓存，没有写回目录")
             return
-        used_cache = any("使用最近一次成功抓取的数据" in w for w in warnings)
-        source_label = "缓存回退" if used_cache else "在线"
+        changes = result.changes or []
         wiki_count = len(self.db.wiki_mods())
         custom_count = len(self.db.custom_mods())
         delta = f"{len(changes)} 处变化" if changes else "内容没有变化"
-        self.ui.info(f"Wiki {source_label}完成：目录 {wiki_count} 个条目，{delta}；"
+        self.ui.info(f"Wiki 在线完成：目录 {wiki_count} 个条目，{delta}；"
                      f"自定义源 {custom_count} 个")
         for c in changes:
             self.ui.info(f"  - {c}")
@@ -427,6 +431,7 @@ class CliApp:
             return
         self.ui.info("正在检查更新（仅检查已安装且未锁定的mod）...")
         results = updater.check_updates(self.cfg, self.db, self.installed, sides=sides,
+                                        force=True,
                                         progress_cb=lambda s, m: print(
                                             f"  已检查 {SIDE_LABELS[s]}: {m}", end="\r"))
         print()
@@ -824,20 +829,28 @@ class CliApp:
             elif idx == 1:
                 self.ui.info("正在测试 wiki 抓取...")
                 try:
-                    mods, warnings = wikimod.fetch_and_parse(
+                    result = wikimod.sync_wiki(
                         self.cfg,
+                        self.db,
                         interactive=True,
                         progress_cb=lambda msg: self.ui.info(msg),
+                        apply_merge=False,
                     )
                 except Exception as e:
                     self.ui.error(f"抓取失败: {e}")
                     continue
-                for w in warnings:
+                for w in result.warnings:
                     self.ui.warn(w)
-                if mods:
-                    self.ui.ok(f"成功：解析到 {len(mods)} 个mod")
+                self.ui.info(
+                    f"读取证据：发起 {result.request_count} 个网络请求，"
+                    f"通道={result.channel}，响应 {result.response_bytes} 字节，"
+                    f"内容指纹={result.text_hash[:12]}")
+                if result.source != "online":
+                    self.ui.warn("只读取到缓存，没有完成在线同步")
+                elif result.mods:
+                    self.ui.ok(f"在线成功：解析到 {len(result.mods)} 个mod")
                 else:
-                    self.ui.warn("抓取到内容但解析不到mod（Cookie 可能已过期或页面结构变更）")
+                    self.ui.warn("在线抓取到内容但解析不到mod（页面结构可能已变更）")
             elif idx == 2:
                 self.cfg.set_wiki_cookie("", "")
                 self.ui.ok("已清除")
@@ -864,7 +877,7 @@ def run_check(app) -> int:
     """非交互：检查更新（供计划任务）。出错时返回非0，任务计划才能感知失败。"""
     print("GTNH mod 检查更新...")
     try:
-        results = updater.check_updates(app.cfg, app.db, app.installed)
+        results = updater.check_updates(app.cfg, app.db, app.installed, force=True)
     except Exception as e:
         print(f"检查失败: {e}")
         return 1

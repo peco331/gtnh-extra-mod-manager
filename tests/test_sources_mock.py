@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gtnhmod import net  # noqa: E402
 from gtnhmod.downloader import (  # noqa: E402
-    VerifyError, prune_backups, update_with_backup, verify_jar,
+    VerifyError, atomic_replace, prune_backups, update_with_backup, verify_jar,
 )
 from gtnhmod.sources import (  # noqa: E402
     DownloadCandidate, GitHubSource, LocalFolderSource, ManualSource,
@@ -360,6 +360,60 @@ class TestVerifyAndUpdate(unittest.TestCase):
             self.assertTrue(dest.exists())
             self.assertTrue(old.exists())  # 占用中未删成
             self.assertEqual(failed, ["SomeMod-1.7.10-1.0.0.jar"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_rejects_candidate_filename_outside_mods_directory(self):
+        """上游资产名不能让下载结果越出选定的 mods 目录。"""
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_name_"))
+        try:
+            source = tmp / "incoming.jar"
+            source.write_bytes(JAR_BYTES)
+            mods = tmp / "mods"
+            with self.assertRaises(VerifyError):
+                update_with_backup(DownloadCandidate(source.as_uri(), "../escape.jar"),
+                                   mods, tmp / "backup")
+            self.assertFalse((tmp / "escape.jar").exists())
+            self.assertFalse(mods.exists())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_rejects_download_with_github_size_mismatch_before_replace(self):
+        """完整 zip 但与 GitHub asset size 不一致时，旧 jar 必须保留。"""
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_size_"))
+        try:
+            mods = tmp / "mods"
+            mods.mkdir()
+            old = mods / "Demo-1.7.10-1.0.jar"
+            old.write_bytes(b"old-file")
+            source = tmp / "incoming.jar"
+            source.write_bytes(JAR_BYTES)
+            cand = DownloadCandidate(source.as_uri(), "Demo-1.7.10-2.0.jar",
+                                     len(JAR_BYTES) + 1)
+            with self.assertRaises(VerifyError):
+                update_with_backup(cand, mods, tmp / "backup", old_file=old)
+            self.assertEqual(old.read_bytes(), b"old-file")
+            self.assertFalse((mods / cand.file_name).exists())
+            self.assertFalse((tmp / "backup").exists())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestAtomicReplace(unittest.TestCase):
+    def test_cross_device_replace_failure_keeps_source_file(self):
+        """跨盘复制后最终替换失败时，不能删除唯一的下载源。"""
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_replace_"))
+        try:
+            src = tmp / "source.jar"
+            dst = tmp / "dest.jar"
+            src.write_bytes(JAR_BYTES)
+            from unittest.mock import patch
+            cross_device = OSError(17, "cross-device")
+            with patch("gtnhmod.downloader.os.replace", side_effect=[cross_device, PermissionError("busy")]):
+                with self.assertRaises(PermissionError):
+                    atomic_replace(src, dst)
+            self.assertTrue(src.exists())
+            self.assertEqual(src.read_bytes(), JAR_BYTES)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

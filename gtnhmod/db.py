@@ -149,7 +149,8 @@ class ModsDB:
             self.save()
 
     # ---- wiki 合并 ----
-    def merge_wiki(self, fresh: list) -> list:
+    def merge_wiki(self, fresh: list, *, update_fetched_at: bool = True,
+                   preserve_missing: bool = False) -> list:
         """合并新解析的 wiki 条目。保留用户数据（aliases），返回变更日志。"""
         if not fresh:
             # 空结果几乎必然是抓取被反爬拦截或页面结构变更；照常合并会把
@@ -209,7 +210,7 @@ class ModsDB:
         for m in self.mods:
             if m.get("group") in WIKI_GROUPS:
                 if m["id"] not in fresh_ids:
-                    if not m.get("wiki_removed"):
+                    if not preserve_missing and not m.get("wiki_removed"):
                         m["wiki_removed"] = True
                         changes.append(f'移除: {m.get("name_en") or m["id"]}（wiki已删除，本地保留记录）')
                     new_mods.append(m)
@@ -218,6 +219,11 @@ class ModsDB:
                     continue  # 与wiki条目同名的自定义源已在上面合并处理，避免重复id
                 new_mods.append(m)
         self.mods = new_mods
-        self.meta["wiki_fetched_at"] = utils.now_str()
+        # 缓存回退与离线导入不能伪装成已完成线上刷新。调用方只有在
+        # 经验证的实时 Wiki 内容到达时才推进这个时间。
+        if update_fetched_at:
+            self.meta["wiki_fetched_at"] = utils.now_str()
+        else:
+            self.meta["wiki_imported_at"] = utils.now_str()
         self.save(backup=True)
         return changes

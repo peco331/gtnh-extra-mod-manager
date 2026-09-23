@@ -35,5 +35,27 @@ class TestBrowserVerification(unittest.TestCase):
         result = wiki._cdp_eval(FakeWebSocket(), "1 + 1")
         self.assertEqual(result, {"status": 200})
 
+    def test_select_cdp_target_requires_the_requested_wiki_page(self):
+        tabs = [
+            {"type": "page", "url": "https://example.com/", "webSocketDebuggerUrl": "wrong"},
+            {"type": "page", "url": "https://gtnh.huijiwiki.com/wiki/%E5%8F%AF%E6%B7%BB%E5%8A%A0MOD",
+             "webSocketDebuggerUrl": "right"},
+        ]
+        target = wiki._select_wiki_cdp_target(
+            tabs, "https://gtnh.huijiwiki.com/wiki/%E5%8F%AF%E6%B7%BB%E5%8A%A0MOD")
+        self.assertEqual(target["webSocketDebuggerUrl"], "right")
+
+    def test_local_cdp_requests_bypass_system_proxy(self):
+        response = MagicMock()
+        response.read.return_value = b"[]"
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        with patch("urllib.request.build_opener") as build:
+            build.return_value.open.return_value = response
+            self.assertEqual(wiki._read_local_cdp_json(9222), [])
+        handlers = build.call_args.args
+        self.assertEqual(len(handlers), 1)
+        self.assertEqual(handlers[0].proxies, {})
+
 if __name__ == "__main__":
     unittest.main()

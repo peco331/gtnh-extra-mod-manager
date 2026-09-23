@@ -201,7 +201,7 @@ class TestFetchFallback(unittest.TestCase):
             text, cached = W.fetch_wikitext(self._cfg())
         self.assertEqual(text, "{{可添加MOD表格行|模组英文名=X}}")
 
-    def test_all_fail_uses_cache(self):
+    def test_all_fail_never_uses_cache(self):
         import gtnhmod.wiki as W
         cfg = self._cfg()
         cache = W._wiki_cache_file(cfg)
@@ -213,9 +213,10 @@ class TestFetchFallback(unittest.TestCase):
 
         with mock.patch.object(W.net, "http_get", side_effect=fake_get), \
                 mock.patch.object(W.time, "sleep"), self._no_curl():
-            text, cached = W.fetch_wikitext(cfg)
-        self.assertEqual(text, "cached {{可添加MOD表格行}} wikitext")
-        self.assertIn("限流", cached)
+            with self.assertRaises(W.net.HttpError):
+                W.fetch_wikitext(cfg)
+        self.assertEqual(cache.read_text(encoding="utf-8"),
+                         "cached {{可添加MOD表格行}} wikitext")
 
     def test_all_fail_rejects_invalid_cache(self):
         # 兜底缓存同样要过校验：截断/被污染的缓存解析出"子集"会
@@ -246,8 +247,8 @@ class TestFetchFallback(unittest.TestCase):
                 W.fetch_wikitext(self._cfg())
         self.assertIn("限流", str(ctx.exception))
 
-    def test_challenge_page_rejected_uses_cache(self):
-        """Cloudflare 验证页(HTTP 200)不得被当成成功：不覆盖缓存、回退旧缓存。"""
+    def test_challenge_page_rejected_without_cache_fallback(self):
+        """Cloudflare 验证页不得被当成成功，也不得回退旧缓存。"""
         import gtnhmod.wiki as W
         cfg = self._cfg()
         cache = W._wiki_cache_file(cfg)
@@ -262,9 +263,8 @@ class TestFetchFallback(unittest.TestCase):
 
         with mock.patch.object(W.net, "http_get", side_effect=fake_get), \
                 mock.patch.object(W.time, "sleep"), self._no_curl():
-            text, cached = W.fetch_wikitext(cfg)
-        self.assertEqual(text, good)
-        self.assertIn("限流", cached)
+            with self.assertRaises(W.net.HttpError):
+                W.fetch_wikitext(cfg)
         self.assertEqual(cache.read_text(encoding="utf-8"), good)  # 缓存未被验证页覆盖
 
     def test_challenge_page_no_cache_raises(self):
@@ -303,6 +303,24 @@ class TestFetchFallback(unittest.TestCase):
         self.assertIsNone(cached)
         browser.assert_called_once()
         self.assertEqual(cache.read_text(encoding="utf-8"), fresh)
+
+    def test_interactive_browser_failure_never_returns_old_cache(self):
+        import gtnhmod.wiki as W
+        cfg = self._cfg()
+        cache = W._wiki_cache_file(cfg)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        old = "cached {{可添加MOD表格行}} old"
+        cache.write_text(old, encoding="utf-8")
+
+        with mock.patch.object(W, "_fetch_impersonate_wikitext",
+                               side_effect=W.net.HttpError(403, "challenge")), \
+                mock.patch.object(W, "fetch_wikitext_via_browser",
+                                  side_effect=W.net.HttpError(-1, "browser closed")):
+            with self.assertRaises(W.net.HttpError) as raised:
+                W.fetch_wiki(cfg, interactive=True)
+
+        self.assertIn("browser closed", str(raised.exception))
+        self.assertEqual(cache.read_text(encoding="utf-8"), old)
 
     def test_interactive_http_403_switches_to_browser_without_retry_storm(self):
         """交互刷新遇到 403 时直接进入人工验证，不再串行等待多个通道。"""

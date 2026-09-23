@@ -4,11 +4,15 @@ import shutil
 import zipfile
 import json
 import re
+import tempfile
+import threading
 from pathlib import Path
 
 from . import net, utils
 
 ZIP_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+_cache_locks: dict[str, threading.Lock] = {}
+_cache_locks_guard = threading.Lock()
 
 
 class VerifyError(Exception):
@@ -41,7 +45,14 @@ def atomic_replace(src: Path, dst: Path) -> None:
             raise
         try:
             os.replace(part, dst)
-        finally:
+        except BaseException:
+            # 最终替换没成功时，src 仍是唯一完整副本，绝不能在 finally 中删掉。
+            try:
+                part.unlink()
+            except OSError:
+                pass
+            raise
+        else:
             try:
                 src.unlink()
             except OSError:
@@ -158,8 +169,51 @@ def prune_backups(backup_dir: Path, keep: int) -> int:
 
 def _cand_cache_path(cand, dl_cache_dir: Path) -> Path:
     import hashlib
-    url_hash = hashlib.sha256(cand.url.encode('utf-8')).hexdigest()[:12]
+    url_hash = hashlib.sha256(cand.url.encode('utf-8')).hexdigest()
     return dl_cache_dir / f"{url_hash}_{cand.file_name}"
+
+
+def _validate_candidate(cand) -> None:
+    """拒绝不安全的上游文件名；目标与缓存都只能落在应用选定目录中。"""
+    name = str(getattr(cand, "file_name", "") or "")
+    if (not name or name in (".", "..") or "\x00" in name or
+            "/" in name or "\\" in name or Path(name).name != name):
+        raise VerifyError("下载资产文件名不安全，已拒绝写入")
+    if not name.lower().endswith(".jar"):
+        raise VerifyError("下载资产不是 jar 文件，已拒绝写入")
+
+
+def _verify_candidate(path: Path, cand) -> None:
+    verify_jar(path)
+    verify_target_jar(path)
+    size = getattr(cand, "size", None)
+    if size is None:
+        return
+    try:
+        expected = int(size)
+    except (TypeError, ValueError):
+        raise VerifyError(f"下载资产大小字段无效: {path.name}")
+    if expected < 0 or path.stat().st_size != expected:
+        raise VerifyError(f"下载资产大小不符，已拒绝替换: {path.name}")
+
+
+def _unique_download_path(tmp_dir: Path, file_name: str) -> Path:
+    """每次下载使用独立临时名，避免并发任务覆盖同一个 .part。"""
+    handle = tempfile.NamedTemporaryFile(prefix=".dl_", suffix="_" + file_name,
+                                         dir=tmp_dir, delete=False)
+    handle.close()
+    path = Path(handle.name)
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return path
+
+
+def _lock_for_cache(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _cache_locks_guard:
+        return _cache_locks.setdefault(key, threading.Lock())
 
 
 def update_with_backup(cand, dest_dir: Path, backup_dir: Path, *,
@@ -172,44 +226,57 @@ def update_with_backup(cand, dest_dir: Path, backup_dir: Path, *,
     返回 (新文件 Path, 未能移除的旧文件名列表[文件被占用等])。
     """
     dest_dir = Path(dest_dir)
+    _validate_candidate(cand)
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp_dir = Path(dl_cache_dir) if dl_cache_dir else dest_dir
     tmp_dir.mkdir(parents=True, exist_ok=True)
     cached_jar = _cand_cache_path(cand, tmp_dir) if dl_cache_dir else None
 
-    # 若下载缓存中已有该资产且校验完好，直接复用（消除双端或重复下载）
-    reused = False
-    if cached_jar and cached_jar.exists():
-        try:
-            verify_jar(cached_jar)
-            verify_target_jar(cached_jar)
-            reused = True
-        except VerifyError:
+    # 同一缓存条目只允许一个下载者；所有写缓存前后都做完整性与平台校验。
+    if cached_jar:
+        with _lock_for_cache(cached_jar):
+            cached_ok = False
+            if cached_jar.exists():
+                try:
+                    _verify_candidate(cached_jar, cand)
+                    cached_ok = True
+                except VerifyError:
+                    try:
+                        cached_jar.unlink()
+                    except OSError:
+                        pass
+            if not cached_ok:
+                downloaded = _unique_download_path(tmp_dir, cand.file_name)
+                try:
+                    net.download(cand.url, downloaded, progress_cb=progress_cb, proxy=proxy)
+                    _verify_candidate(downloaded, cand)
+                    os.replace(downloaded, cached_jar)
+                except BaseException:
+                    try:
+                        downloaded.unlink()
+                    except OSError:
+                        pass
+                    raise
+            tmp = _unique_download_path(tmp_dir, cand.file_name)
             try:
-                cached_jar.unlink()
-            except OSError:
-                pass
-
-    if not reused:
-        tmp = tmp_dir / (".dl_" + cand.file_name)
-        net.download(cand.url, tmp, progress_cb=progress_cb, proxy=proxy)
+                shutil.copy2(cached_jar, tmp)
+            except BaseException:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                raise
+    else:
+        tmp = _unique_download_path(tmp_dir, cand.file_name)
         try:
-            verify_jar(tmp)
-            verify_target_jar(tmp)
-        except VerifyError:
+            net.download(cand.url, tmp, progress_cb=progress_cb, proxy=proxy)
+            _verify_candidate(tmp, cand)
+        except BaseException:
             try:
                 tmp.unlink()
             except OSError:
                 pass
             raise
-        if cached_jar:
-            try:
-                shutil.copy2(tmp, cached_jar)
-            except OSError:
-                pass
-    else:
-        tmp = tmp_dir / (".reused_" + cand.file_name)
-        shutil.copy2(cached_jar, tmp)
     target = dest_dir / cand.file_name
     # 备份旧文件（若与新文件同名，replace 前先留档）
     victims = []

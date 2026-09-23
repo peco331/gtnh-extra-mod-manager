@@ -39,6 +39,10 @@ def _opener_for(proxy_cfg):
             auth = f'{proxy_cfg["user"]}:{proxy_cfg.get("pass", "")}@'
         url = f"http://{auth}{host}:{port}"
         return urllib.request.build_opener(urllib.request.ProxyHandler({"http": url, "https": url}))
+    # None 表示跟随系统环境代理。空 host 是 GUI 保存的“直接连接”标记，
+    # 必须安装空 ProxyHandler 才会禁止 urllib 从环境变量读取代理。
+    if proxy_cfg is not None:
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
     return None
 
 
@@ -101,7 +105,8 @@ def http_get_cached(url: str, *, cache_file: Path, ttl_hours: float = 6.0,
               / cache_stale（限流或出错时退回的过期缓存）。
     force=True 跳过 TTL 新鲜度判断但保留 If-None-Match 条件请求
     （304 不计入 API 配额）——"强制刷新"用，不是完全绕过缓存。
-    404 抛 HttpError；403/429 时有缓存则退回缓存，无缓存抛出。
+    404 抛 HttpError；非强制请求在 403/429 时可退回缓存。
+    强制请求必须由上游确认，不能把旧版本当作最新结果。
     """
     cache = utils.load_json(cache_file, None)
     now = time.time()
@@ -117,7 +122,7 @@ def http_get_cached(url: str, *, cache_file: Path, ttl_hours: float = 6.0,
             cache["fetched_at"] = now
             utils.atomic_write_json(cache_file, cache)
             return cache.get("data"), "not_modified"
-        if e.code in (403, 429) and cache:
+        if e.code in (403, 429) and cache and not force:
             return cache.get("data"), "cache_stale"
         raise HttpError(e.code, f"{url} -> {e.reason}")
     try:

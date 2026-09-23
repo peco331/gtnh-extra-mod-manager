@@ -231,8 +231,9 @@ class GitHubSource(Source):
         return UpdateInfo(option.version, option.candidates, option.body, utils.now_str(),
                           option.target_reason, option.published_at)
 
-    def _check_via_tags(self) -> UpdateInfo:
-        tags_data, _ = self._api(f"/repos/{self.owner}/{self.repo}/tags", "tags")
+    def _check_via_tags(self, *, force: bool = False) -> UpdateInfo:
+        tags_data, _ = self._api(f"/repos/{self.owner}/{self.repo}/tags", "tags",
+                                 force=force)
         names = [t.get("name") for t in tags_data
                  if isinstance(t, dict) and t.get("name") and self._tag_ok(t.get("name"))]
         best = max_version(names)
@@ -244,7 +245,7 @@ class GitHubSource(Source):
             return UpdateInfo(None, None, None, utils.now_str(), note)
         try:
             rel, _ = self._api(f"/repos/{self.owner}/{self.repo}/releases/tags/{urllib.parse.quote(best)}",
-                               f"rel_{best}")
+                               f"rel_{best}", force=force)
         except net.HttpError as e:
             if e.code != 404:
                 raise
@@ -316,7 +317,7 @@ class GitHubSource(Source):
             raise SourceError("发布搜索范围已达 150 条，请缩小下载源或手动选择；不能确认最新版本")
         if not options and (self.tag_regex or not releases):
             # 标签后备也必须走相同的平台筛选，不能绕过资产检查。
-            info = self._check_via_tags()
+            info = self._check_via_tags(force=force)
             if info.latest_version:
                 status = "eligible" if info.candidates else "unknown"
                 options.append(VersionOption(info.latest_version, info.latest_version,

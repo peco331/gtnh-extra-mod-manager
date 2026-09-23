@@ -15,9 +15,11 @@ import os
 import re
 import time
 import urllib.parse
+import urllib.request
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import net
+from . import net, utils
 
 TEMPLATE_NAME = "可添加MOD表格行"
 TEMPLATE_NAMES = ("可添加MOD表格行", "额外项目")
@@ -43,6 +45,18 @@ GITHUB_REPO_RE = re.compile(r"github\.com/([^/\s]+)/([^/\s#?]+)")
 DEFAULT_EXCLUDE_REGEX = r"(sources|deobf|javadoc|api|[-.]dev(?:[-.]|$))"
 
 
+@dataclass(frozen=True)
+class WikiFetchResult:
+    """一次 Wiki 读取的原始正文与可审计网络证据。"""
+    text: str
+    cache_note: str | None
+    source: str
+    channel: str
+    response_bytes: int
+    request_count: int
+    text_hash: str
+
+
 def _referer(cfg) -> str:
     base = cfg.wiki_url.rsplit("/api.php", 1)[0]
     return f"{base}/wiki/{urllib.parse.quote(cfg.wiki_page)}"
@@ -50,7 +64,8 @@ def _referer(cfg) -> str:
 
 def _wiki_headers(cfg) -> dict:
     """请求头：Referer 必带；配置了反爬 Cookie 时带上（cf_clearance 与 UA/IP 绑定）。"""
-    headers = {"Referer": _referer(cfg)}
+    # 用户点击“刷新”时必须穿透中间缓存；Cookie/UA 仍只用于请求，绝不输出到日志。
+    headers = {"Referer": _referer(cfg), "Cache-Control": "no-cache", "Pragma": "no-cache"}
     cookie = getattr(cfg, "wiki_cookie", "") or ""
     ua = getattr(cfg, "wiki_ua", "") or ""
     if cookie:
@@ -58,6 +73,12 @@ def _wiki_headers(cfg) -> dict:
     if ua:
         headers["User-Agent"] = ua
     return headers
+
+
+def _refresh_url(url: str) -> str:
+    """为主动刷新附加无语义的 cache-buster，避免 CDN/代理重放旧正文。"""
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}gtnh_refresh={time.time_ns()}"
 
 
 def _cffi_proxies(cfg):
@@ -81,7 +102,7 @@ def _fetch_impersonate_wikitext(cfg) -> str:
     except ImportError:
         raise net.HttpError(-4, "未安装 curl_cffi")
     base = cfg.wiki_url.rsplit("/api.php", 1)[0]
-    url = f'{base}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw'
+    url = _refresh_url(f'{base}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw')
     try:
         kw = {"impersonate": "chrome", "timeout": 30, "headers": _wiki_headers(cfg)}
         proxies = _cffi_proxies(cfg)
@@ -110,8 +131,8 @@ def _fetch_impersonate_wikitext(cfg) -> str:
 
 def _fetch_api_wikitext(cfg) -> str:
     """通道1：MediaWiki API（action=parse，带 Referer，UA 必需否则 403）。"""
-    url = (f'{cfg.wiki_url}?action=parse&page={urllib.parse.quote(cfg.wiki_page)}'
-           f'&format=json&prop=wikitext')
+    url = _refresh_url(f'{cfg.wiki_url}?action=parse&page={urllib.parse.quote(cfg.wiki_page)}'
+                       f'&format=json&prop=wikitext')
     raw = net.http_get(url, retries=0, proxy=cfg.proxy, headers=_wiki_headers(cfg))
     return json.loads(raw)["parse"]["wikitext"]["*"]
 
@@ -119,7 +140,7 @@ def _fetch_api_wikitext(cfg) -> str:
 def _fetch_raw_wikitext(cfg) -> str:
     """通道2（备用）：action=raw 直接返回 wikitext，api.php 被临时限流时可用。"""
     base = cfg.wiki_url.rsplit("/api.php", 1)[0]
-    url = f'{base}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw'
+    url = _refresh_url(f'{base}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw')
     return net.http_get(url, retries=0, proxy=cfg.proxy, headers=_wiki_headers(cfg))
 
 
@@ -135,9 +156,10 @@ def _fetch_curl_wikitext(cfg) -> str:
     if not curl:
         raise net.HttpError(-1, "系统无 curl")
     base = cfg.wiki_url.rsplit("/api.php", 1)[0]
-    url = f'{base}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw'
+    url = _refresh_url(f'{base}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw')
     ua = getattr(cfg, "wiki_ua", "") or net.USER_AGENT
-    cmd = [curl, "-sS", "-f", "-m", "30", "-A", ua, "-e", _referer(cfg)]
+    cmd = [curl, "-sS", "-f", "-m", "30", "-A", ua, "-e", _referer(cfg),
+           "-H", "Cache-Control: no-cache", "-H", "Pragma: no-cache"]
     cookie = getattr(cfg, "wiki_cookie", "") or ""
     if cookie:
         cmd += ["-b", cookie]
@@ -186,24 +208,44 @@ def _validate_wikitext(text: str) -> None:
                                 "可能被反爬拦截或页面结构变更")
 
 
-def fetch_wikitext(cfg, *, interactive: bool = False, progress_cb=None):
-    """抓取页面 wikitext，返回 (wikitext, 缓存说明|None)。
+def fetch_wiki(cfg, *, interactive: bool = False, progress_cb=None) -> WikiFetchResult:
+    """抓取页面 wikitext，并保留实际读取通道和网络响应证据。
 
     依次尝试 curl_cffi(浏览器TLS指纹) → api.php → curl+action=raw →
-    urllib+action=raw；非交互调用在通道之间带退避并回退到缓存。
-    交互刷新检测到验证/拒绝时立即弹出隔离浏览器，浏览器失败后才回退缓存。
+    urllib+action=raw；非交互调用在通道之间带退避。
+    交互刷新检测到验证/拒绝时立即弹出隔离浏览器。全部失败则报错，
+    绝不把本地缓存冒充本次刷新结果。
     内容先经 _validate_wikitext 校验，未通过不写缓存、继续换下一通道。
     """
     fetchers = (_fetch_impersonate_wikitext, _fetch_api_wikitext,
                 _fetch_curl_wikitext, _fetch_raw_wikitext)
     errors = []
     code = None
-    for i, fn in enumerate(fetchers):
+    request_count = 0
+    channels = ("curl_cffi", "mediawiki_api", "system_curl", "urllib_raw")
+    for i, (channel, fn) in enumerate(zip(channels, fetchers)):
+        request_count += 1
+        if progress_cb:
+            progress_cb(f"Wiki 网络请求 {request_count}：{channel}")
         try:
             text = fn(cfg)
             _validate_wikitext(text)
             _write_wiki_cache(cfg, text)
-            return text, None
+            response_bytes = len(text.encode("utf-8"))
+            text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if progress_cb:
+                progress_cb(
+                    f"Wiki 网络响应：通道={channel}，{response_bytes} 字节，"
+                    f"内容指纹={text_hash[:12]}")
+            return WikiFetchResult(
+                text=text,
+                cache_note=None,
+                source="online",
+                channel=channel,
+                response_bytes=response_bytes,
+                request_count=request_count,
+                text_hash=text_hash,
+            )
         except net.HttpError as e:
             if e.code not in (403, 404, 429, -1, -3, -4):
                 raise
@@ -218,33 +260,44 @@ def fetch_wikitext(cfg, *, interactive: bool = False, progress_cb=None):
         if (not interactive and i < len(fetchers) - 1 and code != -4):
             time.sleep(4 + i * 4)  # 4s、8s、12s 退避（该站限流对连续请求敏感）
 
-    browser_error = None
     if interactive:
         try:
-            text = fetch_wikitext_via_browser(cfg, progress_cb=progress_cb)
+            def count_browser_request():
+                nonlocal request_count
+                request_count += 1
+
+            text = fetch_wikitext_via_browser(
+                cfg,
+                progress_cb=progress_cb,
+                request_counter=count_browser_request,
+            )
             _validate_wikitext(text)
             _write_wiki_cache(cfg, text)
-            return text, None
+            response_bytes = len(text.encode("utf-8"))
+            text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if progress_cb:
+                progress_cb(
+                    f"Wiki 网络响应：通道=browser，{response_bytes} 字节，"
+                    f"内容指纹={text_hash[:12]}")
+            return WikiFetchResult(
+                text=text,
+                cache_note=None,
+                source="online",
+                channel="browser",
+                response_bytes=response_bytes,
+                request_count=request_count,
+                text_hash=text_hash,
+            )
         except Exception as be:
-            browser_error = str(be)
-            errors.append(f"浏览器验证失败: {browser_error}")
-
-    # 全部失败（或浏览器验证失败）→ 最近一次成功抓取的本地缓存兜底，
-    # 同样要过校验：截断/被污染的缓存解析出“子集”会绕过空防护，
-    # 重演误删事故。交互模式必须在浏览器之后才走到这里。
-    cache_file = _wiki_cache_file(cfg)
-    if cache_file.exists():
-        try:
-            cached = cache_file.read_text(encoding="utf-8")
-            _validate_wikitext(cached)
-            note = "wiki 请求被临时限流或需要验证，已使用最近一次成功抓取的数据"
-            if browser_error:
-                note += f"（{browser_error}）"
-            return cached, note
-        except (OSError, net.HttpError):
-            pass
+            errors.append(f"浏览器验证失败: {be}")
 
     raise net.HttpError(403, f"wiki 抓取失败（可能被临时限流，请稍后重试）: {'; '.join(errors)}")
+
+
+def fetch_wikitext(cfg, *, interactive: bool = False, progress_cb=None):
+    """兼容旧调用，返回 ``(wikitext, 缓存说明|None)``。"""
+    result = fetch_wiki(cfg, interactive=interactive, progress_cb=progress_cb)
+    return result.text, result.cache_note
 
 
 def _split_sections(text: str, level: int = 2):
@@ -683,13 +736,152 @@ def parse_wikitext(text: str):
     return mods, warnings
 
 
+@dataclass(frozen=True)
+class WikiSyncResult:
+    """一次 Wiki 读取的可审计结果。
+
+    ``source`` 仅可为 ``online``、``cache`` 或 ``import``。缓存结果可以
+    给界面展示，但绝不能被当作一次成功同步而写回目录数据库。
+    """
+    mods: list
+    warnings: list
+    source: str
+    attempted_at: str
+    success_at: str | None
+    text_hash: str
+    channel: str = ""
+    response_bytes: int = 0
+    request_count: int = 0
+    changes: list | None = None
+    applied: bool = False
+
+
+def wiki_result_from_text(text: str, *, source: str, attempted_at: str | None = None,
+                          success_at: str | None = None, warnings=None,
+                          channel: str | None = None,
+                          response_bytes: int | None = None,
+                          request_count: int = 0) -> WikiSyncResult:
+    """把已验证的 Wiki 原文转成带来源标记的结果。
+
+    离线导入调用者应传 ``source='import'``，不能伪造为在线刷新。
+    """
+    if source not in {"online", "cache", "import"}:
+        raise ValueError(f"未知 Wiki 数据来源: {source}")
+    _validate_wikitext(text)
+    mods, parse_warnings = parse_wikitext(text)
+    result_warnings = list(warnings or []) + parse_warnings
+    attempted = attempted_at or utils.now_str()
+    # 只有确实来自网络的验证通过内容才有 online success_at。
+    online_success = success_at if source == "online" else None
+    if source == "online" and online_success is None:
+        online_success = attempted
+    return WikiSyncResult(
+        mods=mods,
+        warnings=result_warnings,
+        source=source,
+        attempted_at=attempted,
+        success_at=online_success,
+        text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        channel=channel or source,
+        response_bytes=(len(text.encode("utf-8"))
+                        if response_bytes is None else response_bytes),
+        request_count=request_count,
+    )
+
+
+def sync_wiki(cfg, db, *, interactive: bool = False, progress_cb=None,
+              apply_merge: bool = True) -> WikiSyncResult:
+    """读取 Wiki；仅在线成功结果可合并到数据库。
+
+    GUI 可传 ``apply_merge=False`` 后在主线程调用 :func:`apply_wiki_result`，
+    避免后台线程与界面读取同一个 ModsDB。CLI 可保持默认的直接合并。
+    """
+    attempted_at = utils.now_str()
+    fetched = fetch_wiki(cfg, interactive=interactive, progress_cb=progress_cb)
+    result = wiki_result_from_text(
+        fetched.text,
+        source=fetched.source,
+        attempted_at=attempted_at,
+        success_at=utils.now_str() if fetched.source == "online" else None,
+        warnings=[fetched.cache_note] if fetched.cache_note else [],
+        channel=fetched.channel,
+        response_bytes=fetched.response_bytes,
+        request_count=fetched.request_count,
+    )
+    return apply_wiki_result(cfg, db, result) if apply_merge else result
+
+
+def apply_wiki_result(cfg, db, result: WikiSyncResult) -> WikiSyncResult:
+    """在调用者线程合并可信结果，拒绝缓存并保护异常缩减的目录。"""
+    if result.applied:
+        return result
+    if result.source == "cache":
+        return result
+    if result.source not in {"online", "import"}:
+        raise ValueError(f"无法合并 Wiki 来源: {result.source}")
+    if not result.mods:
+        raise ValueError("wiki 解析结果为空，已取消合并（本地数据未改动）")
+
+    # 页面结构改变或抓到局部页面时，不能把大量旧条目标记为 removed。
+    # 新条目和已有条目仍可更新，缺失条目暂时保留为在线状态。
+    old_mods = db.wiki_mods() if hasattr(db, "wiki_mods") else []
+    preserve_missing = len(old_mods) >= 4 and len(result.mods) * 2 < len(old_mods)
+    warnings = list(result.warnings)
+    if preserve_missing:
+        warnings.append(
+            f"Wiki 仅解析到 {len(result.mods)} 个条目，现有目录有 {len(old_mods)} 个；"
+            "本次更新已收录内容，但未把缺失条目标记为删除")
+
+    merge_kwargs = {"update_fetched_at": result.source == "online"}
+    if preserve_missing:
+        merge_kwargs["preserve_missing"] = True
+    changes = db.merge_wiki(result.mods, **merge_kwargs)
+    return replace(result, warnings=warnings, changes=list(changes), applied=True)
+
+
+def import_wiki_text(cfg, db, text: str) -> WikiSyncResult:
+    """导入离线 Wiki 原文；明确标记为 import，不冒充在线刷新。"""
+    result = wiki_result_from_text(text, source="import")
+    applied = apply_wiki_result(cfg, db, result)
+    _write_wiki_cache(cfg, text)
+    return applied
+
+
 def fetch_and_parse(cfg, *, interactive: bool = False, progress_cb=None):
-    """抓取并解析，返回 (mods, warnings)。网络失败但命中缓存时 warnings 说明。"""
-    text, cached = fetch_wikitext(cfg, interactive=interactive, progress_cb=progress_cb)
-    mods, warnings = parse_wikitext(text)
-    if cached:
-        warnings.append(cached)
-    return mods, warnings
+    """兼容旧调用：抓取并解析，返回 ``(mods, warnings)``，不写数据库。"""
+    fetched = fetch_wiki(cfg, interactive=interactive, progress_cb=progress_cb)
+    result = wiki_result_from_text(
+        fetched.text,
+        source=fetched.source,
+        warnings=[fetched.cache_note] if fetched.cache_note else [],
+        channel=fetched.channel,
+        response_bytes=fetched.response_bytes,
+        request_count=fetched.request_count,
+    )
+    return result.mods, result.warnings
+
+
+def _read_local_cdp_json(port: int) -> list:
+    """读取本机 CDP target 列表；显式绕过系统代理，避免 localhost 被转发。"""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(f"http://127.0.0.1:{port}/json", timeout=2) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _select_wiki_cdp_target(tabs: list, page_url: str) -> dict | None:
+    """只选择目标 Wiki 页面，避免误连 Edge 内部页或用户打开的其他页面。"""
+    wanted = urllib.parse.urlsplit(page_url)
+    wanted_path = urllib.parse.unquote(wanted.path).replace("_", " ").rstrip("/")
+
+    def matches(tab: dict) -> bool:
+        if tab.get("type") != "page" or not tab.get("webSocketDebuggerUrl"):
+            return False
+        current = urllib.parse.urlsplit(tab.get("url", ""))
+        current_path = urllib.parse.unquote(current.path).replace("_", " ").rstrip("/")
+        return (current.hostname or "").lower() == (wanted.hostname or "").lower() \
+            and current_path == wanted_path
+
+    return next((tab for tab in tabs if matches(tab)), None)
 
 
 def _find_system_browser() -> Path | None:
@@ -740,10 +932,10 @@ def _cdp_eval(ws, expression: str, timeout_seconds: float = 5.0):
     raise TimeoutError("等待浏览器脚本响应超时")
 
 
-def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None) -> str:
+def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None,
+                               request_counter=None) -> str:
     """打开系统浏览器窗口供用户完成一次人机验证，并自动读取验证通过后的 wikitext。"""
     import subprocess
-    import urllib.request
     try:
         import websocket
     except ImportError as e:
@@ -777,6 +969,7 @@ def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None
         progress_cb("已弹出网页窗口，请在浏览器中完成人机验证...")
 
     proc = subprocess.Popen(cmd)
+    ws = None
     try:
         # 等待 CDP 调试端口就绪
         ws_url = None
@@ -784,8 +977,8 @@ def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None
         while time.time() - t0 < 15:
             time.sleep(0.5)
             try:
-                tabs = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=2).read().decode())
-                target = next((t for t in tabs if "huijiwiki" in t.get("url", "") or t.get("type") == "page"), None)
+                tabs = _read_local_cdp_json(port)
+                target = _select_wiki_cdp_target(tabs, page_url)
                 if target and target.get("webSocketDebuggerUrl"):
                     ws_url = target["webSocketDebuggerUrl"]
                     break
@@ -795,11 +988,12 @@ def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None
             raise net.HttpError(-1, "未能连接到浏览器调试会话")
 
         ws = websocket.create_connection(ws_url, timeout=5)
-        raw_url = f"/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw"
+        base_url = cfg.wiki_url.rsplit("/api.php", 1)[0]
+        raw_url = f"{base_url}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw"
         js = f"""
         (async () => {{
             try {{
-                const resp = await fetch({json.dumps(raw_url)});
+                const resp = await fetch({json.dumps(raw_url)}, {{cache: "no-store"}});
                 if (resp.status === 200) {{
                     const text = await resp.text();
                     return {{status: 200, text: text}};
@@ -818,6 +1012,8 @@ def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None
             if proc.poll() is not None:
                 raise net.HttpError(-1, "浏览器验证窗口已关闭")
             try:
+                if request_counter:
+                    request_counter()
                 val = _cdp_eval(ws, js)
                 if val.get("status") == 200:
                     text = val.get("text", "")
@@ -832,14 +1028,16 @@ def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None
                 raise net.HttpError(-1, f"浏览器调试会话断开: {e}")
             except OSError:
                 pass
-        raise net.HttpError(-1, "等待浏览器人机验证超时（120秒）")
+        raise net.HttpError(-1, f"等待浏览器人机验证超时（{timeout_seconds}秒）")
     finally:
         try:
-            ws.close()
+            if ws is not None:
+                ws.close()
         except Exception:
             pass
         try:
-            proc.terminate()
-            proc.wait(timeout=3)
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=3)
         except Exception:
             pass

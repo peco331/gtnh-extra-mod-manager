@@ -56,6 +56,28 @@ class TestUpdatePlan(unittest.TestCase):
             self.assertEqual(item["action"], "update")
             self.assertIn("prefetched", item)
 
+    def test_one_query_exception_keeps_other_plan_items(self):
+        first = self.db.add_custom({"name_en": "Broken", "side": "client",
+                                    "source_type": "manual"})
+        second = self.db.add_custom({"name_en": "Working", "side": "client",
+                                     "source_type": "manual"})
+        registry = {"client": {
+            first: {"enabled": True, "locked": False, "name_en": "Broken", "version": "1.0"},
+            second: {"enabled": True, "locked": False, "name_en": "Working", "version": "1.0"},
+        }, "server": {}}
+        def lookup(entry, *_args, **_kwargs):
+            if entry["id"] == first:
+                raise RuntimeError("source timeout")
+            return [], None
+
+        with patch.object(updater, "list_install_options", side_effect=lookup):
+            plan = updater.build_update_plan(self.cfg, self.db, self.installed,
+                                             registry=registry)
+
+        self.assertEqual([(item["mod_id"], item["action"]) for item in plan],
+                         [(first, "error"), (second, "manual")])
+        self.assertIn("source timeout", plan[0]["note"])
+
 
 if __name__ == "__main__":
     unittest.main()

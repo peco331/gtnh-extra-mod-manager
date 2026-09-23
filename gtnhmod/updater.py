@@ -455,30 +455,60 @@ def _side_warning(entry: dict, side: str) -> str:
 
 # ---------- 检查更新 ----------
 
-def refresh_release_dates(cfg, db, *, progress_cb=None) -> dict:
-    """刷新所有 GitHub 源的最新版发布时间，供可添加列表排序。
+def fetch_release_dates(cfg, entries, *, progress_cb=None) -> dict:
+    """并发获取 GitHub 发布时间，只返回结果，绝不在工作线程写 DB。
 
-    force=False，优先使用 GitHub 缓存，只有缓存过期/不存在时才请求网络。
-    返回 {updated, failed} 数量。
+    调用者在自己的线程调用 ``apply_release_dates``，避免 GUI 后台任务与主线程
+    同时读改写数据库。返回 ``{dates, errors, failed, checked}``。
     """
-    updated = failed = 0
-    for entry in db.all():
-        if entry.get("source_type") != "github":
-            continue
+    import concurrent.futures
+
+    targets = [entry for entry in entries if entry.get("source_type") == "github"]
+    dates, errors = {}, {}
+    if not targets:
+        return {"dates": dates, "errors": errors, "failed": 0, "checked": 0}
+
+    def _fetch(entry):
+        mod_id = entry.get("id")
         try:
             info = Source.from_entry(entry, cfg).check(None, force=False)
-            if info.published_at and entry.get("release_date") != info.published_at:
-                entry["release_date"] = info.published_at
-                updated += 1
+            return mod_id, info.published_at, None
+        except Exception as e:
+            return mod_id, None, str(e)
+
+    max_workers = min(4, len(targets))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_fetch, entry) for entry in targets]
+        for future in concurrent.futures.as_completed(futures):
+            mod_id, published_at, error = future.result()
+            if error:
+                errors[mod_id] = error
+            elif published_at:
+                dates[mod_id] = published_at
             if progress_cb:
-                progress_cb(entry.get("id"), info.published_at)
-        except Exception:
-            failed += 1
-            if progress_cb:
-                progress_cb(entry.get("id"), None)
+                progress_cb(mod_id, published_at if not error else None)
+    return {"dates": dates, "errors": errors, "failed": len(errors),
+            "checked": len(targets)}
+
+
+def apply_release_dates(db, dates: dict) -> int:
+    """在调用线程将已获取的发布时间应用到 DB，返回实际变更数。"""
+    updated = 0
+    for mod_id, published_at in (dates or {}).items():
+        entry = db.get(mod_id)
+        if entry and published_at and entry.get("release_date") != published_at:
+            entry["release_date"] = published_at
+            updated += 1
     if updated:
         db.save()
-    return {"updated": updated, "failed": failed}
+    return updated
+
+
+def refresh_release_dates(cfg, db, *, progress_cb=None) -> dict:
+    """兼容旧调用：抓取后在调用线程应用发布时间。"""
+    result = fetch_release_dates(cfg, db.all(), progress_cb=progress_cb)
+    return {"updated": apply_release_dates(db, result["dates"]),
+            "failed": result["failed"]}
 
 
 def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
@@ -1256,7 +1286,10 @@ def build_update_plan(cfg, db, installed, *, target_mod_ids=None, sides=SIDES,
     def _query_item(item):
         mod_id, name, mod_sides, cur_ver = item
         entry = db.get(mod_id) or {}
-        options, err = list_install_options(entry, cfg, db, force=True)
+        try:
+            options, err = list_install_options(entry, cfg, db, force=True)
+        except Exception as exc:
+            options, err = [], str(exc)
         return mod_id, name, mod_sides, cur_ver, options, err
 
     max_workers = min(4, max(1, len(order)))

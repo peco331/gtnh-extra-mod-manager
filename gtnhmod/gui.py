@@ -11,6 +11,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
@@ -659,15 +660,15 @@ class GuiApp:
                 return
             try:
                 data = Path(p).read_text(encoding="utf-8", errors="replace")
-                from gtnhmod.wiki import _validate_wikitext, _wiki_cache_file
-                _validate_wikitext(data)
-                cache_file = _wiki_cache_file(self.cfg)
-                cache_file.parent.mkdir(parents=True, exist_ok=True)
-                cache_file.write_text(data, encoding="utf-8")
-                messagebox.showinfo("导入成功", "已成功导入 Wiki 离线数据！请回到「可添加MOD」页面点击刷新。")
-                self._log("已手动导入 Wiki 离线数据: " + Path(p).name)
+                result = wikimod.import_wiki_text(self.cfg, self.db, data)
+                self.refresh_addable()
+                messagebox.showinfo(
+                    "导入成功",
+                    f"已导入 Wiki 离线数据：{len(result.mods)} 个条目，"
+                    f"{len(result.changes or [])} 处变化。")
+                self._log(f"已导入 Wiki 离线数据: {Path(p).name}（来源=import）")
             except Exception as e:
-                messagebox.showerror("导入失败", f"文件内容未通过 Wiki 结构校验: {e}")
+                messagebox.showerror("导入失败", str(e))
 
         wbtns = ttk.Frame(wf)
         wbtns.grid(row=2, column=0, columnspan=2, sticky="w", padx=2, pady=4)
@@ -997,7 +998,7 @@ class GuiApp:
         progress_cb = lambda s, m: self.queue.put(("log", f"  已检查 {SIDE_LABELS[s]}: {m}"))
         self._run_async(
             lambda: updater.check_updates(self.cfg, self.db, self.installed,
-                                          progress_cb=progress_cb),
+                                          progress_cb=progress_cb, force=True),
             on_done=self._on_check_done)
 
     def _on_check_done(self, results):
@@ -1037,6 +1038,7 @@ class GuiApp:
         if not plan:
             messagebox.showinfo("提示", "没有需要更新的 mod（全部已是最新或已锁定）。")
             return
+        checked_at = time.monotonic()
 
         top = self._dialog("确认更新计划", "760x450")
         f = ttk.Frame(top)
@@ -1073,10 +1075,11 @@ class GuiApp:
 
         def execute():
             top.destroy()
-            on_confirm(plan)
+            on_confirm(plan, checked_at=checked_at)
 
-        if updatable:
-            ttk.Button(btns, text=f"立即执行更新 ({len(updatable)} 个)", command=execute).pack(side="left")
+        label = (f"立即执行更新 ({len(updatable)} 个)" if updatable
+                 else "查看检查结果")
+        ttk.Button(btns, text=label, command=execute).pack(side="left")
         ttk.Button(btns, text="取消", command=top.destroy).pack(side="right")
 
     def update_selected(self):
@@ -1204,18 +1207,44 @@ class GuiApp:
 
         self._run_async(job, on_done=on_plan_ready)
 
-    def _execute_update_plan(self, plan: list):
+    def _execute_update_plan(self, plan: list, *, checked_at=None):
         """一次确认后执行计划中的所有更新项，消除二次联网与多余弹窗。"""
-        updatable = [p for p in plan if p["action"] == "update"]
-        if not updatable:
+        if checked_at is not None and time.monotonic() - checked_at >= 300:
+            self._set_busy(True)
+            self._log("更新计划已超过 5 分钟，正在重新检查并等待再次确认...")
+
+            def recheck():
+                registry = updater.build_registry(self.cfg, self.db, self.installed)
+                return updater.build_update_plan(
+                    self.cfg, self.db, self.installed,
+                    target_mod_ids={item["mod_id"] for item in plan},
+                    registry=registry,
+                )
+
+            def on_rechecked(new_plan):
+                self._set_busy(False)
+                if new_plan is not None:
+                    self._show_update_plan_dialog(new_plan, self._execute_update_plan)
+
+            self._run_async(recheck, on_done=on_rechecked)
             return
+        updatable = [p for p in plan if p["action"] == "update"]
         self._set_busy(True)
         self._log(f"开始执行更新计划（共 {len(updatable)} 个 mod）...")
 
         def job():
             results = []
-            for i, p in enumerate(updatable, 1):
-                self._push_progress(i, len(updatable), f"更新中 {i}/{len(updatable)}: {p['name']}")
+            update_index = 0
+            for p in plan:
+                if p["action"] != "update":
+                    for side in p["sides"]:
+                        results.append({"action": p["action"], "side": side,
+                                        "mod_id": p["mod_id"], "name": p["name"],
+                                        "note": p.get("note"), "error": p.get("note")})
+                    continue
+                update_index += 1
+                self._push_progress(update_index, len(updatable),
+                                    f"更新中 {update_index}/{len(updatable)}: {p['name']}")
                 for side in p["sides"]:
                     try:
                         r = updater.update_mod(
@@ -1254,7 +1283,7 @@ class GuiApp:
                     self._log(f"  [端别提示] {r['warning']}")
             elif r["action"] == "uptodate":
                 self._log(f"{label} {name}: {r.get('note') or '已是最新'}")
-            elif r["action"] == "manual":
+            elif r["action"] in ("manual", "manual_downgrade"):
                 self._log(f"{label} {name}: {r.get('note') or '需手动下载'}")
                 if not self.busy:
                     self._offer_open_download_page(r.get("entry"))
@@ -1274,14 +1303,16 @@ class GuiApp:
 
     def _update_summary_dialog(self, results):
         """批量更新完成后的摘要窗：成功/失败/需手动分组，可看完整更新日志。"""
-        groups = {"updated": [], "error": [], "manual": [], "other": []}
+        groups = {"updated": [], "error": [], "manual": [], "uptodate": []}
         for r in results:
             name = f"{SIDE_LABELS.get(r.get('side', '?'), '?')} {r.get('name') or r.get('mod_id', '?')}"
             if r["action"] == "updated":
                 groups["updated"].append((name, r))
-            elif r["action"] in ("manual", "skipped_incompatible"):
+            elif r["action"] in ("manual", "manual_downgrade", "skipped_incompatible"):
                 groups["manual"].append((name + f"：{r.get('note') or '需手动'}", r))
-            elif r["action"] != "uptodate":
+            elif r["action"] == "uptodate":
+                groups["uptodate"].append((name, r))
+            else:
                 groups["error"].append((name + f"：{r.get('error') or '失败'}", r))
         top = tk.Toplevel(self.root)
         top.bind("<Escape>", lambda _e: top.destroy())
@@ -1307,11 +1338,13 @@ class GuiApp:
             t.insert("end", nl)
         t.tag_configure("h", font=(FONT[0], FONT[1], "bold"))
         section("已更新", groups["updated"], with_body=True)
+        section("已是最新", groups["uptodate"])
         section("需手动处理", groups["manual"])
         section("失败", groups["error"])
         n_upd = len(groups["updated"])
         n_fail = len(groups["error"]) + len(groups["manual"])
-        t.insert("end", f"合计：成功 {n_upd}，需手动 {len(groups['manual'])}，失败 {len(groups['error'])}")
+        t.insert("end", f"合计：成功 {n_upd}，已最新 {len(groups['uptodate'])}，"
+                        f"需手动 {len(groups['manual'])}，失败 {len(groups['error'])}")
         t.configure(state="disabled")
         btns = ttk.Frame(top)
         btns.pack(fill="x", padx=8, pady=(0, 8))
@@ -1523,7 +1556,7 @@ class GuiApp:
         self._log(f"检查更新: {m['name_en']}...")
         self._run_async(
             lambda: updater.check_updates(self.cfg, self.db, self.installed,
-                                          only={m["mod_id"]}),
+                                          only={m["mod_id"]}, force=True),
             on_done=self._on_check_done)
 
     def _on_inst_double(self, event):
@@ -1926,9 +1959,9 @@ class GuiApp:
         top.transient(self.root)
         top.grab_set()
 
-    def _batch_install(self):
+    def _batch_install(self, entries=None):
         """批量安装选中的mod（按各自端别声明自动选择端别；逐个进行，失败不中断）。"""
-        sel = self._selected_addable()
+        sel = list(entries) if entries is not None else self._selected_addable()
         if not sel:
             messagebox.showinfo("提示", "请先选中mod")
             return
@@ -1949,33 +1982,18 @@ class GuiApp:
                 self._push_progress(done, len(sel),
                                     f"批量安装 {done}/{len(sel)}: {e['name_en'] or e['id']}")
                 for side in sides:
-                    r = updater.install_mod(self.cfg, self.db, self.installed, e["id"], side)
+                    try:
+                        r = updater.install_mod(self.cfg, self.db, self.installed,
+                                                e["id"], side)
+                    except Exception as exc:
+                        r = {"action": "error", "error": str(exc)}
                     r["side"], r["name"] = side, e["name_en"] or e["id"]
                     out.append(r)
                 if note:
                     out.append({"action": "skip", "name": e["name_en"] or e["id"], "note": note})
             return out
 
-        def done(rs):
-            self._set_busy(False)
-            n_ok = 0
-            for r in rs or []:
-                label = SIDE_LABELS.get(r.get("side", "?"), "?")
-                if r["action"] == "installed":
-                    n_ok += 1
-                    self._log(f"已安装到{label}: {r['name']} v{r['version']}")
-                elif r["action"] == "skip":
-                    self._log(f"已跳过 {r['name']}: {r.get('note')}")
-                elif r["action"] == "manual":
-                    self._log(f"{label} {r['name']}: {r.get('note') or '需手动下载'}")
-                    self._offer_open_download_page(r.get("entry"))
-                elif r["action"] == "skipped_incompatible":
-                    self._log(f"[跳过] {label} {r['name']}: {r.get('note')}")
-                else:
-                    self._log(f"[错误] {label} {r['name']}: {r.get('error')}")
-            self._log(f"批量安装完成：成功 {n_ok} 个")
-            self.refresh_all()
-        self._run_async(job, on_done=done)
+        self._run_async(job, on_done=self._on_install_batch_done)
 
     def _confirm_gtnh_source(self, entry):
         if not self._check_not_busy():
@@ -2261,6 +2279,9 @@ class GuiApp:
             return
         if self.busy:
             return
+        if len(sel) > 1:
+            self._batch_install(sel)
+            return
         e = sel[0]
         sides, note = updater.auto_install_sides(e, self.cfg)
         if not sides:
@@ -2324,6 +2345,8 @@ class GuiApp:
             if r["action"] == "installed":
                 n_ok += 1
                 self._log(f"已安装到{label}: {r['name']} v{r['version']}")
+            elif r["action"] == "skip":
+                self._log(f"已跳过 {r['name']}: {r.get('note')}")
             elif r["action"] == "manual":
                 self._log(f"{label} {r['name']}: {r.get('note') or '需手动下载'}")
                 self._offer_open_download_page(r.get("entry"))
@@ -2336,6 +2359,7 @@ class GuiApp:
             if r.get("leftover"):
                 self._log(f"[提示] {label} 旧版本文件被占用未能移除: {'、'.join(r['leftover'])}"
                           "（请关闭游戏/服务端后右键「清理重复jar」）")
+        self._log(f"批量安装完成：成功 {n_ok} 个端别操作")
         self.refresh_all()
 
     def _version_picker(self, options, current=None, title="选择版本", prefer_latest=False):
@@ -2489,8 +2513,12 @@ class GuiApp:
         progress_cb = lambda msg: self.queue.put(("log", msg))
         def job():
             try:
-                return wikimod.fetch_and_parse(self.cfg, interactive=True,
-                                               progress_cb=progress_cb)
+                return wikimod.sync_wiki(
+                    self.cfg, self.db,
+                    interactive=True,
+                    progress_cb=progress_cb,
+                    apply_merge=False,
+                )
             except Exception as e:
                 # 让 Wiki 刷新自己的完成回调呈现错误；不把失败变成
                 # “回调收到 None 后静默结束”的假成功体验。
@@ -2508,12 +2536,25 @@ class GuiApp:
             self._log(f"[错误] Wiki 刷新失败: {msg}")
             messagebox.showerror("刷新Wiki失败", msg)
             return
-        mods, warnings = r
-        for w in warnings:
+        if not isinstance(r, wikimod.WikiSyncResult):
+            self._set_busy(False)
+            self._log("[错误] Wiki 刷新返回了未知结果")
+            return
+        for w in r.warnings:
             self._log(f"[警告] {w}")
+        self._log(
+            f"Wiki 读取证据：发起 {r.request_count} 个网络请求；通道={r.channel}；"
+            f"响应={r.response_bytes} 字节；内容指纹={r.text_hash[:12]}")
+        if r.source != "online":
+            self.refresh_addable()
+            self._set_busy(False)
+            self._log("Wiki 未在线同步：已保留本地目录和上次在线成功时间；"
+                      "本次显示的是最近缓存，不是新抓取结果")
+            return
         try:
             before = {m["id"] for m in self.db.mods}
-            changes = self.db.merge_wiki(mods)
+            r = wikimod.apply_wiki_result(self.cfg, self.db, r)
+            changes = r.changes or []
         except Exception as e:
             self._log(f"[错误] {e}")
             messagebox.showerror("刷新Wiki失败", str(e))
@@ -2524,12 +2565,10 @@ class GuiApp:
         if self._new_ids:
             self._log(f"本次新增 {len(self._new_ids)} 个mod，已在可添加列表中高亮"
                       "（🆕 标记，查看详情后取消）")
-        used_cache = any("使用最近一次成功抓取的数据" in w for w in warnings)
-        source_label = "缓存回退" if used_cache else "在线"
         wiki_count = len(self.db.wiki_mods())
         custom_count = len(self.db.custom_mods())
         delta = f"{len(changes)} 处变化" if changes else "内容没有变化"
-        self._log(f"Wiki {source_label}完成：目录 {wiki_count} 个条目，{delta}；"
+        self._log(f"Wiki 在线完成：目录 {wiki_count} 个条目，{delta}；"
                   f"自定义源 {custom_count} 个")
         for c in changes[:30]:
             self._log(f"  - {c}")
@@ -2922,8 +2961,12 @@ class GuiApp:
         progress_cb = lambda msg: self.queue.put(("log", msg))
         def job():
             try:
-                return wikimod.fetch_and_parse(self.cfg, interactive=True,
-                                               progress_cb=progress_cb)
+                return wikimod.sync_wiki(
+                    self.cfg, self.db,
+                    interactive=True,
+                    progress_cb=progress_cb,
+                    apply_merge=False,
+                )
             except Exception as e:
                 return {"error": str(e)}
         self._run_async(job, on_done=self._on_wiki_test_done)
@@ -2937,10 +2980,19 @@ class GuiApp:
             self._log(f"[错误] Wiki 测试失败: {r['error']}")
             messagebox.showerror("测试抓取失败", r["error"])
             return
-        mods, warnings = r
-        if mods:
-            msg = f"抓取成功，解析到 {len(mods)} 个mod"
-            self._log(f"[OK] {msg}" + (f"（警告：{'；'.join(warnings)}）" if warnings else ""))
+        if not isinstance(r, wikimod.WikiSyncResult):
+            self._log("[错误] Wiki 测试返回了未知结果")
+            return
+        evidence = (f"发起 {r.request_count} 个网络请求，通道={r.channel}，"
+                    f"响应 {r.response_bytes} 字节，内容指纹={r.text_hash[:12]}")
+        self._log("Wiki 读取证据：" + evidence)
+        if r.source != "online":
+            msg = "读取到缓存，但没有完成在线同步"
+            self._log("[警告] " + msg)
+            messagebox.showwarning("测试未在线成功", msg)
+        elif r.mods:
+            msg = f"在线抓取成功，解析到 {len(r.mods)} 个mod；{evidence}"
+            self._log(f"[OK] {msg}")
             messagebox.showinfo("测试成功", msg)
         else:
             self._log("[失败] 抓取到内容但解析不到mod（Cookie 可能已过期，或页面结构变更）")
@@ -2949,7 +3001,11 @@ class GuiApp:
 
     def test_download_connectivity(self):
         """测试文件下载链路连通性。"""
-        proxy = self._current_proxy_from_ui()
+        try:
+            proxy = self._current_proxy_from_ui()
+        except ValueError as e:
+            messagebox.showerror("代理设置错误", str(e))
+            return
         if self.busy:
             return
         self._set_busy(True)
@@ -2986,19 +3042,28 @@ class GuiApp:
             return {"host": "", "port": 0} # 直连
         if m == "custom":
             p = self.proxy_entry.get().strip()
-            if p:
-                host, _, port = p.partition(":")
-                try:
-                    return {"host": host, "port": int(port or 8080)}
-                except ValueError:
-                    return None
-            return None
+            if not p:
+                raise ValueError("自定义代理地址不能为空")
+            host, separator, port = p.rpartition(":")
+            if not separator or not host:
+                raise ValueError("自定义代理格式应为 host:port")
+            try:
+                port_num = int(port)
+            except ValueError:
+                raise ValueError("代理端口必须是数字") from None
+            if not 1 <= port_num <= 65535:
+                raise ValueError("代理端口必须在 1 到 65535 之间")
+            return {"host": host, "port": port_num}
         return None # 跟随系统
 
     def test_network_settings(self):
         """用输入框当前的 Token/代理请求 GitHub API，报告连通性与剩余配额。"""
         token = self.token_entry.get().strip()
-        proxy = self._current_proxy_from_ui()
+        try:
+            proxy = self._current_proxy_from_ui()
+        except ValueError as e:
+            messagebox.showerror("代理设置错误", str(e))
+            return
         headers = {"Accept": "application/vnd.github+json"}
         if token:
             headers["Authorization"] = "Bearer " + token
@@ -3008,8 +3073,8 @@ class GuiApp:
         self._log("测试 GitHub 连接...")
 
         def job():
-            raw, _ = net.http_get("https://api.github.com/rate_limit",
-                                  headers=headers, proxy=proxy, retries=0)
+            raw = net.http_get("https://api.github.com/rate_limit",
+                               headers=headers, proxy=proxy, retries=0)
             return json.loads(raw).get("resources", {}).get("core", {})
 
         def done(core):
@@ -3025,39 +3090,36 @@ class GuiApp:
         self._run_async(job, on_done=done)
 
     def save_settings(self):
-        self.cfg.set_mods_dir("client", self.client_entry.get().strip())
-        self.cfg.set_mods_dir("server", self.server_entry.get().strip())
-        for side, p in (("客户端", self.cfg.client_mods_dir),
-                        ("服务端", self.cfg.server_mods_dir)):
+        client_path = self.client_entry.get().strip()
+        server_path = self.server_entry.get().strip()
+        for side, raw_path in (("客户端", client_path), ("服务端", server_path)):
+            p = Path(raw_path) if raw_path else None
             if p and not p.is_dir():
                 if not messagebox.askyesno("确认",
                         f"{side} mods 目录不存在：\n{p}\n仍要保存吗？（之后可再改）"):
                     return
-        self.cfg.data["github_token"] = self.token_entry.get().strip()
-        m = self.proxy_mode.get()
-        if m == "direct":
-            self.cfg.data["proxy"] = {"host": "", "port": 0}
-        elif m == "custom":
-            p = self.proxy_entry.get().strip()
-            if p:
-                host, _, port = p.partition(":")
-                try:
-                    self.cfg.data["proxy"] = {"host": host, "port": int(port or 8080)}
-                except ValueError:
-                    messagebox.showerror("错误", "代理端口必须是数字")
-                    return
-            else:
-                self.cfg.data["proxy"] = None
-        else:
-            self.cfg.data["proxy"] = None
         try:
-            self.cfg.data["check_interval_hours"] = float(self.interval_entry.get().strip() or 6)
-            self.cfg.data["backup_keep"] = int(self.backup_entry.get().strip() or 3)
+            proxy = self._current_proxy_from_ui()
+            interval = float(self.interval_entry.get().strip() or 6)
+            backup_keep = int(self.backup_entry.get().strip() or 3)
         except ValueError:
-            messagebox.showerror("错误", "缓存时长/备份数必须是数字")
+            messagebox.showerror("错误", "请检查代理地址、缓存时长和备份数格式")
             return
-        self.cfg.data["gtnh_version"] = self.gtnh_entry.get().strip()
-        self._save_wiki_cookie_from_ui()
+        if interval < 0 or backup_keep < 0:
+            messagebox.showerror("错误", "缓存时长和备份数不能小于 0")
+            return
+
+        # 所有输入都通过校验后才一次性替换配置，避免旧实现把目录提前写入。
+        updated = dict(self.cfg.data)
+        updated["mods_folders"] = {"client": client_path, "server": server_path}
+        updated["github_token"] = self.token_entry.get().strip()
+        updated["proxy"] = proxy
+        updated["check_interval_hours"] = interval
+        updated["backup_keep"] = backup_keep
+        updated["gtnh_version"] = self.gtnh_entry.get().strip()
+        updated["wiki_cookie"] = self.wiki_cookie_entry.get().strip()
+        updated["wiki_ua"] = self.wiki_ua_entry.get().strip()
+        self.cfg.data = updated
         self.cfg.save()
         self._log("设置已保存")
         messagebox.showinfo("已保存", "设置已保存，列表即将刷新")
