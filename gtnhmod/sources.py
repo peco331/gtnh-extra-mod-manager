@@ -89,6 +89,8 @@ class Source(ABC):
         """按条目 source_type 构造源。"""
         st = entry.get("source_type")
         src = entry.get("source") or {}
+        source_context = ("wiki" if entry.get("group") in ("星门规则", "非星门规则")
+                          else "custom")
         if st == "github":
             return GitHubSource(
                 owner=src.get("owner") or "", repo=src.get("repo") or "",
@@ -97,10 +99,12 @@ class Source(ABC):
                 tag_regex=src.get("tag_regex") or "",
                 token=cfg.github_token, cache_dir=cfg.cache_dir,
                 ttl_hours=cfg.check_interval_hours, proxy=cfg.proxy,
-                target_profile=src.get("target_profile", "unknown"))
+                target_profile=src.get("target_profile", "unknown"),
+                source_context=source_context)
         if st == "local_folder":
             return LocalFolderSource(src.get("path") or "", src.get("name_regex") or "",
-                                     target_profile=src.get("target_profile", "unknown"))
+                                     target_profile=src.get("target_profile", "unknown"),
+                                     source_context=source_context)
         if st == "curseforge":
             return CurseForgeSource((entry.get("urls") or {}).get("curseforge"))
         return ManualSource()
@@ -143,7 +147,8 @@ def _score_asset(name: str, tag: str, tag_clean: str, repo: str) -> int:
 
 def pick_assets(assets: list, tag: str, repo: str,
                 asset_regex: str = "", exclude_regex: str = "", *,
-                target_profile: str = "unknown") -> list:
+                target_profile: str = "unknown",
+                repo_context: str = "", source_context: str = "") -> list:
     """从 release assets 中挑 jar 候选（评分排序，下载失败可降级）。"""
     tag_clean = (tag or "").lstrip("v")
     cands = []
@@ -157,7 +162,9 @@ def pick_assets(assets: list, tag: str, repo: str,
             continue
         if re.search(r"(?i)(?:^|[-_.])(sources|deobf|javadoc|api|dev)(?:[-_.]|$)", name):
             continue
-        if classify_target(name, release_tag=tag, target_profile=target_profile).status != "eligible":
+        if classify_target(name, release_tag=tag, target_profile=target_profile,
+                           repo_context=repo_context,
+                           source_context=source_context).status != "eligible":
             continue
         score = _score_asset(name, tag, tag_clean, repo)
         cands.append((score, len(name), a))
@@ -173,7 +180,8 @@ class GitHubSource(Source):
                  exclude_regex: str = "", tag_regex: str = "", token: str = "",
                  cache_dir: Path = None, ttl_hours: float = 6.0,
                  api_base: str = "https://api.github.com", proxy=None,
-                 target_profile: str = "unknown"):
+                 target_profile: str = "unknown",
+                 repo_context: str = "", source_context: str = ""):
         self.owner, self.repo = owner, repo
         self.asset_regex, self.exclude_regex = asset_regex, exclude_regex
         self.tag_regex = tag_regex
@@ -183,6 +191,8 @@ class GitHubSource(Source):
         self.api_base = api_base.rstrip("/")
         self.proxy = proxy
         self.target_profile = target_profile
+        self.repo_context = repo_context or f"{owner}/{repo}"
+        self.source_context = source_context
 
     # ---- 内部 ----
     def _api(self, path: str, cache_key: str, *, force: bool = False):
@@ -256,7 +266,7 @@ class GitHubSource(Source):
         return info
 
     def check(self, current_version: str | None, *, force: bool = False) -> UpdateInfo:
-        options = self.list_versions(force=force)
+        options = self.list_versions(force=force, for_check=True)
         if not options:
             return UpdateInfo(None, None, None, utils.now_str(), "没有找到 GTNH 发布")
         option = options[0]
@@ -275,7 +285,10 @@ class GitHubSource(Source):
         ver = extract_version(tag)
         if not ver:
             return None
-        decision = classify_target("", release_tag=tag, target_profile=self.target_profile)
+        decision = classify_target("", release_tag=tag,
+                                   target_profile=self.target_profile,
+                                   repo_context=self.repo_context,
+                                   source_context=self.source_context)
         assets = rel.get("assets") or []
         jars = [a for a in assets if isinstance(a, dict)
                 and (a.get("name") or "").lower().endswith(".jar")
@@ -283,9 +296,13 @@ class GitHubSource(Source):
                 and (not self.exclude_regex or not re.search(self.exclude_regex, a["name"], re.I))
                 and (not self.asset_regex or re.search(self.asset_regex, a["name"], re.I))]
         cands = pick_assets(jars, tag, self.repo, self.asset_regex, self.exclude_regex,
-                            target_profile=self.target_profile)
+                            target_profile=self.target_profile,
+                            repo_context=self.repo_context,
+                            source_context=self.source_context)
         states = [classify_target(a["name"], release_tag=tag,
-                                 target_profile=self.target_profile).status for a in jars]
+                                 target_profile=self.target_profile,
+                                 repo_context=self.repo_context,
+                                 source_context=self.source_context).status for a in jars]
         if decision.status == "excluded" or (states and all(s == "excluded" for s in states)):
             return None
         status = "eligible" if cands else decision.status
@@ -296,9 +313,10 @@ class GitHubSource(Source):
         return VersionOption(ver, tag, rel.get("body"), rel.get("published_at"),
                              cands or None, bool(rel.get("prerelease")), status, reason)
 
-    def list_versions(self, *, force: bool = False) -> list:
+    def list_versions(self, *, force: bool = False, for_check: bool = False) -> list:
         """同一份发布列表供检查和安装使用；平台筛选先于排序和去重。"""
         options = []
+        exhausted = False
         for page in range(1, 6):
             try:
                 releases, _ = self._api(
@@ -310,11 +328,15 @@ class GitHubSource(Source):
                 releases = []
             if not isinstance(releases, list) or any(not isinstance(r, dict) for r in releases):
                 raise SourceError("发布列表格式错误，无法确认最新 GTNH 发布")
-            options.extend(o for r in releases if (o := self._release_option(r)) is not None)
+            page_options = [o for r in releases
+                            if (o := self._release_option(r)) is not None]
+            options.extend(page_options)
+            if for_check and any(o.target_status == "eligible" for o in page_options):
+                break
             if len(releases) < 30:
                 break
         else:
-            raise SourceError("发布搜索范围已达 150 条，请缩小下载源或手动选择；不能确认最新版本")
+            exhausted = True
         if not options and (self.tag_regex or not releases):
             # 标签后备也必须走相同的平台筛选，不能绕过资产检查。
             info = self._check_via_tags(force=force)
@@ -322,6 +344,8 @@ class GitHubSource(Source):
                 status = "eligible" if info.candidates else "unknown"
                 options.append(VersionOption(info.latest_version, info.latest_version,
                     info.release_body, info.published_at, info.candidates, False, status, info.note))
+        if not options and exhausted:
+            raise SourceError("发布搜索范围已达 150 条，请缩小下载源或手动选择；不能确认最新版本")
         def date_key(option):
             try:
                 dt = datetime.fromisoformat((option.published_at or "").replace("Z", "+00:00"))
@@ -352,10 +376,12 @@ class GitHubSource(Source):
 class LocalFolderSource(Source):
     source_type = "local_folder"
 
-    def __init__(self, path: str, name_regex: str = "", *, target_profile="unknown"):
+    def __init__(self, path: str, name_regex: str = "", *, target_profile="unknown",
+                 source_context=""):
         self.path = Path(path) if path else None
         self.name_regex = name_regex or ""
         self.target_profile = target_profile
+        self.source_context = source_context
 
     def _scan_versions(self) -> dict:
         """扫描目录，返回 {版本: jar路径}。"""
@@ -371,7 +397,8 @@ class LocalFolderSource(Source):
                 continue
             if self.name_regex and not re.search(self.name_regex, p.name, re.I):
                 continue
-            decision = classify_target(p.name, target_profile=self.target_profile)
+            decision = classify_target(p.name, target_profile=self.target_profile,
+                                      source_context=self.source_context)
             if decision.status == "excluded":
                 continue
             name, mc, ver = split_mc_mod_version(p.name[:-4])
@@ -394,7 +421,8 @@ class LocalFolderSource(Source):
                               f"目录 {self.path} 中未发现可识别的jar")
         best = max_version(list(versions))
         p = versions[best]
-        decision = classify_target(p.name, target_profile=self.target_profile)
+        decision = classify_target(p.name, target_profile=self.target_profile,
+                                  source_context=self.source_context)
         if decision.status != "eligible":
             raise SourceError(decision.reason)
         cand = DownloadCandidate(str(p), p.name, p.stat().st_size)
@@ -410,8 +438,12 @@ class LocalFolderSource(Source):
         versions = self._scan_versions()
         options = [VersionOption(v, v, None, None,
                                  [DownloadCandidate(str(p), p.name, p.stat().st_size)],
-                                 target_status=classify_target(p.name, target_profile=self.target_profile).status,
-                                 target_reason=classify_target(p.name, target_profile=self.target_profile).reason)
+                                 target_status=classify_target(
+                                     p.name, target_profile=self.target_profile,
+                                     source_context=self.source_context).status,
+                                 target_reason=classify_target(
+                                     p.name, target_profile=self.target_profile,
+                                     source_context=self.source_context).reason)
                    for v, p in versions.items()]
         return sort_version_options(options)
 

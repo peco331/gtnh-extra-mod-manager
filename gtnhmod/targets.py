@@ -10,7 +10,9 @@ class TargetDecision:
 
 
 def classify_target(file_name: str, *, release_tag: str = '',
-                    target_profile: str = 'unknown') -> TargetDecision:
+                    target_profile: str = 'unknown',
+                    repo_context: str = '',
+                    source_context: str = '') -> TargetDecision:
     versions = set()
     marked = False
     for text in (file_name.removesuffix('.jar'), release_tag):
@@ -34,4 +36,12 @@ def classify_target(file_name: str, *, release_tag: str = '',
         return TargetDecision('eligible', '构建标识适用于 GTNH / Minecraft 1.7.10')
     if target_profile == 'gtnh':
         return TargetDecision('eligible', '用户已确认此下载源用于 GTNH')
+    owner = (repo_context or '').split('/', 1)[0].strip().lower()
+    if owner == 'gtnhnewhorizons':
+        return TargetDecision('eligible', 'GTNewHorizons 官方仓库适用于 GTNH')
+    if re.search(r'(?i)(?:^|[-_.+ /])(?:gtnh|1\.7\.10)(?:$|[-_.+ /])',
+                 repo_context or ''):
+        return TargetDecision('eligible', '仓库标识确认此下载源用于 GTNH / Minecraft 1.7.10')
+    if source_context == 'wiki':
+        return TargetDecision('eligible', 'Wiki 可添加 MOD 目录确认此下载源用于 GTNH')
     return TargetDecision('unknown', '未找到游戏平台标识，请确认此下载源用于 GTNH')

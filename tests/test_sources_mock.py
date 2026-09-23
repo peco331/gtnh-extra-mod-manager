@@ -464,6 +464,7 @@ class TestDownloadContentLength(unittest.TestCase):
             self.assertFalse((tmp / "x.jar.part").exists())
         finally:
             srv.shutdown()
+            srv.server_close()
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_complete_download_ok(self):
@@ -478,6 +479,7 @@ class TestDownloadContentLength(unittest.TestCase):
             self.assertEqual(dest.read_bytes(), data)
         finally:
             srv.shutdown()
+            srv.server_close()
             shutil.rmtree(tmp, ignore_errors=True)
 
 

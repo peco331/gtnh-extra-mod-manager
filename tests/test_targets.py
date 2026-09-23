@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from gtnhmod import downloader, updater
+from gtnhmod.config import Config
 from gtnhmod.sources import GitHubSource
 from gtnhmod.targets import classify_target
 
@@ -18,6 +19,45 @@ def release(tag, names, date='2026-09-01T00:00:00Z', **extra):
 
 
 class TestTargets(unittest.TestCase):
+    def _options_for_entry(self, entry, data):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(Path(td))
+            with patch.object(GitHubSource, "_api", return_value=(data, "fresh")):
+                return updater.list_install_options(entry, cfg, force=True)
+
+    def test_wiki_catalog_is_positive_gtnh_source_evidence(self):
+        entry = {
+            "id": "demo", "name_en": "Demo", "group": "星门规则",
+            "source_type": "github",
+            "source": {"owner": "owner", "repo": "Demo"},
+        }
+        options, err = self._options_for_entry(
+            entry, [release("4.0", ["Demo-4.0.jar"])])
+        self.assertIsNone(err)
+        self.assertEqual(options[0]["target_status"], "eligible")
+
+    def test_gtnh_repository_name_is_positive_gtnh_source_evidence(self):
+        entry = {
+            "id": "ae2wtx", "name_en": "ae2wtx", "group": "自定义",
+            "source_type": "github",
+            "source": {"owner": "peco331", "repo": "AE2WirelessTransceiver-GTNH"},
+        }
+        options, err = self._options_for_entry(
+            entry, [release("1.1.0", ["ae2wtx-1.1.0.jar"])])
+        self.assertIsNone(err)
+        self.assertEqual(options[0]["target_status"], "eligible")
+
+    def test_unmarked_custom_repository_still_requires_confirmation(self):
+        entry = {
+            "id": "demo", "name_en": "Demo", "group": "自定义",
+            "source_type": "github",
+            "source": {"owner": "owner", "repo": "Demo"},
+        }
+        options, err = self._options_for_entry(
+            entry, [release("4.0", ["Demo-4.0.jar"])])
+        self.assertIsNone(err)
+        self.assertEqual(options[0]["target_status"], "unknown")
+
     def test_evidence(self):
         cases = [
             ('Demo-mc1.20.1-4.0.jar', '', 'gtnh', 'excluded'),
@@ -78,6 +118,27 @@ class TestTargets(unittest.TestCase):
             with self.assertRaisesRegex(Exception, '范围'):
                 src.check(None)
             self.assertEqual(api.call_count, 5)
+
+    def test_budget_does_not_override_an_already_found_release(self):
+        src = GitHubSource("owner", "Demo")
+        wrong = [release(str(i), [f"Demo-mc1.21.1-{i}.jar"]) for i in range(30)]
+        first_page = [release("2.0", ["Demo-1.7.10-2.0.jar"])] + wrong[:29]
+        pages = [(first_page, "fresh")] + [(wrong, "fresh") for _ in range(4)]
+        with patch.object(src, "_api", side_effect=pages):
+            try:
+                latest = src.check(None).latest_version
+            except Exception as exc:
+                self.fail(f"already-found release was overridden by search budget: {exc}")
+            self.assertEqual(latest, "2.0")
+
+    def test_check_stops_after_first_page_with_qualified_release(self):
+        src = GitHubSource("owner", "Demo")
+        wrong = [release(str(i), [f"Demo-mc1.21.1-{i}.jar"]) for i in range(30)]
+        first_page = [release("2.0", ["Demo-1.7.10-2.0.jar"])] + wrong[:29]
+        pages = [(first_page, "fresh")] + [(wrong, "fresh") for _ in range(4)]
+        with patch.object(src, "_api", side_effect=pages) as api:
+            self.assertEqual(src.check(None).latest_version, "2.0")
+            self.assertEqual(api.call_count, 1)
 
     def test_unknown_newer_does_not_hide_behind_old(self):
         src = GitHubSource('owner', 'Demo')
