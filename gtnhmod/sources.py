@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .targets import classify_target
+from .targets import classify_target, source_context_for_entry
 from pathlib import Path
 
 from . import net, utils
@@ -89,8 +89,7 @@ class Source(ABC):
         """按条目 source_type 构造源。"""
         st = entry.get("source_type")
         src = entry.get("source") or {}
-        source_context = ("wiki" if entry.get("group") in ("星门规则", "非星门规则")
-                          else "custom")
+        source_context = source_context_for_entry(entry)
         if st == "github":
             return GitHubSource(
                 owner=src.get("owner") or "", repo=src.get("repo") or "",

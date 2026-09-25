@@ -22,6 +22,7 @@ from . import wiki as wikimod
 from .config import Config
 from .db import ModsDB
 from .installed import InstalledDB
+from .targets import source_confirmation_state
 
 STATUS_CN = {"installed": "已安装", "update_avail": "可更新",
              "update_incompat": "有新版（可能不兼容）",
@@ -535,6 +536,8 @@ class GuiApp:
         ttk.Button(btns, text="添加", command=self.add_custom_dialog).pack(side="left", padx=2)
         ttk.Button(btns, text="编辑", command=self.edit_custom_dialog).pack(side="left", padx=2)
         ttk.Button(btns, text="删除", command=self.remove_custom).pack(side="left", padx=2)
+        ttk.Button(btns, text="批量确认GTNH源",
+                   command=self._bulk_confirm_gtnh_sources).pack(side="left", padx=2)
 
     def _build_settings_tab(self, tab):
         # ---- 目录 ----
@@ -2013,10 +2016,50 @@ class GuiApp:
         else:
             messagebox.showerror("无法确认", result.get("error"))
 
+    def _bulk_confirm_gtnh_sources(self, entries=None):
+        """一次确认多个仍缺少 GTNH 平台证据的自定义源。"""
+        if not self._check_not_busy():
+            return
+        if entries is None:
+            selected = set(self.cust_tree.selection())
+            pool = ([e for e in self.cust_rows if e["id"] in selected]
+                    or list(self.cust_rows))
+        else:
+            pool = list(entries)
+        required = [e for e in pool
+                    if source_confirmation_state(e) == "required"]
+        if not required:
+            messagebox.showinfo("提示", "当前没有需要确认的 GTNH 下载源")
+            return
+        lines = "\n".join(
+            f"- {e.get('name_en') or e['id']}: "
+            f"{updater.current_source_url(e) or (e.get('source') or {}).get('path', '')}"
+            for e in required)
+        if not messagebox.askyesno(
+                "批量确认 GTNH 下载源",
+                f"以下 {len(required)} 个来源仍缺少游戏平台标识：\n\n{lines}\n\n"
+                "确认后允许使用未写游戏平台的文件；明确属于其他 Minecraft 版本或加载器的文件仍会被排除。"):
+            return
+        failed = []
+        for e in required:
+            result = updater.confirm_gtnh_source(self.db, e["id"], True)
+            if result.get("action") != "confirmed":
+                failed.append(f"{e.get('name_en') or e['id']}: {result.get('error')}")
+        if failed:
+            messagebox.showerror("部分确认失败", "\n".join(failed))
+        self._log(f"批量确认 GTNH 下载源：成功 {len(required) - len(failed)} 个"
+                  + (f"，失败 {len(failed)} 个" if failed else ""))
+        self.refresh_custom()
+
     def _add_target_menu(self, menu, entry):
-        if entry and entry.get("source_type") in ("github", "local_folder"):
-            confirmed = (entry.get("source") or {}).get("target_profile") == "gtnh"
-            menu.add_command(label="撤销 GTNH 源确认…" if confirmed else "确认此源用于 GTNH…",
+        if not entry:
+            return
+        state = source_confirmation_state(entry)
+        if state == "confirmed":
+            menu.add_command(label="撤销 GTNH 源确认…",
+                             command=lambda: self._confirm_gtnh_source(entry))
+        elif state == "required":
+            menu.add_command(label="确认此源用于 GTNH…",
                              command=lambda: self._confirm_gtnh_source(entry))
 
     def _bind_source_dialog(self, e, on_close=None):
@@ -2081,6 +2124,10 @@ class GuiApp:
             menu.add_command(label="（未选中条目）", state="disabled")
             return
         self._add_target_menu(menu, e)
+        if any(source_confirmation_state(x) == "required"
+               for x in self.cust_rows):
+            menu.add_command(label="批量确认待定GTNH源…",
+                             command=self._bulk_confirm_gtnh_sources)
         menu.add_command(label="编辑", command=lambda: self._custom_source_dialog(e))
         menu.add_command(label="删除", command=self.remove_custom)
 

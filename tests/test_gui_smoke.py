@@ -67,6 +67,62 @@ class TestGuiSmoke(unittest.TestCase):
             self.app._confirm_gtnh_source(entry)
             confirm.assert_called_once_with(self.app.db, 'demo', True)
 
+    def test_target_menu_only_prompts_for_unproven_sources(self):
+        entries = [
+            ({'id': 'wiki', 'name_en': 'Wiki', 'group': '星门规则',
+              'source_type': 'github',
+              'source': {'owner': 'owner', 'repo': 'Demo'}}, False),
+            ({'id': 'official', 'name_en': 'Official', 'group': '自定义',
+              'source_type': 'github',
+              'source': {'owner': 'GTNewHorizons', 'repo': 'Demo'}}, False),
+            ({'id': 'marked', 'name_en': 'Marked', 'group': '自定义',
+              'source_type': 'github',
+              'source': {'owner': 'owner', 'repo': 'Demo-GTNH'}}, False),
+            ({'id': 'unknown', 'name_en': 'Unknown', 'group': '自定义',
+              'source_type': 'github',
+              'source': {'owner': 'owner', 'repo': 'Demo'}}, True),
+        ]
+        for entry, should_prompt in entries:
+            with self.subTest(entry=entry['id']):
+                menu = tk.Menu(self.app.root, tearoff=0)
+                self.app._add_target_menu(menu, entry)
+                end = menu.index('end')
+                labels = [menu.entrycget(i, 'label')
+                          for i in range(end + 1)] if end is not None else []
+                self.assertEqual(
+                    any('确认此源用于 GTNH' in label for label in labels),
+                    should_prompt)
+
+    def test_bulk_confirmation_handles_all_unproven_sources_once(self):
+        entries = [
+            {'id': 'wiki', 'name_en': 'Wiki', 'group': '星门规则',
+             'source_type': 'github',
+             'source': {'owner': 'owner', 'repo': 'Demo'}},
+            {'id': 'one', 'name_en': 'One', 'group': '自定义',
+             'source_type': 'github',
+             'source': {'owner': 'owner', 'repo': 'One'}},
+            {'id': 'two', 'name_en': 'Two', 'group': '自定义',
+             'source_type': 'github',
+             'source': {'owner': 'owner', 'repo': 'Two'}},
+            {'id': 'confirmed', 'name_en': 'Confirmed', 'group': '自定义',
+             'source_type': 'github',
+             'source': {'owner': 'owner', 'repo': 'Confirmed',
+                        'target_profile': 'gtnh'}},
+        ]
+        with mock.patch.object(gui.messagebox, 'askyesno', return_value=True) as ask, \
+                mock.patch.object(gui.updater, 'confirm_gtnh_source',
+                                  return_value={'action': 'confirmed'}) as confirm, \
+                mock.patch.object(self.app, 'refresh_custom') as refresh:
+            try:
+                self.app._bulk_confirm_gtnh_sources(entries)
+            except AttributeError as exc:
+                self.fail(f"bulk GTNH source confirmation is missing: {exc}")
+        self.assertEqual(ask.call_count, 1)
+        self.assertEqual(
+            [call.args[1] for call in confirm.call_args_list],
+            ['one', 'two'])
+        refresh.assert_called_once_with()
+
     def test_version_picker_opens_and_confirms(self):
         """更新选择器预选最新版，且确认/双击/回车绑定完整。"""
         bindings = {}

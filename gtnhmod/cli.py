@@ -15,6 +15,7 @@ from . import wiki as wikimod
 from .config import Config
 from .db import ModsDB
 from .installed import InstalledDB
+from .targets import source_confirmation_state
 from .ui import ConsoleUI
 from . import cookies
 
@@ -180,7 +181,9 @@ class CliApp:
                                ("mcmod", "mcmod"), ("bilibili", "bilibili")):
                 if entry["urls"].get(key):
                     links.append((label, entry["urls"][key]))
-            actions = ["安装（自动选择端别）", "打开下载页面", "绑定下载源", "编辑中文名", "确认/撤销 GTNH 下载源"]
+            actions = ["安装（自动选择端别）", "打开下载页面", "绑定下载源", "编辑中文名"]
+            if source_confirmation_state(entry) in ("required", "confirmed"):
+                actions.append("确认/撤销 GTNH 下载源")
             idx = self.ui.choose("操作:", actions)
             if idx is None:
                 return
@@ -204,7 +207,7 @@ class CliApp:
                 else:
                     self.ui.error(r.get("error") or "保存失败")
 
-            elif idx == 4:
+            elif idx == 4 and source_confirmation_state(entry) in ("required", "confirmed"):
                 self._confirm_gtnh_source(entry)
 
     def _confirm_gtnh_source(self, entry):

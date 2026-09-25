@@ -9,6 +9,28 @@ class TargetDecision:
     reason: str
 
 
+def source_context_for_entry(entry: dict) -> str:
+    return "wiki" if entry.get("group") in ("星门规则", "非星门规则") else "custom"
+
+
+def source_confirmation_state(entry: dict) -> str:
+    """Return auto/confirmed/required/not_applicable for source-level GTNH trust."""
+    source_type = entry.get("source_type")
+    if source_type not in ("github", "local_folder"):
+        return "not_applicable"
+    source = entry.get("source") or {}
+    if source.get("target_profile") == "gtnh":
+        return "confirmed"
+    if source_type == "github":
+        repo_context = f"{source.get('owner') or ''}/{source.get('repo') or ''}"
+    else:
+        repo_context = source.get("path") or ""
+    decision = classify_target(
+        "", repo_context=repo_context,
+        source_context=source_context_for_entry(entry))
+    return "auto" if decision.status == "eligible" else "required"
+
+
 def classify_target(file_name: str, *, release_tag: str = '',
                     target_profile: str = 'unknown',
                     repo_context: str = '',
@@ -37,7 +59,7 @@ def classify_target(file_name: str, *, release_tag: str = '',
     if target_profile == 'gtnh':
         return TargetDecision('eligible', '用户已确认此下载源用于 GTNH')
     owner = (repo_context or '').split('/', 1)[0].strip().lower()
-    if owner == 'gtnhnewhorizons':
+    if owner == 'gtnewhorizons':
         return TargetDecision('eligible', 'GTNewHorizons 官方仓库适用于 GTNH')
     if re.search(r'(?i)(?:^|[-_.+ /])(?:gtnh|1\.7\.10)(?:$|[-_.+ /])',
                  repo_context or ''):
