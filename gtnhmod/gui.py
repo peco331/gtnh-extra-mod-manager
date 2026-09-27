@@ -322,19 +322,21 @@ class GuiApp:
         finally:
             menu.grab_release()
 
-    def _dialog(self, title, size="600x400"):
-        """统一对话框：Esc 关闭、跟随主窗、模态。"""
+    def _dialog(self, title, size="600x400", *, modal=True):
+        """统一对话框：Esc 关闭、跟随主窗；modal=False 时不抢占主窗口输入。"""
         top = tk.Toplevel(self.root)
         top.bind("<Escape>", lambda _e: top.destroy())
         top.title(title)
         top.geometry(size)
         top.transient(self.root)
+        top.protocol("WM_DELETE_WINDOW", top.destroy)
         try:
             # 不用 wait_visibility：主窗最小化时它会无限等（表现为"卡住"）
             top.deiconify()
             top.lift()
             top.focus_force()
-            top.grab_set()
+            if modal:
+                top.grab_set()
         except tk.TclError:
             pass
         return top
@@ -1043,7 +1045,14 @@ class GuiApp:
             return
         checked_at = time.monotonic()
 
-        top = self._dialog("确认更新计划", "760x450")
+        self._set_busy(True)
+        top = self._dialog("确认更新计划", "760x450", modal=False)
+
+        def on_destroy(event):
+            if event.widget is top:
+                self._set_busy(False)
+
+        top.bind("<Destroy>", on_destroy, add="+")
         f = ttk.Frame(top)
         f.pack(fill="both", expand=True, padx=10, pady=8)
 

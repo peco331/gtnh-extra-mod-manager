@@ -161,6 +161,27 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertEqual(picker.call_args.kwargs["current"], "1.7.50")
         self.assertIs(run_update.call_args.kwargs["prefetched"], result)
 
+    def test_update_plan_dialog_is_non_modal_and_cancel_recovers_busy(self):
+        plan = [{
+            "mod_id": "demo", "name": "Demo", "sides": ["client"],
+            "current_version": "1.0", "target_version": "2.0",
+            "prerelease": False, "action": "update", "note": "可更新",
+            "prefetched": ([], None),
+        }]
+        confirmed = []
+        self.app._show_update_plan_dialog(plan, lambda p, **kw: confirmed.append(p))
+        top = next(
+            w for w in self.app.root.winfo_children()
+            if isinstance(w, tk.Toplevel) and w.title() == "确认更新计划"
+        )
+        try:
+            self.assertIsNot(self.app.root.grab_current(), top)
+            self.assertTrue(self.app.busy)
+        finally:
+            top.destroy()
+        self.assertFalse(self.app.busy)
+        self.assertEqual(confirmed, [])
+
     def test_install_picker_passes_prefetched_pair(self):
         """手选安装版本也保留版本列表的二元组契约。"""
         result = (_opts(), None)
