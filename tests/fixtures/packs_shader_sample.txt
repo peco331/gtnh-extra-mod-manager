@@ -1,0 +1,391 @@
+{{Version|2.8.4}}
+本章节介绍并推荐适用于 GTNH 的资源包与光影，以帮助玩家改善游戏的视觉效果并提升整体体验。
+== 资源包 ==
+=== '''摘要''' ===
+由于 GTNH 整合了大量模组，整体视觉风格较为杂乱，部分纹理也缺乏无障碍设计，辨识难度较高。使用资源包可以在一定程度上提升视觉一致性并改善游戏体验。（高分辨率资源包可能会导致帧率下降。）
+
+'''提示：'''
+*如果在安装资源包后机器表面出现照明错误，请尝试把<code>./config/GregTech/Client.cfg</code>中的<code>GlowTextures_true=true</code>设置为<code>GlowTextures_true=false</code>（如果您不知道如何找到此文件，请参阅[[可添加MOD#你的模组文件夹|此页面]]）。
+*推荐把所有GTNH资源包的优先级调整到高于其他资源包（例如Faithful），因为GTNH更新频繁，开发积极，但是大部分其他1.7.10版本的资源包已经停止更新。尤其是这样做可以避免诸如缺少动画贴图的报错。
+=== 安装方法 ===
+#如果能力允许，尽可能在原作发布的网站下载。{{color|red|（部分国外网站无法打开，可在GTNH新手群下载，如有缺失/版本过旧，可联系管理上传/更新）}}
+#找到资源包文件夹，可进入游戏后依次按 游戏菜单→选项→资源包→打开资源包文件夹 来找到文件夹位置
+#将下载好的资源包直接复制至资源包文件夹（'''无需解压资源包'''）
+#将资源包放至资源包文件夹后返回游戏，进入资源包设置，在可用的资源包中将你的资源包加入已选的资源包，点击完成，稍作等待
+#如果资源包有附加包（例如：UI包，暗色模式包等），不同的附加包在资源包的排列顺序上可能有要求，请务必阅读下载网站里的的README，防止出现预期之外的效果。
+#'''{{color|red|更改资源包（尤其是修改了格雷科技以及相关附属MOD的大型资源包）后请务必重启游戏，使纹理得以正确加载}}'''
+
+=== 无障碍与实用性 ===
+{{Mbox
+|border=primary
+|type=help
+|text=<font color="red"><big>若本页面表格向右显示异常，请注册并登录灰机wiki账号，点击页面标题右侧的刷新！</big></font>
+}}
+提供功能性而不仅仅是美观效果的资源包。
+例如：矿石轮廓高亮、按等级区分的机器颜色，以及音频调整等。
+{| class="wikitable" style="width:auto"
+! style="background-color:#12364B; color:white;" | 图标 
+! style="background-color:#12364B; color:white;white-space:nowrap" | 名字
+! style="background-color:#12364B; color:white;white-space:nowrap" | 作者/维护者 
+! style="background-color:#12364B; color:white;" | 范围 
+! style="background-color:#12364B; color:white;" | 说明 
+! style="background-color:#12364B; color:white;width:110px;" | 链接
+|-
+|[[File:pack-Fox.png|64px|frameless|center|alt=Icon|link=https://github.com/DylanTaylor1/GTNH-ResourcePack]]
+|BetterClick
+|Fox
+|降低点击声音的音量和出现频率。
+|
+|[https://github.com/DylanTaylor1/GTNH-ResourcePack/releases 下载]<br>[https://github.com/DylanTaylor1/GTNH-ResourcePack 源码]
+|-
+|[[File:pack-jack glows.png|64px|frameless|center|alt=Icon|link=https://www.curseforge.com/minecraft/texture-packs/colored-gregtech-screwdriver-and-file]]
+| Colored GregTech Screwdriver and File
+|jack_glows
+|{{Label|2.8.0以下}}一个简单的资源包，将螺丝刀手柄的颜色改为蓝色，将锉刀手柄的颜色改为红色。这样你就再也不会把它们搞混了。2.8.0以上，螺丝刀和扳手的朝向不一样了，材质包不再适用也没必要使用。
+|
+|[https://www.curseforge.com/minecraft/texture-packs/colored-gregtech-screwdriver-and-file/download/3078376 下载]<br>[https://www.curseforge.com/minecraft/texture-packs/colored-gregtech-screwdriver-and-file Curseforge]
+|-
+|[[File:pack-imTheSupremeOne.png|64px|frameless|center|alt=Icon|link=https://github.com/imTheSupremeOne/GTNH-Textures-Usernm]]
+|GTNH Colored Machines
+|imTheSupremeOne
+|提供类似 GT6 的按等级区分颜色的材质，以便更容易辨认。其余部分保持 原版风格。
+|只修改部分指定的材质。
+|[https://github.com/imTheSupremeOne/GTNH-Textures-Usernm/releases/tag/machines 下载]<br>[https://github.com/imTheSupremeOne/GTNH-Textures-Usernm 源码]
+|-
+|[[File:pack-xXjudeXx.gif|64px|frameless|center|alt=Icon|link=https://www.curseforge.com/minecraft/texture-packs/gtnh-16x-machine-textures]]
+|GTNH Machine Textures
+|xXjudeXx
+|重新制作机器的材质，使其反映出对应材料的真实颜色，从而保证所有机器在视觉上的一致性。<br>包括来自 GT++、GoodGenerator、KekzTech 和 Electro-Magic Tools 的机器。
+|统一为GT5原版风格，适合不喜欢 GT++ 材质，但是又想维持原版风格的玩家
+|[https://www.curseforge.com/minecraft/texture-packs/gtnh-16x-machine-textures 下载]
+|-
+|[[File:pack-Ranzu4.png|64px|frameless|center|alt=Icon|link=https://github.com/Ranzuu/Shadow-UI/releases/tag/Just-InvisHealingAxe]]
+|Invisible Healing Axe
+|Ranzu
+|使治愈之斧几乎不可见，防止副手持有时遮挡屏幕。
+|
+|[https://github.com/Ranzuu/Shadow-UI/releases/tag/Just-InvisHealingAxe 下载]
+|-
+|[[File:pack-Ranzu1.png|64px|frameless|center|alt=Icon|link=https://github.com/Ranzuu/OutlinedOres-Modern]]
+|Modern Outlined Ores
+|Ranzu
+|添加一个与核心颜色相匹配的实心边框。设计为与 Modernity（ABKQPO）兼容。
+|使用时最好卸载Legacy Ore Textures（原版内置）材质。
+|[https://github.com/Ranzuu/OutlinedOres-Modern/releases 下载]<br>[https://github.com/Ranzuu/OutlinedOres-Modern 原地址]
+|-
+|[[File:unknown_pack.png|64px|frameless|center|alt=Icon|link=https://discord.com/channels/181078474394566657/181078474394566657/925169847833358336]]
+|Outlined Ores
+|schneid3306
+|添加一个与矿石颜色相匹配的实心边框。
+|
+|[https://discord.com/channels/181078474394566657/181078474394566657/925169847833358336 下载]
+|-
+|}
+
+=== 深色模式 ===
+{{Mbox
+|border=primary
+|type=help
+|text=<font color="red"><big>若本页面表格向右显示异常，请注册并登录灰机wiki账号，点击页面标题右侧的刷新！</big></font>
+}}
+将 GUI 从默认的浅色背景 + 深色文字，改为深色背景 + 浅色文字的资源包。
+*如果遇到文字显示不清楚（例如深色背景 + 深色文字），可以尝试添加修复MOD：[https://github.com/eudesjuniorr/DarkTextFix DarkTextFix]，[https://github.com/AdminXiaoMai/DarkTextFix Modernity材质包特供DarkTextFix]
+{| class="wikitable"  style="width:auto"
+! style="background-color:#12364B; color:white;" | 图标 
+! style="background-color:#12364B; color:white;white-space:nowrap" | 名字
+! style="background-color:#12364B; color:white;white-space:nowrap" | 作者/维护者 
+! style="background-color:#12364B; color:white;" | 范围 
+! style="background-color:#12364B; color:white;" | 说明 
+! style="background-color:#12364B; color:white;width:110px;" | 链接
+|-
+|[[File:Pack-Modernity-GTNH-Dark-UI.png|64px|frameless|center|alt=Icon|link=https://github.com/ABKQPO/Modernity-GTNH-Dark-UI]]
+|Modernity-GTNH-Dark-UI
+|ABKQPO
+|将 GTNH 的所有UI材质更新为 Minecraft 1.14.4 及更高版本的暗色风格。
+|推荐搭配[https://github.com/ModernityGTNH/Modernity-GTNH Modernity-GTNH]使用。
+本资源包仍在开发中。
+|[https://github.com/ModernityGTNH/Modernity-GTNH-Dark-UI 源码]
+|-
+|[[File:pack-Ranzu2.png|64px|frameless|center|alt=Icon|link=https://github.com/Ranzuu/Shadow-UI]]
+|Shadow UI
+|Ranzu
+|深色模式的用户界面。提供两个版本：<br>一个用于原版 GTNH，一个用于 Modernity (ABKQPO)。
+|包含额外的界面微调和修复补丁包。<br>支持 GTNH 社区模组。
+|[https://github.com/Ranzuu/Shadow-UI/releases 下载]<br>[https://github.com/Ranzuu/Shadow-UI 源码]
+|-
+|[[File:pack-Ranzu3.png|64px|frameless|center|alt=Icon|link=https://github.com/Ranzuu/AE2-Dark-Mode]]
+|AE2 Dark Mode
+|Ranzu
+|深色模式的 AE2 方块材质<br>包含 AE2 Additions 以及 GTNH 社区模组的纹理。
+|参考高版本 AE2 官方暗色资源包。
+|[https://github.com/Ranzuu/AE2-Dark-Mode/releases 下载]<br>[https://github.com/Ranzuu/AE2-Dark-Mode 源码]
+|-
+|[[File:PackKuliiuu.png|alt=Icon|center|frameless|64x64px|link=https://github.com/Kuliiuu/Dark-GTNH-Reimagined]]
+|Dark GTNH Reimagined
+|Kuliiuu
+|深色模式 UI 资源包，专注于可读性、视觉一致性的简洁现代界面设计。<br>与 Modernity (ABKQPO) 搭配效果良好。
+|正在寻找反馈，预计在 2.8.4 版本完成。
+|[https://github.com/Kuliiuu/Dark-GTNH-Reimagined/releases 下载]<br>[https://github.com/Kuliiuu/Dark-GTNH-Reimagined 源码]
+|-
+|[[File:pack-Albi-Kuliiuu.png|64px|frameless|center|alt=Icon|link=https://github.com/Kuliiuu/Scuffed-GTNH-Dark-Continued]]
+|Scuffed GTNH Dark
+|Albi/Kuliiuu
+|GTNH 的深色模式资源包，包含自定义进度条。<br>设计风格与 Zedarrian Technology 和 Unity 资源包保持一致。<br>支持 GT5u、AE2、Forestry、NEI 等多个模组！
+|
+推荐与 [https://github.com/Unity-Resource-Pack/Unity/tree/1.7.10 Unity] 和 [https://github.com/MCTian-mi/Zederrian-Technology-GT5U Zedarrian Technology] 一起使用。
+|[https://github.com/Kuliiuu/Scuffed-GTNH-Dark-Continued/releases 下载]<br>[https://github.com/Kuliiuu/Scuffed-GTNH-Dark-Continued 源码] 
+|-
+|[[File:pack-S4mpsa.png|64px|frameless|center|alt=Icon|link=https://github.com/S4mpsa/TransparentUI]]
+|Transparent UI
+|S4mpsa
+|添加透明的深色 UI 界面。
+|需要为最新整合包版本进行更新。
+|[https://github.com/S4mpsa/TransparentUI 源码]
+|-
+|}
+
+=== 升级与重制 ===
+{{Mbox
+|border=primary
+|type=help
+|text=<font color="red"><big>若本页面表格向右显示异常，请注册并登录灰机wiki账号，点击页面标题右侧的刷新！</big></font>
+}}
+通过全新的美术资源或更高分辨率纹理来改变整体视觉风格的资源包。
+{| class="wikitable"  style="width:auto"
+! style="background-color:#12364B; color:white;" | 图标 
+! style="background-color:#12364B; color:white;white-space:nowrap" | 名字
+! style="background-color:#12364B; color:white;white-space:nowrap" | 作者/维护者 
+! style="background-color:#12364B; color:white;" | 范围 
+! style="background-color:#12364B; color:white;" | 说明 
+! style="background-color:#12364B; color:white;width:110px;" | 链接
+|-
+
+|[[File:pack-ABKQPO.png|64px|frameless|center|alt=Icon|link=https://github.com/ABKQPO/Modernity-GTNH]]
+|Modernity-GTNH
+|ABKQPO
+|将 GTNH 的所有纹理更新为 Minecraft 1.20.1+ 的风格。
+|支持包含机器仓室及主方块的链接纹理，推荐使用链接纹理，需要添加链接纹理MOD [https://github.com/ABKQPO/MyCTMLib MyCTMLib]。<br>建议搭配[https://modrinth.com/resourcepack/modernity Modernity]及[https://modrinth.com/resourcepack/modernity-adjunct Modernity Adjunct]使用，并将Modernity-GTNH置于其二上层。<br>若使用UI包，需要将UI包置于最顶层。
+|[https://github.com/ModernityGTNH Modernity-GTNH]
+|-
+|[[File:Zedtech-GTNH.png|64px|frameless|center|alt=Icon|link=https://www.curseforge.com/minecraft/texture-packs/zedtech-gtnh]]
+|Zedtech-GTNH
+|Origami2147
+|覆盖了GT5U以及附属，还有AE2，血魔法等模组。
+|以原来的Zederrian-Technology材质为基础，将GTM的Zedtech材质、1.20AE2材质等带回GTNH，整体风格较为契合高版本JAPPA风格。<br>支持链接纹理，前置同Modernity-GTNH [https://github.com/ABKQPO/MyCTMLib MyCTMLib]。<br>若压缩包无法加载，请解压成文件夹后放入资源包目录。
+|[https://www.curseforge.com/minecraft/texture-packs/zedtech-gtnh Curseforge]
+|-
+|[[File:pack-Ethryan.png|64px|frameless|center|alt=Icon|link=https://github.com/Ethryan/GTNH-Faithful-Texture]]
+|GTNH Faithful Textures
+|Ethryan
+|一个大型 Kitchensink 纹理包，包含将整体纹理提升至 32x 分辨率所需的一切内容。
+|
+|[https://github.com/Ethryan/GTNH-Faithful-Textures/releases 下载]<br>[https://github.com/Ethryan/GTNH-Faithful-Textures 源码]
+|-
+|[[File:pack-Eldrinn-Elantey.png|64px|frameless|center|alt=Icon|link=https://github.com/Eldrinn-Elantey/GTNH-FTI-Faithful-ResourcePack]]
+|GTNH FTI Faithful ResourcePack
+|Eldrinn-Elantey
+|Faithful 风格纹理，但在部分内容上做了一些不同的修改。
+|
+|[https://github.com/Eldrinn-Elantey/GTNH-FTI-Faithful-ResourcePack/releases 下载]<br>[https://github.com/Eldrinn-Elantey/GTNH-FTI-Faithful-ResourcePack 源码]
+|-
+|[[File:pack-Usernm0.png|64px|frameless|center|alt=Icon|link=https://github.com/Usernm0/GTNH-Textures-Usernm]]
+|GTNH Textures Usernm
+|Usernm0
+|电路与其他组件、机器外壳、线圈、硬币等纹理，分辨率 32×32。
+|仅修改部分指定纹理。
+|[https://github.com/Usernm0/GTNH-Textures-Usernm/releases 下载]<br>[https://github.com/Usernm0/GTNH-Textures-Usernm 源码]
+|-
+|[[File:pack-BlueHero233.png|64px|frameless|center|alt=Icon|link=https://github.com/BlueHero233/GTNHRefreshed]]
+|GTNHRefreshed
+|BlueHero233
+|ULSTICK 的 GregTech Refreshed 的回移植版本，并加入了一些额外内容以适配 GTNH 物品。
+|推荐与 [https://www.curseforge.com/minecraft/texture-packs/modernity Modernity] 一起使用。
+|[https://github.com/BlueHero233/GTNHRefreshed/releases 下载]<br>[https://github.com/BlueHero233/GTNHRefreshed 源码]
+|-
+|[[File:pack-Alkalus.png|64px|frameless|center|alt=Icon|link=https://github.com/alkcorp/JSTR-Alk-Modded-1.7.10]]
+|John Smith: Alk-GTNH
+|Alkalus
+|GTNH 的分支 [https://john-smith-modded.github.io/jstr-modded/ John Smith: Technician's Remix]
+|让GTNH变成中世纪风格！
+|[https://github.com/alkcorp/JSTR-Alk-Modded-1.7.10/releases 下载]<br>[https://github.com/alkcorp/JSTR-Alk-Modded-1.7.10 源码]
+|-
+|[[File:pack-Pyrolusite-XxinsanityxX.png|64px|frameless|center|alt=Icon|link=https://github.com/Fogy-F/Minimalistic-GTNH-repair]]
+|Minimalist Technology
+|原Pyrolusite,<br>现Fogy,<br>编译 XxinsanityxX
+|适用于 GregTech 5 与 IC2 的 16x 简洁平滑纹理，重置一部分电路板材质使其更容易辨认，适用于{{Label|2.8.4}}。
+|
+|[https://github.com/Fogy-F/Minimalistic-GTNH-repair/releases 下载]<br>[https://github.com/Fogy-F/Minimalistic-GTNH-repair 源码] 
+|-
+|[[File:pack-Magentanide.png|64px|frameless|center|alt=Icon|link=https://github.com/Slurpassassin/StellarFusion]]
+|Stellar Fusion
+|Magentanide
+|Faithful 资源包补充包，为 GregTech、GT++ 和 GTNH Core Mod 提供 32×32 纹理。
+|需要下载 [https://database.faithfulpack.net/packs/Classic-32x-Java/Programmer%20Art/Classic%20Faithful%2032x%20Programmer%20Art%20-%201.7.10.zip Faithful]作为基础。
+|[https://web.archive.org/web/20230430014009/https://www.gtnewhorizons.com/forum/m/36844562/viewthread/32547244-stellar-fusion-gregtech-32x32-v034 Download] [https://github.com/Slurpassassin/StellarFusion Source]
+|-
+|[[File:pack-Jimbno.png|64px|frameless|center|alt=Icon|link=https://github.com/Jimbno/UU-Tex]]
+|UU-Tex
+|Jimbno
+|重新制作多方块机器、不同等级电路以及零部件纹理。整体外观更偏暗色，并增加额外动画效果。
+|从源码页面下载 zip，记得解压。
+|[https://github.com/Jimbno/UU-Tex Source]
+|-
+|[[File:unknown_pack.png|64px|frameless|center|alt=Icon|link=https://github.com/Wilyb/Wily-bit-s-GTNH-tex]]
+|Wily-bit-s-GTNH-tex
+|Wily bit
+|重制GTNH材质。<br>仅修改GT模组的材质。
+|WIP<br>推荐与 [https://www.curseforge.com/minecraft/texture-packs/modernity Modernity] 一起使用。<br>目前已完成所有高压（HV）以下电子元件的材质制作，部分机械部件已添加表面纹理（计划覆盖全部部件）。
+|[https://github.com/Wilyb/Wily-bit-s-GTNH-tex/releases 下载]<br>[https://github.com/Wilyb/Wily-bit-s-GTNH-tex Source]
+|-
+|[[File:pack-Alexdoru.png|64px|frameless|center|alt=Icon|link=https://discord.com/channels/181078474394566657/224191655375273985/889345648204316673]]
+|Dynamic Duo GTNH
+|Alexdoru
+|平滑的原版风格纹理、32x 的合成物品纹理以及清晰的字体。
+|由 GregTech 与 Faithful 等多个资源包纹理组合而成。<br> 长久未更新。
+|[https://discord.com/channels/181078474394566657/224191655375273985/889345648204316673 discord下载]
+|-
+|[[File:pack-Ivelieu.png|64px|frameless|center|alt=Icon|link=https://gitlab.com/ivelieu/ivelitex]]
+|Ivelitex
+|Ivelieu
+|修改 Applied Energistics 2 的 GUI、部分其他 GUI，以及一些工具的小幅改动。使用分形装饰艺术风格背景。
+|光污染
+|[https://gitlab.com/ivelieu/ivelitex/-/releases 下载]<br>[https://www.planetminecraft.com/texture-pack/ivelitex/ Alternate]<br>[https://gitlab.com/ivelieu/ivelitex 源码]
+|}
+
+=== 游戏自带资源包 ===
+游戏内自带的资源包，用于一些客制化设置。
+*'''Fast Leaves Fix'''：用于修复“视频设置 → 质量 → 树叶”设为“流畅”时部分树叶方块的模型衔接与渲染一致性问题。
+*'''Glow Lines Only Galacticraft Thermal Padding GT V1.0.0'''：只有GC隔热服的发光动画线条会显示在玩家模型上。
+*'''Hidden Galacticraft Thermal Padding GT V1.0.0.zip'''：隐藏玩家模型上的GC隔热服。
+*'''Legacy Coin Textures'''：旧版硬币纹理（{{Label|2.9.0}} 之前）
+*'''Legacy IronChest Textures'''：旧版 IronChest 纹理（{{Label|2.8.0}} 之前）
+*'''Legacy Ore Textures'''：将矿石纹理恢复为旧版样式。
+*'''Round Large Turbine Overlay'''：圆形的大型涡轮机覆盖纹理。
+*'''Realistic Sky GT New Horizons'''：更真实的天空（例如圆形的太阳等）
+
+== 光影 ==
+=== '''摘要''' ===
+光影（Shader）是一类使用 OpenGL 指令编写的脚本，用于为游戏添加额外的图形效果。有多种模组可以在 Minecraft 中启用光影，并支持不同的 Shaderpack（光影包）。光影将提升画面质量，光影着重于提升如光线、水、树叶等物体的显示效果。
+
+许多光影包是为 较新的 Minecraft 原版版本以及更新的加载器（例如新版 Optifine 或 Iris）设计的，因此在 GTNH 中使用时可能会出现性能问题或显示异常。
+
+下面介绍了一些较为常见的光影加载器以及推荐的光影包和相关设置。
+
+'''提示：'''
+*由于光影会大量占用 GPU 资源，如果你的电脑性能较低，建议不要启用光影，或仅使用较低的光影设置。
+*部分mod方块（例如：{{item|弧光灯}}）提供的特殊渲染方式严重冲突
+[[File:光影包和弧光灯.png|400px|在光影包影响下的弧光灯渲染]]
+
+=== '''光影加载器''' ===
+==== '''Angelica''' ====
+Angelica 是由 GTNH 团队及社区贡献者将较新版本 Minecraft 中的Sodium / Embeddium 和 Iris / Oculus 回移植到 Minecraft 1.7.10 的项目。
+
+*{{color|red|Angelica是GTNH原版自带的光影加载器}}
+
+从{{Label|2.7.0}}（angelica 1.0.0-beta13）版本开始，Angelica 开始支持光影。
+*'''功能：'''
+**多线程区块渲染（Sodium 回移植）
+**光影支持（Iris 回移植，目前大部分可用，但仍存在一些问题，正在不断完善）
+*'''未来计划：'''
+**支持更多 1.7.10 模组和整合包
+**完整的光影支持
+**更多渲染性能优化
+
+如果使用angelica作为光影加载器，则最推荐使用Complementary + Euphoria Patches光影，它在angelica上的各种表现都非常优秀，获取方式见下。
+
+==== '''Optifine''' ====
+OptiFine作为老牌加载器支持非常多的光影，并且将 Shadermod 集成在自身中，因此可以直接加载光影。
+
+适用于{{Label|2.6.0}}之前版本
+
+如果无特殊需求，在{{Label|2.7.0}}后的版本'''{{color|red|不推荐}}'''使用Optifine作为光影加载器。
+
+*'''注意：'''
+*从{{Label|2.6.0}}开始，整合包中已经包含 Angelica，这会导致 Optifine 无法正常工作。如果想使用 Optifine，需要 禁用或删除 Angelica。
+*但在GTNH中，OptiFine可能会出现少量的渲染Bug，例如奖杯方块可能无法正确渲染，会出现模型崩坏的情况。
+
+=== '''安装方法''' ===
+#寻找一个喜欢的光影包，可在[https://modrinth.com/discover/shaders Modrinth]或[https://www.curseforge.com/minecraft/search?class=shaders&page=1&pageSize=20 CurseForge]上寻找，也可在[https://www.mcbbs.co/forum-texture-1.html mcbbs纪念版]或交流群中下载
+#找到光影包文件夹。路径为<code>.minecraft/shaderpacks</code>，也可以在进入游戏后按 游戏菜单→选项→视频设置→光影→光影包文件夹 的顺序找到文件夹
+#将光影包直接复制至光影包文件夹（'''无需解压光影包'''）
+#*一个正确的光影压缩包的结构为内含<code>shader</code>文件夹的压缩包。如果你从github上直接下载，可能有额外的文件夹包裹在外，此时可以在游戏内选择此光影但是无法读取光影配置，自然也无法启用光影，所以若无法使用，请检查压缩包内格式是否正确
+#*光影的配置文件与光影压缩包同级。如打开后<code>shaderpacks</code>文件夹后，可以同时看到<code>ComplementaryShaders_v4.6</code>应该与<code>ComplementaryShaders_v4.6.txt</code>
+#返回游戏在光影设置中选中你下载的光影包，点击完成，稍作等待
+#'''{{color|red|请注意你下载的是光影包而不是资源包}}'''
+
+=== '''推荐列表''' ===
+{{Mbox
+|border=primary
+|type=help
+|text=<font color="red"><big>若本页面表格向右显示异常，请注册并登录灰机wiki账号，点击页面标题右侧的刷新！</big></font>
+}}
+*'''{{color|red|如无特殊需求，不推荐使用Optifine作为光影加载器}}'''
+*Optifine将在{{Label|2.9.0}}版本彻底停止支持
+{| class="wikitable"  style="width:auto"
+! style="background-color:#12364B; color:white;" | 图标 
+! style="background-color:#12364B; color:white;white-space:nowrap" | 名字 
+! style="background-color:#12364B; color:white;white-space:nowrap" | 作者/维护者 
+! style="background-color:#12364B; color:white;" | 适用加载器 
+! style="background-color:#12364B; color:white;" | 说明 
+! style="background-color:#12364B; color:white;width:110px;" | 链接
+|-
+
+|[[File:shader-Complementary.png|64px|frameless|center|alt=Icon|link=https://modrinth.com/shader/complementary-unbound]]
+|Complementary
+|EminGT
+|
+*Angelica
+*Optifine
+|5.0+版本在2.8.4版本可能无法正常运行
+|[https://modrinth.com/shader/complementary-unbound modrinth]
+|-
+|[[File:shader-Complementary+Euphoria Patches.png|64px|frameless|center|alt=Icon|link=https://modrinth.com/mod/euphoria-patches]]
+|Complementary<br>+Euphoria Patches
+|SpacEagle17
+|
+*Angelica
+*Optifine
+|需要[https://modrinth.com/shader/complementary-unbound Complementary]为前置，安装[https://modrinth.com/mod/euphoria-patches Euphoria Patches]补丁。<br>最为推荐，因为Euphoria Patches补丁专门为angelica加载器进行过适配<ref>参见其官网上[https://www.euphoriapatches.com/faq/#shader-loader 此页面]的说明。</ref>。<br>链接仅为Euphoria Patches补丁。
+*{{Label|2.8.0}}暂不支持5.7.1版本的Complementary光影，请下载5.6.1版本的Complementary光影并配合支持5.6.1的Euphoria Patches版本。
+*{{Label|2.9.0}}已完成适配。
+|[https://www.euphoriapatches.com/ 官网]<br>[https://modrinth.com/mod/euphoria-patches modrinth]<br>[https://www.curseforge.com/minecraft/mc-mods/euphoria-patches curseforge]
+|-
+|[[File:Shader-BSL-Shaders.png|64px|frameless|center|alt=Icon|link=https://modrinth.com/shader/bsl-shaders/versions]]
+|BSL Shaders
+|CaptTatsu 
+|
+*Angelica
+*Optifine
+|
+|[https://modrinth.com/shader/bsl-shaders/versions modrinth]<br>[https://www.curseforge.com/minecraft/shaders/bsl-shaders curseforge]
+|-
+|[[File:shader-Sildur's Vibrant shaders.png|64px|frameless|center|alt=Icon|link=https://www.curseforge.com/minecraft/shaders/sildurs-vibrant-shaders]]
+|Sildur's Vibrant shaders
+|Sildur
+|
+*Optifine
+|
+*推荐设置：
+**Emissive Light：可以修改火把的光照颜色。
+**Moonlight Brightness：建议设置为 Very Dark，以获得更好的氛围效果。
+*已知问题：
+**SVS v1.2 无法正确显示月亮。如果需要查看月相（例如用于登月发射），需要暂时关闭光影。
+|[https://www.curseforge.com/minecraft/shaders/sildurs-vibrant-shaders curseforge]
+|-
+|[[File:shader-SEUS 11.0.png|64px|frameless|center|alt=Icon|link=https://sonicether.com/shaders/download/v11-0/]]
+|SEUS 11.0
+|SonicEther
+|
+*Optifine
+|
+*需要进行以下修改：
+**打开 composite1.vsh，将 torchlight（火把光照） 修改为 纯白色。
+**打开 final.fsh，将 water fog（水体雾效） 调整为 0.05。
+**夜视效果存在问题，使用夜视时需要临时切换到其他光影。
+**桶和抽屉渲染不正确，其中许多物品（如金属锭、硬币等）会显示为纯黑色。
+**晾干架会被错误地渲染成水。
+**Project Red 的灯显示效果不理想。
+|[https://sonicether.com/shaders/download/v11-0/ 官网]
+|-
+|}
+{{navbox firstgame}}

@@ -6,6 +6,7 @@
 
 数据来源：[GTNH wiki - 可添加MOD](https://gtnh.huijiwiki.com/wiki/可添加MOD)（以 wiki 实时数据为准，
 按网站分类：星门规则下的功能增强/性能优化/视听增强/旧版本限定 + 非星门规则）。
+另有[资源包与光影](https://gtnh.huijiwiki.com/wiki/资源包与光影)页面的资源包/光影包管理。
 wiki 没有的 mod 可通过**自定义源**（GitHub 仓库 / 本地文件夹 / 手动登记）扩展。
 
 ## 运行
@@ -69,6 +70,75 @@ py -m gtnhmod cli --update-all   # 直接更新全部可更新的mod（有失败
 8. **设置里的 GTNH整合包版本**：填写后（如 `2.9.0-beta1`），安装/更新选版本时会按
    Wiki/发布说明显示兼容提示；不填写也不影响选版。mods 目录与数据目录可在不同磁盘（跨盘复制自动处理）。
 
+## 资源包与光影（菜单 11 / GUI「资源包与光影」页）
+
+数据来源：[GTNH wiki - 资源包与光影](https://gtnh.huijiwiki.com/wiki/资源包与光影)。
+与 mod 分开管理：资源包装进 `resourcepacks/`、光影包装进 `shaderpacks/`，
+均**保留 .zip 不解压**（与游戏行为一致）。
+
+1. **安装目录**：默认由客户端 mods 目录的上一级推断（`<实例>/.minecraft/resourcepacks`、
+   `shaderpacks`）；设置页可分别手动指定，或用「自动检测」从实例根目录探测。
+2. **刷新资源包与光影Wiki数据**：抓取并解析该页面（复用与「可添加MOD」相同的
+   Cloudflare 通道与浏览器验证流程）。页面结构：资源包按无障碍与实用性/深色模式/
+   升级与重制分类，光影包为推荐列表；「游戏自带资源包」作为**只读清单**展示
+   （标记为整合包自带，无需下载，游戏内直接启用）。
+3. **安装/更新**：只有能自动下载的条目会真正落盘——
+   - **GitHub Releases** 资产（如 Shadow UI、GTNH Faithful、AE2 Dark Mode）
+   - **Modrinth** 版本文件（如 Complementary、BSL Shaders）
+   其余（CurseForge 需要官方 API key、Discord 附件需登录、web.archive.org、GitLab）
+   会明确提示「需手动下载」并给出准确落盘目录，避免假装成功。
+4. **多资产仓库**：同一 Release 有多个 zip 时（`Shadow.UI.v5.45.zip` 与
+   `Shadow.UI.v5.45-Modernity.version.zip`）工具**不猜**，详情页「选择下载资产...」
+   由你绑定，绑定结果在刷新 wiki 后保留（与 mod 的「绑定下载源」同理）。
+5. **设置下载源**（wiki 链接过时时用）：wiki 的链接不总是可用仓库地址——
+   例如 Modernity-GTNH 写的是 `github.com/ModernityGTNH`（组织页）+
+   `ABKQPO/Modernity-GTNH`（旧仓库），自动解析必然失败。详情页/右键菜单
+   「设置下载源...」可填 GitHub 仓库（支持 `作者/仓库` 简写）或 Modrinth 项目页；
+   绑定后优先使用该地址、刷新 wiki 不丢，「恢复wiki链接」即解绑。
+   绑定过资产筛选后若上游改名，会要求重新选择，不会悄悄换成别的文件。
+6. **检查更新 / 逐项安装**：只检查已安装且能识别版本的条目；本地版本更高时
+   **不自动降级**，与 mod 更新边界一致。本地或上游版本无法识别时跳过自动更新，
+   可在详情页手动选择下载资产。检查结果分别显示可更新、查询失败和需人工判断。单项失败不影响其他。
+7. **扫描与备份**：每次刷新列表都会扫描安装目录，手动放入的包也会被识别。
+   匹配按「剥离版本段 + 条目名按顺序覆盖文件名 + 连写词合并」打分，实测：
+   `GTNH-OutlinedOres.2.1.-.Modernity.version.zip` → Outlined Ores、
+   `Modernity-GTNH-Dark-UI-2.9.X.zip` → Modernity-GTNH-Dark-UI（不会被
+   Modernity-GTNH 抢走）、`ComplementaryUnbound_r5.8.1 + EuphoriaPatches_1.9.3`
+   → Complementary +Euphoria Patches；不属于任何条目的文件
+   （`Modernity-f1-3.10.2.zip`）保持未匹配。删除文件后列表自动取消「已安装」。
+   安装/更新前旧文件备份到
+   `data/backup/{resourcepacks|shaderpacks}/{条目id}/`，「备份与恢复」可还原。
+   更新已记录的旧 zip 时，校验新包并完成备份后才替换；文件名变化时旧 zip 退出安装目录，
+   其他文件保持原状。备份按创建时间轮换，同一时刻的重名备份不会互相覆盖。
+8. **结构校验**：下载后静态检查包结构——资源包需含 `pack.mcmeta` 或 `assets/`；
+   光影包压缩包内必须直接含 `shaders/`（wiki 明确提到的坑：多包一层文件夹时游戏
+   读不到光影配置，会给出提示）。无效包和非法下载文件名在写入前拒绝；
+   安装先写临时文件，再替换目标，避免复制中断破坏现有同名文件。
+
+> 扫描只读文件名、不遍历计算文件夹体积：解压后的资源包常有几十 MB，
+> 逐文件统计会让刷新明显卡顿（实测完整目录从数十秒降到 0.01 秒）。
+
+### 登记 wiki 之外的资源包（自定义条目）
+
+安装目录里常有不属于该 wiki 页面的包（例如从 Modrinth 装的
+`Modernity-f1-3.10.2.zip`、`ModernityAdjunct-f1-1.6.zip`）。它们不会被匹配到任何
+条目，因此也检查不到更新。点 **「登记自定义包」** 会列出这些未识别的文件：
+
+- 选中一个 → 填英文名（预填自文件名，用于匹配已装文件）、可选中文名与**下载源**
+  （GitHub 仓库或 Modrinth 项目页，也支持 `作者/仓库` 简写）→ 登记后即可跟踪更新。
+- 多选时共用一个来源，名字自动取自文件名，可稍后在详情页「设置下载源...」补上。
+- 自定义条目**不会被刷新 wiki 删掉**（它们本来就不在 wiki 里），也随时可删除。
+
+非交互模式（可配合计划任务）：
+
+```
+py -m gtnhmod cli --packs-check    # 只检查资源包/光影更新（有出错项时退出码 1）
+py -m gtnhmod cli --packs-update   # 更新全部已安装且可自动下载的资源包/光影（有失败项时退出码 1）
+```
+
+`--packs-update` 与 mod 的 `--update-all` 语义一致：**只更新已安装的条目**，
+不会把 wiki 上的其他包下载下来；首次安装请在交互菜单或 GUI 里逐项选择。
+
 ## 操作便捷性（GUI）
 
 - **右键菜单**：所有列表（已安装/可添加/未受管/自定义源）右键弹出对应操作，
@@ -105,9 +175,13 @@ py -m gtnhmod cli --update-all   # 直接更新全部可更新的mod（有失败
 - `config.json` — 两端路径、token、代理、备份保留数等（可手改）
 - `mods_db.json` — wiki 解析结果 + 自定义源（刷新 wiki 时自动合并，你手动关联的
   jar 名映射/自定义源不会丢）
+- `packs_db.json` — 资源包与光影条目 + 安装记录（含各自绑定的下载资产；
+  删掉该文件只会丢失绑定与版本记录，重新扫描/刷新即可恢复）
 - `installed.json` — 已装状态（版本、锁定、检查时间；不存路径，路径变了只需重设）
-- `cache/` — GitHub API 条件请求缓存（ETag/304，6 小时新鲜度，限流友好）
-- `backup/` — 更新前旧版本备份（菜单 9 可恢复）
+- `cache/` — GitHub API 条件请求缓存（ETag/304，6 小时新鲜度，限流友好）；
+  另存 `wiki_wikitext.txt` / `packs_wikitext.txt`（两页最近一次通过校验的原文）
+- `backup/` — 更新前旧版本备份（菜单 9 可恢复；资源包/光影在
+  `backup/resourcepacks/`、`backup/shaderpacks/` 下同规则保留）
 - `logs/operations.log` — **操作日志**：安装/更新/恢复备份/启用禁用/锁定/剔除/注册等
   全部落盘记录（超过 2MB 自动轮转为 .old）；CLI 菜单 10 / GUI 设置页有"打开操作日志"入口
 
@@ -141,6 +215,15 @@ wiki 站开启 Cloudflare 人机验证后，程序直连会收到"请稍候…"�
 
 - **CurseForge 源的 mod 无法自动下载**（CurseForge 下载 API 需要官方 key）。
   工具会打开浏览器页面，手动下载放入 mods 目录后重新扫描即可识别新版本。
+  资源包与光影同理：CurseForge / Discord / web.archive.org / GitLab 链接只能手动下载，
+  工具会给出准确落盘目录（`resourcepacks/` 或 `shaderpacks/`），放好后「重新扫描」即识别。
+- **资源包/光影的版本识别基于文件名**：`Shadow.UI.v5.45.zip`、`GTNH-Faithful-x32.v2.2.0.zip`、
+  `ComplementaryUnbound_r5.9.3.zip` 这类命名能识别；名字里没有版本号时显示「未识别」。
+  上游把非版本串当 tag 时（如 `Stable`、`machines`、`weekly-2026-09-28`）**不猜新旧**，
+  不会自动重装，只提示需人工确认——避免「装完立刻又提示可更新」。
+  这类每周构建（Modernity-GTNH / Modernity-GTNH-Dark-UI）想更新时，
+  用详情页「选择下载资产...」挑一次即可。
+  上游多资产且无法确定对应文件时同样不猜，要求手动绑定下载资产。
 - **GitHub 匿名 API 限额 60 次/时**：工具只查已装 mod + 条件缓存，通常够用；
   剩 10 次以内会提示，建议在设置中配置 GitHub Token（`github.com/settings/tokens`，
   只需公开仓库读取权限）。
@@ -161,6 +244,6 @@ wiki 站开启 Cloudflare 人机验证后，程序直连会收到"请稍候…"�
 py -m unittest discover -s tests -v    # 单元/E2E/GUI 回归测试（离线，含真实wiki样例解析）
 ```
 
-结构：核心库 `gtnhmod/`（versions/wiki/net/sources/scanner/downloader/updater...）
+结构：核心库 `gtnhmod/`（versions/wiki/packs/packs_wiki/net/sources/scanner/downloader/updater...）
 不依赖任何界面；`cli.py`（交互菜单）与 `gui.py`（Tkinter）是两个壳，
 交互统一走 `ui.py` 的 UIProtocol（可测试）。

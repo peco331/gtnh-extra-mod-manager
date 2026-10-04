@@ -8,6 +8,7 @@
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -18,10 +19,13 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from . import SIDES, SIDE_LABELS, __version__, net, updater, utils, cookies
+from . import packs as packmod
+from . import packs_wiki as packwiki
 from . import wiki as wikimod
 from .config import Config
 from .db import ModsDB
 from .installed import InstalledDB
+from .packs import PacksDB
 from .targets import source_confirmation_state
 
 STATUS_CN = {"installed": "已安装", "update_avail": "可更新",
@@ -48,6 +52,7 @@ class GuiApp:
         self.cfg = Config(data_dir)
         self.db = ModsDB(data_dir / "mods_db.json")
         self.installed = InstalledDB(data_dir / "installed.json")
+        self.packs = PacksDB(data_dir / "packs_db.json")
         # 启动维护：校正已安装记录、清理积压备份、清扫孤儿临时文件
         updater.startup_maintenance(self.cfg, self.db, self.installed)
         self.queue: queue.Queue = queue.Queue()
@@ -62,6 +67,7 @@ class GuiApp:
         self.root.report_callback_exception = self._report_cb_exc
         self._merged_cache = None      # build_merged_registry 结果缓存（一次刷新内复用）
         self._new_ids: set = set()     # 本次刷新wiki新增的mod（查看详情后清除高亮）
+        self._pack_updates: dict = {}  # (kind, pack_id) → 可更新到的版本（检查更新后填充）
         self._build_ui()
         self.root.after(100, self._poll_queue)
         # 启动时刷新全部页签（否则自定义源/未受管页首次是空的）
@@ -69,6 +75,7 @@ class GuiApp:
         self.refresh_addable()
         self.refresh_unmanaged()
         self.refresh_custom()
+        self.refresh_packs()
         # 切换页签时自动刷新对应页
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         # 全局快捷键：Ctrl+F 聚焦搜索、F5 刷新当前页
@@ -76,7 +83,7 @@ class GuiApp:
         self.root.bind_all("<Control-F>", lambda e: self._focus_search())
         self.root.bind_all("<F5>", lambda e: self._refresh_current_tab())
         # 树全选（Ctrl+A）
-        for t in (self.inst_tree, self.add_tree, self.um_tree, self.cust_tree):
+        for t in (self.inst_tree, self.add_tree, self.um_tree, self.cust_tree, self.pack_tree):
             t.bind("<Control-a>", lambda _e, tree=t: tree.selection_set(tree.get_children("")))
         # 键盘导航：回车=详情，Delete=删除（有确认框兜底）
         self.inst_tree.bind("<Return>", lambda _e: self._open_inst_detail_selection())
@@ -102,11 +109,12 @@ class GuiApp:
 
     def _on_close(self):
         """退出前取消挂起的防抖定时器（避免对已销毁控件的回调）并记忆窗口状态。"""
-        for attr in ("_inst_search_after", "_add_search_after", "_um_search_after"):
+        for attr in ("_inst_search_after", "_add_search_after", "_um_search_after",
+                     "_pack_search_after"):
             if getattr(self, attr, None):
                 self.root.after_cancel(getattr(self, attr))
         try:
-            for t in (self.inst_tree, self.add_tree, self.um_tree, self.cust_tree):
+            for t in (self.inst_tree, self.add_tree, self.um_tree, self.cust_tree, self.pack_tree):
                 self._persist_view(t)
             self.cfg.data["window_geometry"] = self.root.geometry()
             self.cfg.save()
@@ -128,7 +136,8 @@ class GuiApp:
 
     def _focus_search(self):
         """Ctrl+F：聚焦当前页的搜索框。"""
-        for attr in ("inst_search_entry", "add_search_entry", "um_search_entry"):
+        for attr in ("inst_search_entry", "add_search_entry", "um_search_entry",
+                     "pack_search_entry"):
             e = getattr(self, attr, None)
             if e is not None and e.winfo_ismapped():
                 e.focus_set()
@@ -140,7 +149,8 @@ class GuiApp:
         if self.busy:
             return  # 后台任务进行中，避免并发扫描/重绘
         (self.refresh_installed, self.refresh_addable,
-         self.refresh_unmanaged, self.refresh_custom, lambda: None)[self.nb.index("current")]()
+         self.refresh_unmanaged, self.refresh_custom,
+         self.refresh_packs, lambda: None)[self.nb.index("current")]()
 
     # ---------- UI 构建 ----------
     def _build_ui(self):
@@ -172,8 +182,11 @@ class GuiApp:
         self.nb.add(tab4, text="自定义源")
         self._build_custom_tab(tab4)
         tab5 = ttk.Frame(self.nb)
-        self.nb.add(tab5, text="设置")
-        self._build_settings_tab(tab5)
+        self.nb.add(tab5, text="资源包与光影")
+        self._build_packs_tab(tab5)
+        tab6 = ttk.Frame(self.nb)
+        self.nb.add(tab6, text="设置")
+        self._build_settings_tab(tab6)
 
         bottom = ttk.Frame(main_pane)
         main_pane.add(bottom, stretch="never", minsize=56)
@@ -404,7 +417,7 @@ class GuiApp:
                            "② 回到「可添加MOD」页点「刷新Wiki数据」获取可安装列表   →   "
                            "③ 勾选想装的 mod 批量安装",
                   font=FONT).pack(side="left")
-        ttk.Button(gf, text="去设置页", command=lambda: self.nb.select(4)).pack(side="right")
+        ttk.Button(gf, text="去设置页", command=lambda: self.nb.select(5)).pack(side="right")
         self.guide.pack(fill="x", padx=6, pady=(0, 4))
         self.guide.pack_forget()  # 默认隐藏，两端目录均未配置时显示
 
@@ -593,6 +606,52 @@ class GuiApp:
         path_row(2, "服务端 mods 目录", "server_entry")
         f.columnconfigure(1, weight=1)
 
+        # ---- 资源包 / 光影包目录 ----
+        pf = ttk.LabelFrame(tab, text="资源包与光影目录（留空则按客户端 mods 目录自动推断）")
+        pf.pack(fill="x", padx=12, pady=6)
+
+        def pack_dir_row(row, label, kind):
+            ttk.Label(pf, text=label).grid(row=row, column=0, sticky="w", pady=6)
+            e = ttk.Entry(pf, width=60)
+            e.grid(row=row, column=1, sticky="we", padx=6)
+            setattr(self, f"pack_{kind}_entry", e)
+
+            def browse():
+                p = filedialog.askdirectory(title=label)
+                if p:
+                    e.delete(0, "end")
+                    e.insert(0, p)
+
+            def auto():
+                p = filedialog.askdirectory(title="选择整合包实例根目录（或 .minecraft / mods 目录）")
+                if not p:
+                    return
+                res = packmod.detect_pack_dirs(p)
+                found = []
+                for k, dirname in packmod.DIR_NAMES.items():
+                    got = res.get(dirname)
+                    if got:
+                        getattr(self, f"pack_{k}_entry").delete(0, "end")
+                        getattr(self, f"pack_{k}_entry").insert(0, str(got))
+                        found.append(f"{dirname}: {got}")
+                if found:
+                    messagebox.showinfo("识别成功", "已自动填入:\n" + "\n".join(found))
+                else:
+                    messagebox.showwarning(
+                        "提示", "未在该目录下找到 resourcepacks / shaderpacks 文件夹。\n"
+                                "目录可能尚未创建（启动一次游戏即可生成），可手动指定。")
+
+            ttk.Button(pf, text="浏览...", command=browse).grid(row=row, column=2)
+            ttk.Button(pf, text="自动检测", command=auto).grid(row=row, column=3, padx=(4, 0))
+
+        pack_dir_row(0, "资源包目录 resourcepacks", "resourcepack")
+        pack_dir_row(1, "光影包目录 shaderpacks", "shader")
+        pf.columnconfigure(1, weight=1)
+        ttk.Label(pf, text="说明：资源包放入 resourcepacks（保留 .zip 不解压），光影包放入 shaderpacks；"
+                           "光影包压缩包内必须直接含 shaders 文件夹，多包一层时游戏读不到配置。",
+                  wraplength=780, foreground="#666", justify="left").grid(
+            row=2, column=0, columnspan=4, sticky="we", padx=6, pady=(0, 6))
+
         # ---- 网络（GitHub / 代理模式）----
         nf = ttk.LabelFrame(tab, text="网络与代理连接")
         nf.pack(fill="x", padx=12, pady=6)
@@ -693,6 +752,9 @@ class GuiApp:
 
         self.client_entry.insert(0, str(self.cfg.client_mods_dir or ""))
         self.server_entry.insert(0, str(self.cfg.server_mods_dir or ""))
+        self.pack_resourcepack_entry.insert(
+            0, self.cfg.pack_folders.get("resourcepack") or "")
+        self.pack_shader_entry.insert(0, self.cfg.pack_folders.get("shader") or "")
         self.token_entry.insert(0, self.cfg.github_token)
         p = self.cfg.proxy
         if p and not p.get("host"):
@@ -746,6 +808,9 @@ class GuiApp:
             if fn is not None:
                 self._pending_debounce = None
                 self.root.after(50, fn)  # 补执行 busy 期间挂起的刷新
+            if getattr(self, "_pending_pack_refresh", False):
+                self._pending_pack_refresh = False
+                self.root.after(50, self.refresh_packs)
 
     def _push_progress(self, done, total, label):
         """后台线程推送进度事件。"""
@@ -786,9 +851,12 @@ class GuiApp:
 
     def _on_tab_changed(self, event):
         """切换页签时刷新对应页（设置页除外）。"""
+        if self.busy:
+            return  # 后台任务进行中（可能正写 packs_db），避免并发读写
         idx = self.nb.index("current")
         (self.refresh_installed, self.refresh_addable,
-         self.refresh_unmanaged, self.refresh_custom, lambda: None)[idx]()
+         self.refresh_unmanaged, self.refresh_custom,
+         self.refresh_packs, lambda: None)[idx]()
 
     def _poll_queue(self):
         try:
@@ -832,6 +900,821 @@ class GuiApp:
         self.refresh_addable()
         self.refresh_unmanaged()
         self.refresh_custom()
+        self.refresh_packs()
+
+    # ---------- 资源包与光影页 ----------
+    def _build_packs_tab(self, tab):
+        top = ttk.Frame(tab)
+        top.pack(fill="x", padx=6, pady=4)
+        ttk.Label(top, text="类型:").pack(side="left")
+        self.pack_kind = tk.StringVar(value=packwiki.KIND_RESOURCE)
+        kind_combo = ttk.Combobox(top, textvariable=self.pack_kind, state="readonly",
+                                  width=10,
+                                  values=(packwiki.KIND_RESOURCE, packwiki.KIND_SHADER))
+        kind_combo.pack(side="left", padx=(2, 10))
+        kind_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_packs())
+        ttk.Label(top, text="分类:").pack(side="left")
+        self.pack_cat = tk.StringVar()
+        self.pack_cat_combo = ttk.Combobox(top, textvariable=self.pack_cat,
+                                           state="readonly", width=20)
+        self.pack_cat_combo.pack(side="left", padx=(2, 10))
+        self.pack_cat_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_packs())
+        ttk.Label(top, text="搜索:").pack(side="left")
+        self.pack_search = tk.StringVar()
+        self.pack_search.trace_add("write", lambda *a: self._debounce_pack_search())
+        self.pack_search_entry = ttk.Entry(top, textvariable=self.pack_search, width=20)
+        self.pack_search_entry.pack(side="left", padx=(2, 8))
+        ttk.Button(top, text="刷新Wiki数据", command=self.refresh_packs_wiki).pack(side="right")
+
+        self.pack_only_installed = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="仅已安装", variable=self.pack_only_installed,
+                        command=self.refresh_packs).pack(side="right", padx=4)
+
+        cols = ("name", "author", "cat", "source", "installed", "ver", "status", "desc")
+        heads = ("名称", "作者/维护者", "分类", "下载源", "已安装", "本地版本", "状态", "说明")
+        tree_frame = ttk.Frame(tab)
+        tree_frame.pack(fill="both", expand=True, padx=6)
+        self.pack_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
+                                      selectmode="extended")
+        for c, h, w in zip(cols, heads, (215, 105, 95, 100, 75, 95, 95, 330)):
+            self.pack_tree.heading(c, text=h)
+            self.pack_tree.column(c, width=w, anchor="w")
+        self.pack_tree.tag_configure("inst", foreground=STATUS_COLORS["installed"])
+        self.pack_tree.tag_configure("upd", foreground=STATUS_COLORS["update_avail"])
+        self.pack_tree.tag_configure("manual", foreground="#b36b00")
+        self.pack_tree.tag_configure("local", foreground="#777777")
+        self.pack_tree.tag_configure("odd", background="#f4f5f7")
+        self.pack_tree.pack(side="left", fill="both", expand=True)
+        self._attach_scrollbar(self.pack_tree, tree_frame)
+        self.pack_tree._view_key = "packs"
+        self._make_sortable(self.pack_tree)
+        self._restore_view(self.pack_tree)
+        self.pack_tree.bind("<Double-1>", lambda e: self.show_pack_detail())
+        self.pack_tree.bind("<Return>", lambda e: self.show_pack_detail())
+        self.pack_tree.bind("<Button-3>",
+                            lambda e: self._popup(self.pack_tree, self._pack_menu, e))
+
+        btns = ttk.Frame(tab)
+        btns.pack(fill="x", padx=6, pady=4)
+        ttk.Button(btns, text="详情", command=self.show_pack_detail).pack(side="left", padx=2)
+        ttk.Button(btns, text="安装/更新", command=self.install_selected_packs).pack(side="left", padx=2)
+        ttk.Button(btns, text="检查更新", command=self.check_pack_updates).pack(side="left", padx=2)
+        ttk.Button(btns, text="打开下载页面", command=self.open_pack_page).pack(side="left", padx=2)
+        ttk.Button(btns, text="打开安装目录", command=self.open_pack_folder).pack(side="left", padx=2)
+        ttk.Button(btns, text="备份与恢复", command=self.pack_backup_dialog).pack(side="left", padx=2)
+        ttk.Button(btns, text="登记自定义包", command=self.register_pack_dialog).pack(side="left", padx=2)
+        ttk.Button(btns, text="重新扫描", command=self.refresh_packs).pack(side="left", padx=2)
+        self.pack_dir_label = ttk.Label(tab, text="", foreground="#666")
+        self.pack_dir_label.pack(anchor="w", padx=8, pady=(0, 4))
+
+    def _debounce_pack_search(self):
+        self._debounce("_pack_search_after", self.refresh_packs)
+
+    def _pack_kind(self) -> str:
+        return self.pack_kind.get()
+
+    def _sorted_pack_entries(self) -> list:
+        """按类型 + 分类 + 搜索 + 仅已安装过滤后的条目列表。"""
+        kind = self._pack_kind()
+        entries = self.packs.by_kind(kind)
+        inst = packmod.installed_index(self.packs)
+        cat = (self.pack_cat.get() or "").strip()
+        kw = self.pack_search.get().strip().lower()
+        only_inst = self.pack_only_installed.get()
+        out = []
+        for e in entries:
+            if cat and (e.get("category") or "") != cat:
+                continue
+            if only_inst and (kind, e["id"]) not in inst:
+                continue
+            if kw:
+                hay = " ".join((e.get("name_en") or "", e.get("name_cn") or "",
+                                e.get("author") or "", e.get("desc") or "",
+                                e.get("category") or "", e["id"])).lower()
+                if kw not in hay:
+                    continue
+            out.append(e)
+        return out
+
+    def refresh_packs(self):
+        """重绘资源包/光影列表，并用磁盘扫描结果校正安装记录。"""
+        if self.busy:
+            self._pending_pack_refresh = True
+            return
+        if not hasattr(self, "pack_tree"):
+            return
+        kind = self._pack_kind()
+        try:
+            packmod.reconcile_installed(self.cfg, self.packs, kinds=[kind])
+        except Exception as e:      # 目录不可读等不应让列表打不开
+            self._log(f"[警告] 扫描{packwiki.KIND_LABELS.get(kind, kind)}目录失败: {e}")
+        cats = self.packs.categories(kind)
+        self.pack_cat_combo.configure(values=[""] + cats)
+        if self.pack_cat.get() and self.pack_cat.get() not in cats:
+            self.pack_cat.set("")
+
+        inst = packmod.installed_index(self.packs)
+        keep_yview = self.pack_tree.yview()
+        self.pack_tree.delete(*self.pack_tree.get_children())
+        self.pack_rows = []
+        for e in self._sorted_pack_entries():
+            rec = inst.get((kind, e["id"])) or {}
+            if e.get("local"):
+                source_txt, status = "整合包自带", "无需下载"
+            elif packmod.entry_auto_url(e):
+                source_txt = "自动下载" if not e.get("bound_source") else "自动下载(已绑定)"
+                status = ""
+            else:
+                primary = (e.get("urls") or {}).get("primary") or ""
+                source_txt = "手动下载"
+                status = packmod.host_note(primary) if primary else "无下载链接"
+            if rec.get("file_name"):
+                local_ver = rec.get("version") or "未识别"
+                if not status:
+                    target_ver = (getattr(self, "_pack_updates", None) or {}).get(
+                        (kind, e["id"]))
+                    status = f"可更新 → {target_ver}" if target_ver else "已安装"
+                installed_txt = "是"
+            else:
+                local_ver = "—"
+                installed_txt = "否"
+                if not status:
+                    status = "未安装"
+            tag = ("local" if e.get("local") else
+                   "upd" if status.startswith("可更新") else
+                   "inst" if installed_txt == "是" else
+                   "manual" if source_txt == "手动下载" else "")
+            iid = e["id"]
+            self.pack_tree.insert(
+                "", "end", iid=iid, tags=(tag,) if tag else (),
+                values=(e.get("name_en") or e["id"], e.get("author") or "",
+                        e.get("category") or "", source_txt, installed_txt, local_ver,
+                        status, (e.get("desc") or "").replace("\n", " ")[:120]))
+            self.pack_rows.append(e)
+        self._set_status(
+            f"{packwiki.KIND_LABELS.get(kind, kind)}：{len(self.pack_rows)} 个条目"
+            f"（已安装 {sum(1 for e in self.pack_rows if (kind, e['id']) in inst)}）")
+        hint = packmod.folder_hint(self.cfg, kind)
+        self.pack_dir_label.configure(text=f"安装目录：{hint}")
+        self._reapply_sort(self.pack_tree)
+        if keep_yview[0] > 0:
+            self.pack_tree.yview_moveto(keep_yview[0])
+
+    def _selected_packs(self) -> list:
+        sel = set(self.pack_tree.selection())
+        return [e for e in self.pack_rows if e["id"] in sel]
+
+    def refresh_packs_wiki(self):
+        """抓取并合并「资源包与光影」页面（复用 wiki 反爬通道）。"""
+        if self.busy:
+            messagebox.showinfo("提示", "有后台任务正在执行，请稍候")
+            return
+        self._set_busy(True)
+        self._log("正在抓取资源包与光影页面（gtnh.huijiwiki.com）...")
+
+        def work():
+            return packwiki.fetch_packs(
+                self.cfg, interactive=True,
+                progress_cb=lambda m: self.queue.put(("log", m, None)))
+
+        def done(res):
+            try:
+                if res is None:
+                    self._set_busy(False)
+                    return
+                self._log(f"Wiki 读取证据：发起 {res.request_count} 个网络请求；"
+                          f"通道={res.channel}；响应={res.response_bytes} 字节；"
+                          f"内容指纹={res.text_hash[:12]}")
+                entries, warnings = packwiki.parse_packs_wikitext(res.text)
+                if not entries:
+                    raise ValueError("未解析出任何条目，已取消合并（本地数据未改动）")
+                changes = self.packs.merge_wiki(entries)
+                for w in warnings:
+                    self._log(f"[警告] {w}")
+                delta = f"{len(changes)} 处变化" if changes else "内容没有变化"
+                self._log(f"资源包与光影已更新：{len(entries)} 个条目，{delta}")
+                for c in changes[:30]:
+                    self._log(f"  - {c}")
+                if len(changes) > 30:
+                    self._log(f"  ... 另有 {len(changes) - 30} 处变化")
+                self.refresh_packs()
+            except Exception as e:
+                self._log(f"[错误] 资源包与光影合并失败: {e}")
+                messagebox.showerror("刷新失败", str(e))
+            finally:
+                self._set_busy(False)
+
+        self._run_async(work, done)
+
+    def show_pack_detail(self):
+        sel = self._selected_packs()
+        if not sel:
+            messagebox.showinfo("提示", "请先选中一个条目")
+            return
+        self._pack_detail_dialog(sel[0])
+
+    def _pack_detail_dialog(self, entry):
+        kind = entry.get("kind")
+        top = self._dialog(f"详情 - {entry.get('name_en') or entry['id']}", "720x600")
+        head = ttk.Frame(top)
+        head.pack(fill="x", padx=10, pady=(10, 4))
+        ttk.Label(head, text=entry.get("name_en") or entry["id"],
+                  font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
+        meta = [f"类型：{packwiki.KIND_LABELS.get(kind, kind)}",
+                f"分类：{entry.get('category') or '—'}",
+                f"作者：{entry.get('author') or '—'}"]
+        if entry.get("loader"):
+            meta.append(f"加载器：{entry['loader'].replace(chr(10), '/')}")
+        if entry.get("local"):
+            meta.append("整合包自带（无需下载，游戏内直接启用）")
+        ttk.Label(head, text="　|　".join(meta), foreground="#555",
+                  wraplength=680, justify="left").pack(anchor="w", pady=(2, 0))
+        if entry.get("version_requirements"):
+            reqs = "、".join(
+                f"{r['version']}" + {"below": " 以下", "above": " 以上"}.get(r["relation"], "")
+                for r in entry["version_requirements"])
+            ttk.Label(head, text=f"版本提示：{reqs}", foreground="#b36b00").pack(anchor="w")
+
+        body = tk.Text(top, wrap="word", height=14, font=FONT)
+        body.pack(fill="both", expand=True, padx=10, pady=6)
+        inst = packmod.installed_index(self.packs).get((kind, entry["id"])) or {}
+        lines = []
+        if entry.get("scope"):
+            lines.append(f"【范围】\n{entry['scope']}")
+        if entry.get("desc"):
+            lines.append(f"【说明】\n{entry['desc']}")
+        if inst:
+            lines.append("【本地已装】\n"
+                         f"{inst.get('file_name')}（版本 {inst.get('version') or '未识别'}）\n"
+                         f"记录时间：{inst.get('installed_at') or '—'}"
+                         + (f"\n提示：{inst['note']}" if inst.get("note") else ""))
+        lines.append(f"【安装目录】\n{packmod.folder_hint(self.cfg, kind)}")
+        links = (entry.get("urls") or {}).get("links") or []
+        if links:
+            lines.append("【链接】\n" + "\n".join(f"· {x['label']}  {x['url']}" for x in links))
+        else:
+            lines.append("【链接】\n（整合包自带，无下载链接）")
+        body.insert("1.0", "\n\n".join(lines))
+        body.configure(state="disabled")
+
+        # ---- 下载源 / 候选资产选择 ----
+        src_row = ttk.Frame(top)
+        src_row.pack(fill="x", padx=10, pady=(0, 4))
+        auto_url = packmod.entry_auto_url(entry)
+        if entry.get("local"):
+            ttk.Label(src_row, text="整合包自带资源包，无需下载安装。",
+                      foreground="#777").pack(anchor="w")
+        elif not auto_url:
+            primary = (entry.get("urls") or {}).get("primary") or ""
+            ttk.Label(src_row, text=f"此条目需手动下载：{packmod.host_note(primary)}",
+                      foreground="#b36b00", wraplength=680,
+                      justify="left").pack(anchor="w")
+            ttk.Label(src_row, text=f"下载后放入：{packmod.folder_hint(self.cfg, kind)}",
+                      foreground="#555", wraplength=680,
+                      justify="left").pack(anchor="w")
+
+        btns = ttk.Frame(top)
+        btns.pack(fill="x", padx=10, pady=(2, 10))
+
+        def open_primary():
+            url = (entry.get("urls") or {}).get("primary")
+            if url:
+                webbrowser.open(url)
+            else:
+                messagebox.showinfo("提示", "该条目没有可打开的链接")
+
+        ttk.Button(btns, text="打开下载页面", command=open_primary).pack(side="left", padx=2)
+        if auto_url:
+            def do_install():
+                top.destroy()
+                self._install_packs([entry])
+            ttk.Button(btns, text="安装/更新", command=do_install).pack(side="left", padx=2)
+            ttk.Button(btns, text="选择下载资产...",
+                       command=lambda: self._pack_asset_dialog(entry)).pack(side="left", padx=2)
+        if not entry.get("local"):
+            ttk.Button(btns, text="设置下载源...",
+                       command=lambda: self._pack_source_dialog(entry, top)).pack(side="left", padx=2)
+            if entry.get("bound_source"):
+                ttk.Button(btns, text="恢复wiki链接",
+                           command=lambda: self._pack_clear_source(entry, top)).pack(side="left", padx=2)
+        ttk.Button(btns, text="关闭", command=top.destroy).pack(side="right", padx=2)
+
+    def _pack_source_dialog(self, entry, parent=None):
+        """手动指定下载源：wiki 链接过时时（组织页/旧仓库）由用户补正。
+
+        绑定后 ``entry_auto_url`` 优先使用该地址，刷新 wiki 也不会丢。
+        """
+        current = entry.get("bound_source") or ""
+        wiki_url = (entry.get("urls") or {}).get("github") or \
+                   (entry.get("urls") or {}).get("modrinth") or \
+                   (entry.get("urls") or {}).get("primary") or ""
+        top = self._dialog("设置下载源", "640x300")
+        ttk.Label(top, text=f"{entry.get('name_en') or entry['id']}",
+                  font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w", padx=10, pady=(10, 2))
+        ttk.Label(top, text="wiki 上的链接可能已过时（组织页 / 旧仓库 / 非仓库地址）。\n"
+                            "填 GitHub 仓库或 Modrinth 项目页即可一键下载；留空并确定＝恢复用 wiki 链接。",
+                  foreground="#666", justify="left").pack(anchor="w", padx=10)
+        if wiki_url:
+            ttk.Label(top, text=f"wiki 当前链接：{wiki_url}",
+                      foreground="#8a6d00", wraplength=600,
+                      justify="left").pack(anchor="w", padx=10, pady=(4, 0))
+        ttk.Label(top, text="新的下载源：").pack(anchor="w", padx=10, pady=(8, 0))
+        var = tk.StringVar(value=current)
+        ttk.Entry(top, textvariable=var, width=78).pack(fill="x", padx=10)
+        ttk.Label(top, text="可填 https://github.com/作者/仓库（或 owner/repo）、"
+                            "https://modrinth.com/shader/项目名",
+                  foreground="#666").pack(anchor="w", padx=10, pady=(2, 0))
+
+        def confirm():
+            try:
+                res = packmod.set_download_source(self.packs, entry["id"], var.get())
+            except Exception as e:
+                messagebox.showerror("设置失败", str(e))
+                return
+            if res["kind"] == "cleared":
+                self._log(f"已恢复 {entry.get('name_en')} 使用 wiki 链接")
+            else:
+                self._log(f"已为 {entry.get('name_en')} 绑定下载源：{var.get().strip()}")
+                if res.get("note"):
+                    self._log(f"  提示：{res['note']}")
+            top.destroy()
+            if parent is not None and parent.winfo_exists():
+                parent.destroy()
+            self.refresh_packs()
+
+        bar = ttk.Frame(top)
+        bar.pack(fill="x", padx=10, pady=(10, 4))
+        ttk.Button(bar, text="确定", command=confirm).pack(side="left", padx=2)
+        ttk.Button(bar, text="取消", command=top.destroy).pack(side="right", padx=2)
+
+    def _pack_clear_source(self, entry, parent=None):
+        try:
+            packmod.set_download_source(self.packs, entry["id"], "")
+        except Exception as e:
+            messagebox.showerror("操作失败", str(e))
+            return
+        self._log(f"已恢复 {entry.get('name_en')} 使用 wiki 链接")
+        if parent is not None and parent.winfo_exists():
+            parent.destroy()
+        self.refresh_packs()
+
+    def _pack_asset_dialog(self, entry):
+        """查询上游候选资产并绑定（多资产仓库必须由用户确定）。"""
+        if self.busy:
+            messagebox.showinfo("提示", "有后台任务正在执行，请稍候")
+            return
+        self._set_busy(True)
+        self._log(f"正在查询 {entry.get('name_en') or entry['id']} 的下载资产...")
+
+        def work():
+            return packmod.list_assets(self.cfg, entry, force=True)
+
+        def done(res):
+            self._set_busy(False)
+            if res is None:
+                return
+            if not res.ok:
+                messagebox.showwarning("没有可用资产", res.note or "上游没有可下载文件")
+                return
+            top = self._dialog("选择下载资产", "760x420")
+            ttk.Label(top, text=f"{entry.get('name_en') or entry['id']}　来源：{res.note}",
+                      font=FONT).pack(anchor="w", padx=10, pady=(10, 2))
+            frame = ttk.Frame(top)
+            frame.pack(fill="both", expand=True, padx=10, pady=4)
+            lb = tk.Listbox(frame, font=FONT, exportselection=False)
+            lb.pack(side="left", fill="both", expand=True)
+            self._attach_scrollbar(lb, frame)
+            for a in res.assets:
+                lb.insert("end", f"{a.file_name}    版本={a.version or '—'}")
+            chosen = packmod.pick_asset(res, entry)
+            if chosen is not None:
+                try:
+                    idx = [a.url for a in res.assets].index(chosen.url)
+                    lb.selection_set(idx)
+                    lb.see(idx)
+                except ValueError:
+                    pass
+
+            def confirm():
+                sel = lb.curselection()
+                if not sel:
+                    messagebox.showinfo("提示", "请先选择一个文件")
+                    return
+                asset = res.assets[sel[0]]
+                self.packs.update_entry(entry["id"], {
+                    "bound_source": res.url,
+                    "source_override": True,
+                    "asset_regex": re.escape(asset.file_name),
+                })
+                self._log(f"已绑定下载资产：{asset.file_name}")
+                top.destroy()
+                self.refresh_packs()
+
+            bar = ttk.Frame(top)
+            bar.pack(fill="x", padx=10, pady=(2, 10))
+            ttk.Button(bar, text="绑定此文件", command=confirm).pack(side="left", padx=2)
+            ttk.Button(bar, text="取消", command=top.destroy).pack(side="right", padx=2)
+
+        self._run_async(work, done)
+
+    def install_selected_packs(self):
+        sel = self._selected_packs()
+        if not sel:
+            messagebox.showinfo("提示", "请先选中要安装的条目")
+            return
+        self._install_packs(sel)
+
+    def _install_packs(self, entries):
+        if self.busy:
+            messagebox.showinfo("提示", "有后台任务正在执行，请稍候")
+            return
+        kind_dirs = {}
+        for e in entries:
+            kind = e.get("kind")
+            folder = packmod.resolve_pack_dir(self.cfg, kind)
+            if folder is None:
+                messagebox.showerror(
+                    "未设置目录",
+                    f"未确定 {packmod.DIR_NAMES.get(kind, kind)} 目录。\n"
+                    "请在「设置」页填写客户端整合包目录，或直接指定该文件夹。")
+                return
+            kind_dirs[kind] = folder
+
+        self._set_busy(True)
+        self._log(f"正在查询 {len(entries)} 个条目的下载源...")
+        results: dict = {}
+
+        def work():
+            plans = packmod.plan_install(
+                self.cfg, self.packs, entries, results=results,
+                progress_cb=lambda m: self.queue.put(("log", m, None)))
+            return plans
+
+        def planned(plans):
+            self._set_busy(False)
+            if plans is None:
+                return
+            todo = [p for p in plans if p.action in ("install", "update")]
+            skipped = [p for p in plans if p.action == "skip"]
+            manual = [p for p in plans if p.action == "manual"]
+            errors = [p for p in plans if p.action == "error"]
+            if errors:
+                for p in errors:
+                    self._log(f"[错误] {p.name}: {p.detail}")
+            if not todo:
+                msg = "没有需要安装/更新的条目。"
+                if skipped:
+                    msg += f"\n跳过 {len(skipped)} 个（已最新、本地更高或版本无法比较）。"
+                if manual:
+                    msg += f"\n{len(manual)} 个需要手动下载（见「打开下载页面」）。"
+                if errors:
+                    msg += f"\n{len(errors)} 个查询失败。"
+                messagebox.showinfo("无需操作", msg)
+                self.refresh_packs()
+                return
+            lines = [f"{'更新' if p.action == 'update' else '安装'}  {p.name}"
+                     f"  →  {p.version or '未知版本'}  ({p.file_name or ''})"
+                     for p in todo]
+            if skipped:
+                lines.append(f"—— 跳过 {len(skipped)} 个（已最新/本地更高/无法比较）")
+            if manual:
+                lines.append(f"—— {len(manual)} 个需手动下载："
+                             + "、".join(p.name for p in manual[:6])
+                             + ("..." if len(manual) > 6 else ""))
+            if not messagebox.askyesno(
+                    "确认安装计划",
+                    "将执行以下操作（旧文件自动备份）：\n\n" + "\n".join(lines[:30])
+                    + ("\n..." if len(lines) > 30 else "")):
+                return
+            self._run_pack_installs(todo, results)
+
+        self._run_async(work, planned)
+
+    def _run_pack_installs(self, plans, results):
+        """按计划逐项下载安装；单项失败不影响其他。"""
+        by_id = {e["id"]: e for e in self.packs.by_kind(include_removed=True)}
+        self._set_busy(True)
+        ok_count, fail_count = 0, 0
+        installed_keys: list = []   # 安装成功的 (kind, pack_id)，供清除"可更新"标记
+
+        def work():
+            nonlocal ok_count, fail_count
+            for p in plans:
+                entry = by_id.get(p.pack_id)
+                if not entry:
+                    continue
+                asset = p.asset
+                if asset is None and results.get(p.pack_id):
+                    asset = packmod.pick_asset(results[p.pack_id], entry)
+                if asset is None:
+                    fail_count += 1
+                    self.queue.put(("log", f"[错误] {p.name}: 无法确定下载资产", None))
+                    continue
+                self.queue.put(("log", f"正在下载 {p.name} ...", None))
+                ok, msg = packmod.apply_install(
+                    self.cfg, self.packs, entry, asset,
+                    progress_cb=self._download_progress_cb(p.name))
+                if ok:
+                    ok_count += 1
+                    installed_keys.append((entry.get("kind"), p.pack_id))
+                    self.queue.put(("log", f"[完成] {p.name}: {msg}", None))
+                else:
+                    fail_count += 1
+                    self.queue.put(("log", f"[错误] {p.name}: {msg}", None))
+            return {"ok": ok_count, "fail": fail_count,
+                    "installed_keys": installed_keys}
+
+        def done(res):
+            self._set_busy(False)
+            if res:
+                self._log(f"资源包/光影安装结束：成功 {res['ok']} 个，失败 {res['fail']} 个")
+            # 刚装成功的条目其"可更新 → x"标记已过时，先清掉再刷新
+            for key in res.get("installed_keys", []) if res else []:
+                self._pack_updates.pop(key, None)
+            self.refresh_packs()
+            if res and res["fail"]:
+                messagebox.showwarning("部分失败",
+                                       f"成功 {res['ok']} 个，失败 {res['fail']} 个；"
+                                       "详见日志区。")
+
+        self._run_async(work, done)
+
+    def check_pack_updates(self):
+        """检查已安装条目是否有新版本（走与安装相同的源查询与缓存）。"""
+        if self.busy:
+            messagebox.showinfo("提示", "有后台任务正在执行，请稍候")
+            return
+        self._set_busy(True)
+        self._log("正在检查资源包/光影更新...")
+
+        def work():
+            out = []
+            for kind in packmod.DIR_NAMES:
+                inst = self.packs.installed(kind)
+                entries = [e for e in self.packs.by_kind(kind)
+                           if e["id"] in inst and not e.get("local")]
+                if not entries:
+                    continue
+                plans = packmod.plan_install(
+                    self.cfg, self.packs, entries,
+                    progress_cb=lambda m: self.queue.put(("log", m, None)))
+                for p in plans:
+                    out.append((kind, p))
+            return out
+
+        def done(res):
+            self._set_busy(False)
+            if res is None:
+                return
+            # 只在主线程写状态，供列表「状态」列显示可更新目标版本
+            self._pack_updates = {(k, p.pack_id): p.version for k, p in res if p.action == "update"}
+            errors = sum(p.action == "error" for _k, p in res)
+            pending = sum(p.action == "manual" or (p.action == "skip" and p.detail.startswith("无法比较"))
+                          for _k, p in res)
+            for _k, p in res:
+                self._log(f"{p.name}: {p.detail}")
+            summary = (f"检查完成：{len(self._pack_updates)} 个条目有可用更新；"
+                       f"{errors} 个查询失败，{pending} 个需人工判断。")
+            self._log(summary)
+            self.refresh_packs()
+            if self._pack_updates:
+                summary += "\n更新已在列表标出；可多选后点「安装/更新」。"
+            if not res:
+                summary = "未记录可检查的已安装资源包/光影。"
+            messagebox.showinfo("检查完成", summary)
+
+        self._run_async(work, done)
+
+    def open_pack_page(self):
+        sel = self._selected_packs()
+        if not sel:
+            messagebox.showinfo("提示", "请先选中一个条目")
+            return
+        url = (sel[0].get("urls") or {}).get("primary")
+        if not url:
+            messagebox.showinfo("提示", "该条目没有下载链接（整合包自带资源包）")
+            return
+        webbrowser.open(url)
+
+    def open_pack_folder(self):
+        folder = packmod.resolve_pack_dir(self.cfg, self._pack_kind())
+        if not folder:
+            messagebox.showerror("未设置目录",
+                                 "请在「设置」页填写客户端整合包目录，或直接指定该文件夹")
+            return
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            messagebox.showerror("无法创建目录", str(e))
+            return
+        os.startfile(folder)
+
+    def pack_backup_dialog(self):
+        kind = self._pack_kind()
+        backups = packmod.list_backups(self.cfg, kind)
+        top = self._dialog("备份与恢复", "760x460")
+        ttk.Label(top, text=f"{packwiki.KIND_LABELS.get(kind, kind)} 备份"
+                            f"（安装/更新前自动保留，最多 {self.cfg.backup_keep} 份/条目）",
+                  font=FONT).pack(anchor="w", padx=10, pady=(10, 2))
+        frame = ttk.Frame(top)
+        frame.pack(fill="both", expand=True, padx=10, pady=4)
+        cols = ("time", "pack", "file", "size")
+        tree = ttk.Treeview(frame, columns=cols, show="headings")
+        for c, h, w in zip(cols, ("备份时间", "条目", "文件名", "大小"), (140, 160, 300, 90)):
+            tree.heading(c, text=h)
+            tree.column(c, width=w, anchor="w")
+        tree.pack(side="left", fill="both", expand=True)
+        self._attach_scrollbar(tree, frame)
+        rows = []
+        for b in backups:
+            iid = str(len(rows))
+            tree.insert("", "end", iid=iid,
+                        values=(utils.fmt_ts(b["mtime"]), b["pack_id"], b["file_name"],
+                                f'{b["size"] / 1024:.0f} KB'))
+            rows.append(b)
+
+        def restore():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("提示", "请先选中一条备份")
+                return
+            rec = rows[int(sel[0])]
+            folder = packmod.resolve_pack_dir(self.cfg, kind)
+            if not folder:
+                messagebox.showerror("未设置目录", "无法确定安装目录")
+                return
+            if not messagebox.askyesno("确认", f"恢复 {rec['file_name']} 到\n{folder}\n"
+                                              "（同名文件会被覆盖）？"):
+                return
+            try:
+                dest = packmod.restore_backup(self.cfg, rec, folder)
+            except Exception as e:
+                messagebox.showerror("恢复失败", str(e))
+                return
+            self._log(f"已恢复备份 {rec['file_name']} → {dest}")
+            top.destroy()
+            self.refresh_packs()
+
+        bar = ttk.Frame(top)
+        bar.pack(fill="x", padx=10, pady=(2, 10))
+        ttk.Button(bar, text="恢复选中备份", command=restore).pack(side="left", padx=2)
+        ttk.Button(bar, text="关闭", command=top.destroy).pack(side="right", padx=2)
+
+    def register_pack_dialog(self):
+        """列出目录里没被识别的包，允许登记为自定义条目以跟踪更新。
+
+        典型场景：从 Modrinth 装的 Modernity / Modernity Adjunct 不在 wiki
+        「资源包与光影」页面里，工具本来完全不认识它们。
+        """
+        kind = self._pack_kind()
+        try:
+            unknown = packmod.unmatched_packs(self.cfg, self.packs, kind)
+        except Exception as e:
+            messagebox.showerror("扫描失败", str(e))
+            return
+        if not unknown:
+            messagebox.showinfo("提示",
+                                f"{packwiki.KIND_LABELS.get(kind, kind)}目录里没有未识别的包。")
+            return
+        top = self._dialog("未识别的包（可登记为自定义）", "820x480")
+        ttk.Label(top, text=f"{packwiki.KIND_LABELS.get(kind, kind)}安装目录里以下文件"
+                            "不属于任何 wiki 条目，无法检查更新。\n"
+                            "选中后点「登记」，填下载源即可纳入管理；"
+                            "登记等于把它当作你自己的条目（wiki 刷新不会删掉）。",
+                  justify="left").pack(anchor="w", padx=10, pady=(10, 4))
+        frame = ttk.Frame(top)
+        frame.pack(fill="both", expand=True, padx=10, pady=4)
+        cols = ("file", "ver", "size")
+        tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended")
+        for c, h, w in zip(cols, ("文件名", "识别版本", "大小"), (520, 110, 100)):
+            tree.heading(c, text=h)
+            tree.column(c, width=w, anchor="w")
+        tree.pack(side="left", fill="both", expand=True)
+        self._attach_scrollbar(tree, frame)
+        rows = []
+        for k, f in unknown:
+            iid = str(len(rows))
+            try:
+                size = f"{f.path.stat().st_size // 1024} KB"
+            except OSError:
+                size = "?"
+            tree.insert("", "end", iid=iid,
+                        values=(f.file_name, f.version or "—", size))
+            rows.append((k, f))
+
+        def register_selected():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("提示", "请先选中要登记的包")
+                return
+            chosen = [rows[int(iid)] for iid in sel]
+            if len(chosen) == 1:
+                # parent 传外层对话框：登记成功后由 confirm() 一并关闭
+                # （表单是按钮回调驱动的，这里拿不到同步返回值）
+                self._register_one_pack(chosen[0][0], chosen[0][1], parent=top)
+                return
+            # 多选时逐个填表太啰嗦：共用一个下载源，名字按文件名生成
+            if not messagebox.askyesno(
+                    "确认登记",
+                    f"将把选中的 {len(chosen)} 个包各登记为一条自定义条目"
+                    "（名字取自文件名，可之后在详情里改；下载源留空、稍后单独设置）。\n"
+                    "继续？"):
+                return
+            made = []
+            for k, f in chosen:
+                name = packmod.suggest_pack_name(f.file_name)
+                try:
+                    self.packs.add_custom({"kind": k, "name_en": name, "source_url": "",
+                                           "aliases": [name]})
+                    made.append(name)
+                except Exception as e:
+                    self._log(f"[错误] 登记 {f.file_name} 失败: {e}")
+            if made:
+                try:
+                    packmod.reconcile_installed(self.cfg, self.packs)
+                except Exception:
+                    pass
+                self._log(f"已登记 {len(made)} 个自定义包：" + "、".join(made))
+                top.destroy()
+                self.refresh_packs()
+
+        bar = ttk.Frame(top)
+        bar.pack(fill="x", padx=10, pady=(2, 10))
+        ttk.Button(bar, text="登记选中的包", command=register_selected).pack(side="left", padx=2)
+        ttk.Button(bar, text="关闭", command=top.destroy).pack(side="right", padx=2)
+
+    def _register_one_pack(self, kind, pack_file, parent=None):
+        """单个未识别包的登记表单。返回是否成功登记。"""
+        top = self._dialog("登记自定义包", "680x400")
+        ttk.Label(top, text=f"文件：{pack_file.file_name}",
+                  font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", padx=10, pady=(10, 2))
+        form = ttk.Frame(top)
+        form.pack(fill="x", padx=10, pady=6)
+        ttk.Label(form, text="英文名（匹配已装文件用）:").grid(row=0, column=0, sticky="w", pady=5)
+        name_var = tk.StringVar(value=packmod.suggest_pack_name(pack_file.file_name))
+        ttk.Entry(form, textvariable=name_var, width=52).grid(row=0, column=1, sticky="we", pady=5)
+        ttk.Label(form, text="中文名（可选）:").grid(row=1, column=0, sticky="w", pady=5)
+        cn_var = tk.StringVar()
+        ttk.Entry(form, textvariable=cn_var, width=52).grid(row=1, column=1, sticky="we", pady=5)
+        ttk.Label(form, text="类型:").grid(row=2, column=0, sticky="w", pady=5)
+        kind_var = tk.StringVar(value=kind)
+        ttk.Combobox(form, textvariable=kind_var, state="readonly", width=20,
+                     values=tuple(packmod.DIR_NAMES)).grid(row=2, column=1, sticky="w", pady=5)
+        ttk.Label(form, text="下载源:").grid(row=3, column=0, sticky="w", pady=5)
+        url_var = tk.StringVar()
+        ttk.Entry(form, textvariable=url_var, width=52).grid(row=3, column=1, sticky="we", pady=5)
+        form.columnconfigure(1, weight=1)
+        ttk.Label(top, text="下载源可填 GitHub 仓库（或 owner/repo）或 Modrinth 项目页，"
+                            "例如 https://modrinth.com/resourcepack/modernity/versions\n"
+                            "留空则只登记、不检查更新（仍可手动「设置下载源」补上）。",
+                  foreground="#666", justify="left").pack(anchor="w", padx=10)
+
+        def confirm():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showerror("错误", "英文名不能为空")
+                return
+            try:
+                pack_id = self.packs.add_custom({
+                    "kind": kind_var.get(),
+                    "name_en": name,
+                    "name_cn": cn_var.get().strip(),
+                    "source_url": url_var.get().strip(),
+                    "aliases": [packmod.suggest_pack_name(pack_file.file_name)],
+                })
+            except Exception as e:
+                messagebox.showerror("登记失败", str(e))
+                return
+            try:
+                packmod.reconcile_installed(self.cfg, self.packs, kinds=[kind_var.get()])
+            except Exception:
+                pass
+            self._log(f"已登记自定义包 {name}（id={pack_id}）")
+            top.destroy()
+            if parent is not None and parent.winfo_exists():
+                parent.destroy()
+            self.refresh_packs()
+
+        bar = ttk.Frame(top)
+        bar.pack(fill="x", padx=10, pady=(8, 10))
+        ttk.Button(bar, text="登记", command=confirm).pack(side="left", padx=2)
+        ttk.Button(bar, text="取消", command=top.destroy).pack(side="right", padx=2)
+
+    def _pack_menu(self, menu, iid=None):
+        menu.add_command(label="详情", command=self.show_pack_detail)
+        menu.add_command(label="安装/更新", command=self.install_selected_packs)
+        menu.add_command(label="设置下载源...",
+                         command=lambda: self._selected_packs()
+                         and self._pack_source_dialog(self._selected_packs()[0]))
+        menu.add_command(label="选择下载资产...",
+                         command=lambda: self._selected_packs()
+                         and self._pack_asset_dialog(self._selected_packs()[0]))
+        menu.add_command(label="打开下载页面", command=self.open_pack_page)
+        menu.add_separator()
+        menu.add_command(label="检查更新", command=self.check_pack_updates)
+        menu.add_command(label="打开安装目录", command=self.open_pack_folder)
+        menu.add_command(label="备份与恢复", command=self.pack_backup_dialog)
+        menu.add_command(label="重新扫描", command=self.refresh_packs)
 
     # ---------- 已安装页 ----------
     def _merged_registry(self):
@@ -3168,6 +4051,10 @@ class GuiApp:
         # 所有输入都通过校验后才一次性替换配置，避免旧实现把目录提前写入。
         updated = dict(self.cfg.data)
         updated["mods_folders"] = {"client": client_path, "server": server_path}
+        updated["pack_folders"] = {
+            "resourcepack": self.pack_resourcepack_entry.get().strip(),
+            "shader": self.pack_shader_entry.get().strip(),
+        }
         updated["github_token"] = self.token_entry.get().strip()
         updated["proxy"] = proxy
         updated["check_interval_hours"] = interval

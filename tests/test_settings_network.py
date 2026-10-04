@@ -58,6 +58,9 @@ class TestSettingsSave(unittest.TestCase):
         app.gtnh_entry = _Entry("2.9.0")
         app.wiki_cookie_entry = _Entry("")
         app.wiki_ua_entry = _Entry("")
+        # 设置页新增的资源包/光影目录输入框（未显式传时按"留空=自动推断"）
+        app.pack_resourcepack_entry = _Entry("")
+        app.pack_shader_entry = _Entry("")
         app._log = mock.Mock()
         app.refresh_all = mock.Mock()
         return app
@@ -83,6 +86,28 @@ class TestSettingsSave(unittest.TestCase):
         self.assertEqual(self.cfg.github_token, "new-token")
         self.assertEqual(self.cfg.proxy, {"host": "", "port": 0})
         self.assertTrue(self.cfg.path.exists())
+
+    def test_pack_dirs_saved_with_other_fields(self):
+        """资源包/光影目录与 mods 目录同批提交，留空表示自动推断。"""
+        app = self._app(mode="direct")
+        app.pack_resourcepack_entry = _Entry(str(self.tmp / "rp"))
+        app.pack_shader_entry = _Entry("")
+
+        with mock.patch.object(gui.messagebox, "showinfo"):
+            app.save_settings()
+
+        self.assertEqual(self.cfg.pack_folders["resourcepack"], str(self.tmp / "rp"))
+        self.assertEqual(self.cfg.pack_folders["shader"], "")
+
+    def test_invalid_numeric_setting_does_not_persist_pack_dirs(self):
+        app = self._app(interval="bad")
+        app.pack_resourcepack_entry = _Entry(str(self.tmp / "rp"))
+        app.pack_shader_entry = _Entry(str(self.tmp / "sp"))
+
+        with mock.patch.object(gui.messagebox, "showerror"):
+            app.save_settings()
+
+        self.assertEqual(self.cfg.pack_folders, {"resourcepack": "", "shader": ""})
 
 
 class TestNetworkSettingsGui(unittest.TestCase):

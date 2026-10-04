@@ -57,15 +57,31 @@ class WikiFetchResult:
     text_hash: str
 
 
-def _referer(cfg) -> str:
+@dataclass(frozen=True)
+class WikiProfile:
+    """一页 Wiki 的抓取参数。
+
+    同一套通道（curl_cffi → api.php → curl → urllib）与浏览器验证流程服务多个
+    页面；``page`` 决定抓哪一页，``validate`` 决定「抓到的是不是正文」
+    （各页正文特征不同，不能共用同一个判断），``cache_name`` 决定原始正文
+    缓存在 ``data/cache/`` 下的文件名。
+    """
+    page: str
+    validate: object
+    cache_name: str
+
+
+def _referer(cfg, profile: "WikiProfile | None" = None) -> str:
     base = cfg.wiki_url.rsplit("/api.php", 1)[0]
-    return f"{base}/wiki/{urllib.parse.quote(cfg.wiki_page)}"
+    page = profile.page if profile else cfg.wiki_page
+    return f"{base}/wiki/{urllib.parse.quote(page)}"
 
 
-def _wiki_headers(cfg) -> dict:
+def _wiki_headers(cfg, profile: "WikiProfile | None" = None) -> dict:
     """请求头：Referer 必带；配置了反爬 Cookie 时带上（cf_clearance 与 UA/IP 绑定）。"""
     # 用户点击“刷新”时必须穿透中间缓存；Cookie/UA 仍只用于请求，绝不输出到日志。
-    headers = {"Referer": _referer(cfg), "Cache-Control": "no-cache", "Pragma": "no-cache"}
+    headers = {"Referer": _referer(cfg, profile),
+               "Cache-Control": "no-cache", "Pragma": "no-cache"}
     cookie = getattr(cfg, "wiki_cookie", "") or ""
     ua = getattr(cfg, "wiki_ua", "") or ""
     if cookie:
@@ -90,7 +106,7 @@ def _cffi_proxies(cfg):
     return None
 
 
-def _fetch_impersonate_wikitext(cfg) -> str:
+def _fetch_impersonate_wikitext(cfg, profile: "WikiProfile | None" = None) -> str:
     """通道0（首选）：curl_cffi 模拟浏览器 TLS 指纹。
 
     Cloudflare 按客户端 TLS 指纹拦截（实测 urllib/curl 一律 403），模拟浏览
@@ -102,9 +118,10 @@ def _fetch_impersonate_wikitext(cfg) -> str:
     except ImportError:
         raise net.HttpError(-4, "未安装 curl_cffi")
     base = cfg.wiki_url.rsplit("/api.php", 1)[0]
-    url = _refresh_url(f'{base}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw')
+    page = profile.page if profile else cfg.wiki_page
+    url = _refresh_url(f'{base}/index.php?title={urllib.parse.quote(page)}&action=raw')
     try:
-        kw = {"impersonate": "chrome", "timeout": 30, "headers": _wiki_headers(cfg)}
+        kw = {"impersonate": "chrome", "timeout": 30, "headers": _wiki_headers(cfg, profile)}
         proxies = _cffi_proxies(cfg)
         if proxies:
             kw["proxies"] = proxies
@@ -129,22 +146,24 @@ def _fetch_impersonate_wikitext(cfg) -> str:
     return r.text
 
 
-def _fetch_api_wikitext(cfg) -> str:
+def _fetch_api_wikitext(cfg, profile: "WikiProfile | None" = None) -> str:
     """通道1：MediaWiki API（action=parse，带 Referer，UA 必需否则 403）。"""
-    url = _refresh_url(f'{cfg.wiki_url}?action=parse&page={urllib.parse.quote(cfg.wiki_page)}'
+    page = profile.page if profile else cfg.wiki_page
+    url = _refresh_url(f'{cfg.wiki_url}?action=parse&page={urllib.parse.quote(page)}'
                        f'&format=json&prop=wikitext')
-    raw = net.http_get(url, retries=0, proxy=cfg.proxy, headers=_wiki_headers(cfg))
+    raw = net.http_get(url, retries=0, proxy=cfg.proxy, headers=_wiki_headers(cfg, profile))
     return json.loads(raw)["parse"]["wikitext"]["*"]
 
 
-def _fetch_raw_wikitext(cfg) -> str:
+def _fetch_raw_wikitext(cfg, profile: "WikiProfile | None" = None) -> str:
     """通道2（备用）：action=raw 直接返回 wikitext，api.php 被临时限流时可用。"""
     base = cfg.wiki_url.rsplit("/api.php", 1)[0]
-    url = _refresh_url(f'{base}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw')
-    return net.http_get(url, retries=0, proxy=cfg.proxy, headers=_wiki_headers(cfg))
+    page = profile.page if profile else cfg.wiki_page
+    url = _refresh_url(f'{base}/index.php?title={urllib.parse.quote(page)}&action=raw')
+    return net.http_get(url, retries=0, proxy=cfg.proxy, headers=_wiki_headers(cfg, profile))
 
 
-def _fetch_curl_wikitext(cfg) -> str:
+def _fetch_curl_wikitext(cfg, profile: "WikiProfile | None" = None) -> str:
     """通道3（备用）：系统 curl.exe（Windows 10+ 自带）。
 
     该 wiki 的限流会针对 Python urllib 的 TLS 指纹（实测 curl 请求正常、
@@ -156,9 +175,10 @@ def _fetch_curl_wikitext(cfg) -> str:
     if not curl:
         raise net.HttpError(-1, "系统无 curl")
     base = cfg.wiki_url.rsplit("/api.php", 1)[0]
-    url = _refresh_url(f'{base}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw')
+    page = profile.page if profile else cfg.wiki_page
+    url = _refresh_url(f'{base}/index.php?title={urllib.parse.quote(page)}&action=raw')
     ua = getattr(cfg, "wiki_ua", "") or net.USER_AGENT
-    cmd = [curl, "-sS", "-f", "-m", "30", "-A", ua, "-e", _referer(cfg),
+    cmd = [curl, "-sS", "-f", "-m", "30", "-A", ua, "-e", _referer(cfg, profile),
            "-H", "Cache-Control: no-cache", "-H", "Pragma: no-cache"]
     cookie = getattr(cfg, "wiki_cookie", "") or ""
     if cookie:
@@ -177,14 +197,15 @@ def _fetch_curl_wikitext(cfg) -> str:
     return out.stdout.decode("utf-8", "replace")
 
 
-def _wiki_cache_file(cfg):
-    return cfg.data_dir / "cache" / "wiki_wikitext.txt"
+def _wiki_cache_file(cfg, profile: "WikiProfile | None" = None):
+    name = profile.cache_name if profile else "wiki_wikitext.txt"
+    return cfg.data_dir / "cache" / name
 
 
-def _write_wiki_cache(cfg, text: str) -> None:
+def _write_wiki_cache(cfg, text: str, profile: "WikiProfile | None" = None) -> None:
     """原子写入最近一次通过校验的 Wiki 原文。"""
     try:
-        cache_file = _wiki_cache_file(cfg)
+        cache_file = _wiki_cache_file(cfg, profile)
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache_file.with_suffix(".tmp")
         tmp.write_text(text, encoding="utf-8")
@@ -195,7 +216,7 @@ def _write_wiki_cache(cfg, text: str) -> None:
 
 
 def _validate_wikitext(text: str) -> None:
-    """校验抓到的确实是页面 wikitext，不是验证页/错误页。
+    """校验抓到的确实是「可添加MOD」页面 wikitext，不是验证页/错误页。
 
     站点启用 Cloudflare 人机验证后，验证页以 HTTP 200 返回（curl 不加 -f 时
     退出码也是 0），会被各通道当成抓取成功——曾导致验证页覆盖本地缓存、
@@ -208,15 +229,29 @@ def _validate_wikitext(text: str) -> None:
                                 "可能被反爬拦截或页面结构变更")
 
 
-def fetch_wiki(cfg, *, interactive: bool = False, progress_cb=None) -> WikiFetchResult:
+# 「可添加MOD」页面（默认目标；保持既有调用方行为不变）
+MODS_PROFILE = WikiProfile(page="可添加MOD", validate=_validate_wikitext,
+                           cache_name="wiki_wikitext.txt")
+
+
+def fetch_wiki(cfg, *, interactive: bool = False, progress_cb=None,
+               profile: "WikiProfile | None" = None) -> WikiFetchResult:
     """抓取页面 wikitext，并保留实际读取通道和网络响应证据。
 
     依次尝试 curl_cffi(浏览器TLS指纹) → api.php → curl+action=raw →
     urllib+action=raw；非交互调用在通道之间带退避。
     交互刷新检测到验证/拒绝时立即弹出隔离浏览器。全部失败则报错，
     绝不把本地缓存冒充本次刷新结果。
-    内容先经 _validate_wikitext 校验，未通过不写缓存、继续换下一通道。
+    内容先经 profile.validate 校验，未通过不写缓存、继续换下一通道。
+
+    ``profile`` 省略时按「可添加MOD」处理（旧调用兼容）；``cfg.wiki_page``
+    在 profile 给出时被忽略，由 profile.page 决定目标页面。
     """
+    if profile is None:
+        page = cfg.wiki_page
+        # 配置里换了页面名时行为与旧版一致；页面结构仍是「可添加MOD」的模板
+        profile = WikiProfile(page=page, validate=_validate_wikitext,
+                              cache_name="wiki_wikitext.txt")
     fetchers = (_fetch_impersonate_wikitext, _fetch_api_wikitext,
                 _fetch_curl_wikitext, _fetch_raw_wikitext)
     errors = []
@@ -228,9 +263,9 @@ def fetch_wiki(cfg, *, interactive: bool = False, progress_cb=None) -> WikiFetch
         if progress_cb:
             progress_cb(f"Wiki 网络请求 {request_count}：{channel}")
         try:
-            text = fn(cfg)
-            _validate_wikitext(text)
-            _write_wiki_cache(cfg, text)
+            text = fn(cfg, profile)
+            profile.validate(text)
+            _write_wiki_cache(cfg, text, profile)
             response_bytes = len(text.encode("utf-8"))
             text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
             if progress_cb:
@@ -270,9 +305,10 @@ def fetch_wiki(cfg, *, interactive: bool = False, progress_cb=None) -> WikiFetch
                 cfg,
                 progress_cb=progress_cb,
                 request_counter=count_browser_request,
+                profile=profile,
             )
-            _validate_wikitext(text)
-            _write_wiki_cache(cfg, text)
+            profile.validate(text)
+            _write_wiki_cache(cfg, text, profile)
             response_bytes = len(text.encode("utf-8"))
             text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
             if progress_cb:
@@ -933,7 +969,8 @@ def _cdp_eval(ws, expression: str, timeout_seconds: float = 5.0):
 
 
 def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None,
-                               request_counter=None) -> str:
+                               request_counter=None,
+                               profile: "WikiProfile | None" = None) -> str:
     """打开系统浏览器窗口供用户完成一次人机验证，并自动读取验证通过后的 wikitext。"""
     import subprocess
     try:
@@ -949,8 +986,10 @@ def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None
     user_data.mkdir(parents=True, exist_ok=True)
     port = _get_free_port()
 
+    page_name = profile.page if profile else cfg.wiki_page
+    base_url = cfg.wiki_url.rsplit("/api.php", 1)[0]
     # 直接打开带验证的 wiki 页面
-    page_url = cfg.wiki_url.rsplit("/api.php", 1)[0] + f"/wiki/{urllib.parse.quote(cfg.wiki_page)}"
+    page_url = base_url + f"/wiki/{urllib.parse.quote(page_name)}"
     cmd = [
         str(browser),
         f"--user-data-dir={user_data.resolve()}",
@@ -988,8 +1027,7 @@ def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None
             raise net.HttpError(-1, "未能连接到浏览器调试会话")
 
         ws = websocket.create_connection(ws_url, timeout=5)
-        base_url = cfg.wiki_url.rsplit("/api.php", 1)[0]
-        raw_url = f"{base_url}/index.php?title={urllib.parse.quote(cfg.wiki_page)}&action=raw"
+        raw_url = f"{base_url}/index.php?title={urllib.parse.quote(page_name)}&action=raw"
         js = f"""
         (async () => {{
             try {{
@@ -1017,10 +1055,16 @@ def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None
                 val = _cdp_eval(ws, js)
                 if val.get("status") == 200:
                     text = val.get("text", "")
-                    if any(t in text for t in TEMPLATE_NAMES):
-                        _validate_wikitext(text)
-                        _write_wiki_cache(cfg, text)
-                        return text
+                    # 页面正文特征由 profile 决定（各页模板/章节不同，
+                    # 不能在这里写死「可添加MOD」的模板名）。校验不通过说明
+                    # 拿到的还是验证页/挑战页——视为「用户还没过验证」，
+                    # 继续轮询等待，而不是把校验失败当成抓取失败中止整个流程。
+                    try:
+                        profile.validate(text)
+                    except net.HttpError:
+                        continue
+                    _write_wiki_cache(cfg, text, profile)
+                    return text
             except (websocket.WebSocketTimeoutException, TimeoutError):
                 # 页面仍在验证/加载时，下一轮继续询问。
                 continue

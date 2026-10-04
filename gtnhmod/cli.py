@@ -4,17 +4,23 @@
   py -m gtnhmod cli           交互菜单
   py -m gtnhmod cli --check   非交互：检查更新（供计划任务）
   py -m gtnhmod cli --update-all  非交互：更新全部可更新的mod
+  py -m gtnhmod cli --packs-check    非交互：检查资源包/光影更新
+  py -m gtnhmod cli --packs-update   非交互：安装/更新已安装的资源包与光影
 """
 import os
+import re
 import sys
 import webbrowser
 from pathlib import Path
 
 from . import SIDES, SIDE_LABELS, __version__, updater, utils
+from . import packs as packmod
+from . import packs_wiki as packwiki
 from . import wiki as wikimod
 from .config import Config
 from .db import ModsDB
 from .installed import InstalledDB
+from .packs import PacksDB
 from .targets import source_confirmation_state
 from .ui import ConsoleUI
 from . import cookies
@@ -42,6 +48,7 @@ class CliApp:
         self.cfg = Config(data_dir)
         self.db = ModsDB(data_dir / "mods_db.json")
         self.installed = InstalledDB(data_dir / "installed.json")
+        self.packs = PacksDB(data_dir / "packs_db.json")
         # 启动维护：校正已安装记录、清理积压备份、清扫孤儿临时文件
         updater.startup_maintenance(self.cfg, self.db, self.installed)
         self.ui = ConsoleUI()
@@ -64,7 +71,8 @@ class CliApp:
         self.first_run_setup()
         menu = [
             "刷新Wiki数据", "可添加MOD列表", "已安装MOD", "检查更新", "更新MOD",
-            "启用/禁用MOD", "未受管MOD", "自定义源管理", "备份管理", "设置", "退出",
+            "启用/禁用MOD", "未受管MOD", "自定义源管理", "备份管理", "设置",
+            "资源包与光影", "退出",
         ]
         while True:
             print()
@@ -76,13 +84,13 @@ class CliApp:
             idx = self.ui.choose("请选择功能:", menu, allow_cancel=False)
             if idx is None:
                 return  # EOF/中断 → 退出
-            if idx == 10:
+            if idx == 11:
                 return
             try:
                 (self.do_refresh_wiki, self.do_list_addable, self.do_installed,
                  self.do_check, self.do_update_menu, self.do_toggle_menu,
                  self.do_unmanaged, self.do_custom_sources, self.do_backups,
-                 self.do_settings)[idx]()
+                 self.do_settings, self.do_packs)[idx]()
             except KeyboardInterrupt:
                 print()
                 continue
@@ -724,6 +732,286 @@ class CliApp:
         else:
             self.ui.error(r.get("error") or "恢复失败")
 
+    # ---------- 11 资源包与光影 ----------
+    def do_packs(self):
+        while True:
+            kind_options = [
+                f"{packwiki.KIND_LABELS[packwiki.KIND_RESOURCE]}"
+                f"（{len(self.packs.by_kind(packwiki.KIND_RESOURCE))} 个）",
+                f"{packwiki.KIND_LABELS[packwiki.KIND_SHADER]}"
+                f"（{len(self.packs.by_kind(packwiki.KIND_SHADER))} 个）",
+            ]
+            top = [
+                "刷新资源包与光影Wiki数据",
+                "浏览/安装条目",
+                "检查更新",
+                "安装/更新全部已安装条目",
+                "手动下载落盘目录提示",
+            ]
+            idx = self.ui.choose("资源包与光影:", top)
+            if idx is None:
+                return
+            if idx == 0:
+                self._packs_refresh_wiki()
+            elif idx == 1:
+                k = self.ui.choose("选择类型:", kind_options)
+                if k is None:
+                    continue
+                kind = (packwiki.KIND_RESOURCE, packwiki.KIND_SHADER)[k]
+                self._packs_browse(kind)
+            elif idx == 2:
+                self._packs_check()
+            elif idx == 3:
+                self._packs_update_all()
+            else:
+                for kind in packmod.DIR_NAMES:
+                    self.ui.info(f"{packwiki.KIND_LABELS[kind]} → "
+                                 f"{packmod.folder_hint(self.cfg, kind)}")
+
+    def _packs_refresh_wiki(self):
+        self.ui.info("正在抓取「资源包与光影」页面（gtnh.huijiwiki.com）...")
+        try:
+            fetched = packwiki.fetch_packs(
+                self.cfg, interactive=True,
+                progress_cb=lambda m: self.ui.info(m))
+        except Exception as e:
+            self.ui.error(f"抓取失败: {e}")
+            return
+        self.ui.info(f"Wiki 读取证据：发起 {fetched.request_count} 个网络请求；"
+                     f"通道={fetched.channel}；响应={fetched.response_bytes} 字节；"
+                     f"内容指纹={fetched.text_hash[:12]}")
+        try:
+            entries, warnings = packwiki.parse_packs_wikitext(fetched.text)
+            changes = self.packs.merge_wiki(entries)
+        except Exception as e:
+            self.ui.error(f"合并失败: {e}")
+            return
+        for w in warnings:
+            self.ui.warn(w)
+        delta = f"{len(changes)} 处变化" if changes else "内容没有变化"
+        self.ui.info(f"在线完成：{len(entries)} 个条目，{delta}")
+        for c in changes:
+            self.ui.info(f"  - {c}")
+
+    def _packs_browse(self, kind):
+        groups = self.packs.by_category(kind)
+        if not groups:
+            self.ui.warn("尚无数据，请先执行「刷新资源包与光影Wiki数据」")
+            return
+        cats = self.packs.categories(kind)
+        options = [f"{c}（{len(groups.get(c) or [])} 个）" for c in cats]
+        idx = self.ui.choose("选择分类:", options)
+        if idx is None:
+            return
+        entries = sorted(groups.get(cats[idx]) or [],
+                         key=lambda e: (e.get("name_en") or "").lower())
+        while True:
+            inst = packmod.installed_index(self.packs)
+            lines = []
+            for e in entries:
+                rec = inst.get((kind, e["id"])) or {}
+                mark = "[已装] " if rec else ("[自带] " if e.get("local") else "")
+                src = ("整合包自带" if e.get("local")
+                       else "自动下载" if packmod.entry_auto_url(e) else "手动下载")
+                lines.append(f"{mark}{pad(e.get('name_en') or e['id'], 34)} "
+                             f"{pad(e.get('author') or '—', 16)} {pad(src, 8)} "
+                             f"{(e.get('desc') or '').replace(chr(10), ' ')[:40]}")
+            pick = self.ui.choose(f"{packwiki.KIND_LABELS[kind]} / {cats[idx]}", lines)
+            if pick is None:
+                return
+            self._pack_detail(entries[pick])
+
+    def _pack_detail(self, entry):
+        kind = entry.get("kind")
+        print(f"--- {entry.get('name_en') or entry['id']} ---")
+        print(f"类型: {packwiki.KIND_LABELS.get(kind, kind)}")
+        print(f"分类: {entry.get('category') or '—'}    作者: {entry.get('author') or '—'}")
+        if entry.get("loader"):
+            print(f"加载器: {entry['loader'].replace(chr(10), '/')}")
+        if entry.get("scope"):
+            print(f"范围: {entry['scope']}")
+        if entry.get("desc"):
+            print(f"说明: {entry['desc']}")
+        inst = packmod.installed_index(self.packs).get((kind, entry["id"])) or {}
+        if inst:
+            print(f"本地已装: {inst.get('file_name')}（版本 {inst.get('version') or '未识别'}）")
+        print(f"安装目录: {packmod.folder_hint(self.cfg, kind)}")
+        links = (entry.get("urls") or {}).get("links") or []
+        for i, x in enumerate(links, 1):
+            print(f"  [{i}] {x['label']}: {x['url']}")
+        if entry.get("local"):
+            self.ui.info("整合包自带资源包，无需下载，游戏内直接启用。")
+            return
+        actions = ["安装/更新", "检查此项更新", "选择下载资产（多候选时用）",
+                   "设置下载源（wiki 链接过时时用）"]
+        if links:
+            actions.append("打开下载页面")
+        act = self.ui.choose("操作:", actions)
+        if act is None:
+            return
+        if act == 0:
+            self._packs_install([entry])
+        elif act == 1:
+            self._packs_check(entries=[entry])
+        elif act == 2:
+            self._pack_bind_asset(entry)
+        elif act == 3:
+            self._pack_set_source(entry)
+        else:
+            url = (entry.get("urls") or {}).get("primary")
+            if url:
+                webbrowser.open(url)
+                note = packmod.host_note(url)
+                if note:
+                    self.ui.info(f"{note}；下载后放入 {packmod.folder_hint(self.cfg, kind)}")
+
+    def _pack_set_source(self, entry):
+        """手动指定下载源（wiki 链接过时时，如指向组织页或旧仓库）。"""
+        cur = entry.get("bound_source") or ""
+        wiki_url = ((entry.get("urls") or {}).get("github")
+                    or (entry.get("urls") or {}).get("modrinth")
+                    or (entry.get("urls") or {}).get("primary") or "（无）")
+        self.ui.info(f"wiki 当前链接: {wiki_url}")
+        self.ui.info("可填 https://github.com/作者/仓库（或 owner/repo）、"
+                     "https://modrinth.com/shader/项目名；留空＝恢复用 wiki 链接")
+        url = self.ui.input_text("下载源", cur)
+        try:
+            res = packmod.set_download_source(self.packs, entry["id"], url)
+        except Exception as e:
+            self.ui.error(f"设置失败: {e}")
+            return
+        if res["kind"] == "cleared":
+            self.ui.ok("已恢复使用 wiki 链接")
+        else:
+            self.ui.ok(f"已绑定下载源（{res['kind']}）")
+            if res.get("note"):
+                self.ui.info(res["note"])
+
+    def _pack_bind_asset(self, entry):
+        """查询上游候选资产并绑定（多资产仓库必须由用户确定，工具不猜）。"""
+        self.ui.info(f"正在查询 {entry.get('name_en') or entry['id']} 的下载资产...")
+        try:
+            res = packmod.list_assets(self.cfg, entry, force=True)
+        except Exception as e:
+            self.ui.error(f"查询失败: {e}")
+            return
+        if not res.ok:
+            self.ui.warn(res.note or "上游没有可下载文件")
+            return
+        options = [f"{a.file_name}（版本 {a.version or '—'}）" for a in res.assets]
+        idx = self.ui.choose(f"选择要绑定的文件（来源：{res.note}）:", options)
+        if idx is None:
+            return
+        asset = res.assets[idx]
+        self.packs.update_entry(entry["id"], {
+            "bound_source": res.url,
+            "source_override": True,
+            "asset_regex": re.escape(asset.file_name),
+        })
+        self.ui.ok(f"已绑定下载资产: {asset.file_name}")
+
+    def _packs_check(self, entries=None):
+        rc = 0
+        for kind in packmod.DIR_NAMES:
+            if entries is None:
+                packmod.reconcile_installed(self.cfg, self.packs, kinds=[kind])
+                inst = self.packs.installed(kind)
+                todo = [e for e in self.packs.by_kind(kind)
+                        if e["id"] in inst and not e.get("local")]
+            else:
+                todo = [e for e in entries if e.get("kind") == kind]
+            if not todo:
+                continue
+            label = packwiki.KIND_LABELS.get(kind, kind)
+            try:
+                plans = packmod.plan_install(self.cfg, self.packs, todo)
+            except Exception as e:
+                self.ui.error(f"[{label}] 检查失败: {e}")
+                rc = 1
+                continue
+            for p in plans:
+                if p.action == "update":
+                    self.ui.info(f"[{label}] 可更新 {p.name}: {p.detail}")
+                elif p.action == "error":
+                    self.ui.error(f"[{label}] 查询失败 {p.name}: {p.detail}")
+                    rc = 1
+                elif p.action == "manual":
+                    self.ui.warn(f"[{label}] 需手动下载 {p.name}: {p.detail}")
+                else:
+                    self.ui.info(f"[{label}] {p.name}: {p.detail}")
+        if rc == 0 and entries is None:
+            self.ui.ok("检查完成")
+        return rc
+
+    def _packs_update_all(self):
+        """更新全部已安装条目（与 --update-all 的 mod 语义一致）。
+
+        首次安装请在「浏览/安装条目」里逐项选择；这里绝不能拿 wiki 全量
+        ``installable()`` 当安装清单——那会把上游所有可自动下载的包全部拉下来。
+        """
+        for kind in packmod.DIR_NAMES:
+            label = packwiki.KIND_LABELS.get(kind, kind)
+            folder = packmod.resolve_pack_dir(self.cfg, kind)
+            if folder is None:
+                self.ui.warn(f"[{label}] 未确定 {packmod.DIR_NAMES[kind]} 目录，已跳过")
+                continue
+            packmod.reconcile_installed(self.cfg, self.packs, kinds=[kind])
+            inst = self.packs.installed(kind)
+            entries = [e for e in self.packs.installable(kind) if e["id"] in inst]
+            if not entries:
+                continue
+            self._packs_install(entries, kind=kind)
+
+    def _packs_install(self, entries, kind=None):
+        kind = kind or (entries[0].get("kind") if entries else None)
+        if kind and packmod.resolve_pack_dir(self.cfg, kind) is None:
+            self.ui.error(f"未确定 {packmod.DIR_NAMES[kind]} 目录。"
+                          "请在设置中填写客户端实例目录，或在设置里直接指定该文件夹")
+            return
+        try:
+            plans = packmod.plan_install(
+                self.cfg, self.packs, entries,
+                progress_cb=lambda m: self.ui.info(m))
+        except Exception as e:
+            self.ui.error(f"查询下载源失败: {e}")
+            return
+        todo = [p for p in plans if p.action in ("install", "update")]
+        for p in plans:
+            if p.action == "manual":
+                self.ui.warn(f"需手动下载 {p.name}: {p.detail}")
+            elif p.action == "error":
+                self.ui.error(f"查询失败 {p.name}: {p.detail}")
+            elif p.action == "skip":
+                self.ui.info(f"跳过 {p.name}: {p.detail}")
+        if not todo:
+            self.ui.info("没有需要安装/更新的条目")
+            return
+        print("即将执行：")
+        for p in todo:
+            print(f"  {'更新' if p.action == 'update' else '安装'} {p.name}"
+                  f" → {p.version or '未知版本'}（{p.file_name or ''}）")
+        if not self.ui.confirm(f"确认执行以上 {len(todo)} 项？（旧文件自动备份）"):
+            return
+        ok_n = fail_n = 0
+        for p in todo:
+            entry = self.packs.get(p.pack_id)
+            if not entry:
+                continue
+            asset = p.asset or packmod.pick_asset(
+                packmod.list_assets(self.cfg, entry), entry)
+            if asset is None:
+                fail_n += 1
+                self.ui.error(f"失败 {p.name}: 无法确定下载资产（可用「选择下载源」绑定）")
+                continue
+            good, msg = packmod.apply_install(self.cfg, self.packs, entry, asset)
+            if good:
+                ok_n += 1
+                self.ui.ok(f"{p.name}: {msg}")
+            else:
+                fail_n += 1
+                self.ui.error(f"{p.name}: {msg}")
+        self.ui.info(f"完成：成功 {ok_n} 个，失败 {fail_n} 个")
+
     # ---------- 10 设置 ----------
     def do_settings(self):
         while True:
@@ -736,6 +1024,8 @@ class CliApp:
                 f"每mod保留备份数: {self.cfg.backup_keep}",
                 f"GTNH整合包版本（仅供说明提示）: {self.cfg.data.get('gtnh_version') or '（未设置）'}",
                 f"Wiki反爬Cookie: {'已配置' if self.cfg.wiki_cookie else '（未配置，站点开启Cloudflare验证时需要）'}",
+                f"资源包目录: {self.cfg.pack_folders.get('resourcepack') or '（自动推断）'}",
+                f"光影包目录: {self.cfg.pack_folders.get('shader') or '（自动推断）'}",
                 "恢复已排除/忽略的文件（重新显示）",
                 "打开操作日志文件",
             ]
@@ -796,7 +1086,17 @@ class CliApp:
                 self.ui.ok("已保存")
             elif idx == 7:
                 self.do_wiki_cookie()
-            elif idx == 8:
+            elif idx in (8, 9):
+                kind = "resourcepack" if idx == 8 else "shader"
+                dirname = packmod.DIR_NAMES[kind]
+                self.ui.info(f"留空则按客户端 mods 目录自动推断（{dirname}）")
+                p = self.ui.input_text(
+                    f"{dirname} 目录",
+                    self.cfg.pack_folders.get(kind) or "")
+                self.cfg.set_pack_dir(kind, p)
+                resolved = packmod.resolve_pack_dir(self.cfg, kind)
+                self.ui.ok(f"已保存；当前使用: {resolved if resolved else '（未确定）'}")
+            elif idx == 10:
                 ignored = self.cfg.data.get("ignored_files") or []
                 if not ignored:
                     self.ui.info("没有被剔除/忽略的文件")
@@ -805,7 +1105,7 @@ class CliApp:
                 if sel is not None:
                     updater.unignore(self.cfg, ignored[sel])
                     self.ui.ok("已取消忽略")
-            elif idx == 9:
+            elif idx == 11:
                 log_path = utils.log_file_path(self.cfg.data_dir)
                 if log_path.exists():
                     os.startfile(log_path)  # 用默认编辑器打开
@@ -886,7 +1186,99 @@ def run(argv=None):
         return run_check(app)
     if "--update-all" in argv:
         return run_update_all(app)
+    if "--packs-check" in argv:
+        return run_packs_check(app)
+    if "--packs-update" in argv:
+        return run_packs_update(app)
     app.main_menu()
+
+
+def run_packs_check(app) -> int:
+    """非交互：检查资源包/光影更新（只已安装项，出错返回非0）。"""
+    print("GTNH 资源包与光影更新检查...")
+    rc = 0
+    for kind in packmod.DIR_NAMES:
+        packmod.reconcile_installed(app.cfg, app.packs, kinds=[kind])
+        inst = app.packs.installed(kind)
+        entries = [e for e in app.packs.by_kind(kind)
+                   if e["id"] in inst and not e.get("local")]
+        label = packwiki.KIND_LABELS.get(kind, kind)
+        if not entries:
+            print(f"[{label}] 未记录已安装条目")
+            continue
+        try:
+            plans = packmod.plan_install(app.cfg, app.packs, entries)
+        except Exception as e:
+            print(f"[{label}] 检查失败: {e}")
+            rc = 1
+            continue
+        for p in plans:
+            if p.action == "update":
+                print(f"[{label}] 可更新 {p.name}: {p.detail}")
+            elif p.action == "error":
+                print(f"[{label}] 查询失败 {p.name}: {p.detail}")
+                rc = 1
+            elif p.action == "manual":
+                print(f"[{label}] 需手动 {p.name}: {p.detail}")
+            else:
+                print(f"[{label}] {p.name}: {p.detail}")
+    return rc
+
+
+def run_packs_update(app) -> int:
+    """非交互：安装/更新全部**已安装**且可自动下载的资源包与光影（有失败项返回非0）。
+
+    与 ``--update-all`` 的 mod 语义一致：只动已安装的条目，绝不把 wiki 全量
+    条目当作安装清单（否则刷新一次 wiki 就会把上游所有包全部下载）。
+    """
+    print("GTNH 资源包与光影安装/更新...")
+    n_ok = n_fail = n_manual = 0
+    for kind in packmod.DIR_NAMES:
+        label = packwiki.KIND_LABELS.get(kind, kind)
+        packmod.reconcile_installed(app.cfg, app.packs, kinds=[kind])
+        if packmod.resolve_pack_dir(app.cfg, kind) is None:
+            print(f"[{label}] 未设置 {packmod.DIR_NAMES[kind]} 目录，已跳过"
+                  "（请在设置中填写客户端实例目录）")
+            continue
+        inst = app.packs.installed(kind)
+        entries = [e for e in app.packs.installable(kind) if e["id"] in inst]
+        if not entries:
+            print(f"[{label}] 没有已安装条目（首次安装请在交互菜单/GUI 里逐项选择）")
+            continue
+        try:
+            plans = packmod.plan_install(app.cfg, app.packs, entries)
+        except Exception as e:
+            print(f"[{label}] 查询失败: {e}")
+            n_fail += 1
+            continue
+        for p in plans:
+            if p.action in ("install", "update"):
+                entry = app.packs.get(p.pack_id)
+                asset = p.asset or (packmod.pick_asset(
+                    packmod.list_assets(app.cfg, entry), entry) if entry else None)
+                if asset is None:
+                    n_fail += 1
+                    print(f"[{label}] 失败 {p.name}: 无法确定下载资产")
+                    continue
+                try:
+                    ok, msg = packmod.apply_install(app.cfg, app.packs, entry, asset)
+                except Exception as e:
+                    ok, msg = False, f"安装失败: {e}"
+                if ok:
+                    n_ok += 1
+                    print(f"[{label}] 已安装 {p.name}: {p.detail}")
+                else:
+                    n_fail += 1
+                    print(f"[{label}] 失败 {p.name}: {msg}")
+            elif p.action == "manual":
+                n_manual += 1
+                print(f"[{label}] 需手动下载 {p.name}: {p.detail}\n"
+                      f"          放入：{packmod.folder_hint(app.cfg, kind)}")
+            elif p.action == "error":
+                n_fail += 1
+                print(f"[{label}] 查询失败 {p.name}: {p.detail}")
+    print(f"完成：安装/更新 {n_ok} 个，需手动 {n_manual} 个，失败 {n_fail} 个")
+    return 1 if n_fail else 0
 
 
 def run_check(app) -> int:
