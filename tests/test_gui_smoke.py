@@ -3,6 +3,8 @@
 覆盖"对话框打开即抛异常"一类回归——如 v1.5.0 版本选择器的前向引用
 NameError（确认按钮根本没绑定，只能靠人工发现）。
 """
+import gc
+import re
 import shutil
 import sys
 import tempfile
@@ -15,6 +17,32 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gtnhmod import gui  # noqa: E402
+from gtnhmod import packs  # noqa: E402
+
+
+def setUpModule():
+    # 同一进程内反复销毁并重建 Tk 在 Windows Tcl 8.6 上会偶发初始化失败。
+    # 模块共用一个解释器；每个测试类仍有独立 GuiApp、数据目录和控件。
+    global _test_root
+    _test_root = tk.Tk()
+
+
+def tearDownModule():
+    _test_root.destroy()
+    gc.collect()
+
+
+def _new_app(data_dir):
+    with mock.patch.object(gui.tk, "Tk", return_value=_test_root):
+        return gui.GuiApp(data_dir)
+
+
+def _clear_app(app):
+    for callback in app.root.tk.call("after", "info"):
+        app.root.after_cancel(callback)
+    for child in app.root.winfo_children():
+        child.destroy()
+    app.root.update_idletasks()
 
 
 def _walk(widget):
@@ -22,6 +50,22 @@ def _walk(widget):
     yield widget
     for child in widget.winfo_children():
         yield from _walk(child)
+
+
+def _pump(root, predicate, timeout=2.0):
+    """驱动 Tk 事件循环直到 predicate() 为真。
+
+    ``show_pack_detail`` 一类弹窗不走 mainloop/wait_window，只 root.after 是
+    不会执行的：测试必须自己 update() 才能让排队的回调跑起来。
+    """
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        root.update()
+        if predicate():
+            return True
+        _time.sleep(0.01)
+    return predicate()
 
 
 def _opts():
@@ -43,13 +87,15 @@ class TestGuiSmoke(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(prefix="gtnh_gui_"))
-        cls.app = gui.GuiApp(cls.tmp)
+        cls.app = _new_app(cls.tmp)
         cls.app.root.update_idletasks()
 
     @classmethod
     def tearDownClass(cls):
-        cls.app.root.destroy()
+        _clear_app(cls.app)
+        cls.app = None
         shutil.rmtree(cls.tmp, ignore_errors=True)
+        gc.collect()
 
     def test_app_builds(self):
         self.assertTrue(self.app.inst_tree["columns"])
@@ -213,6 +259,281 @@ class TestGuiSmoke(unittest.TestCase):
         ver = self.app._version_picker(_opts(), current=None, title="过滤测试")
         self.assertIsNone(ver)  # 自动关闭 → None（不抛异常即通过）
         self.assertEqual(observed.get("rows"), 2)
+
+
+class TestPacksRefreshGuard(unittest.TestCase):
+    def test_busy_refresh_does_not_touch_installation_database(self):
+        app = mock.Mock(busy=True)
+        with mock.patch.object(gui.packmod, "reconcile_installed") as reconcile:
+            gui.GuiApp.refresh_packs(app)
+        reconcile.assert_not_called()
+
+
+class TestPacksTabSmoke(unittest.TestCase):
+    """「资源包与光影」页签冒烟：对话框构建/菜单绑定/列表刷新不抛异常。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="gtnh_gui_pk_"))
+        cls.app = _new_app(cls.tmp)
+        cls.app.root.update_idletasks()
+        # 真实存在的安装目录：reconcile 会用磁盘扫描结果校正安装记录
+        cls.rp_dir = Path(cls.tmp) / "resourcepacks"
+        cls.rp_dir.mkdir(exist_ok=True)
+        cls.app.cfg.set_pack_dir("resourcepack", cls.rp_dir)
+
+    @classmethod
+    def tearDownClass(cls):
+        _clear_app(cls.app)
+        cls.app = None
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+        gc.collect()
+
+    def _make_zip(self, name):
+        import zipfile
+        with zipfile.ZipFile(self.rp_dir / name, "w") as zf:
+            zf.writestr("pack.mcmeta", "{}")
+
+    def test_check_does_not_report_latest_on_failed_or_unknown_results(self):
+        self._make_zip("Demo.Pack.v1.0.zip")
+        self.app.refresh_packs()
+        for action, detail in (("error", "查询失败"), ("manual", "需手动选择"),
+                               ("skip", "无法比较版本")):
+            plan = packs.InstallPlanItem("pack-demo", "Demo Pack", "resourcepack",
+                                         action, detail=detail)
+            with self.subTest(action=action), \
+                 mock.patch.object(gui.packmod, "plan_install", return_value=[plan]), \
+                 mock.patch.object(self.app, "_run_async", side_effect=lambda work, done: done(work())), \
+                 mock.patch.object(gui.messagebox, "showinfo") as info:
+                self.app.check_pack_updates()
+            message = info.call_args.args[1]
+            self.assertNotIn("均为最新", message)
+            self.assertIn("1", message)
+
+    def setUp(self):
+        for w in self.app.root.winfo_children():
+            if isinstance(w, tk.Toplevel):
+                w.destroy()
+        # 页签筛选状态是共享 Tk 变量：逐用例复位，避免相互影响
+        self.app.pack_kind.set("resourcepack")
+        self.app.pack_cat.set("")
+        self.app.pack_search.set("")
+        self.app.pack_only_installed.set(False)
+        self.app._pack_updates = {}
+        for f in self.rp_dir.iterdir():
+            if f.is_file():
+                f.unlink()
+        from gtnhmod import packs_wiki as packwiki
+        self.app.packs.merge_wiki([
+            {"id": "pack-demo", "kind": packwiki.KIND_RESOURCE, "name_en": "Demo Pack",
+             "name_cn": "", "category": "深色模式", "author": "Tester", "scope": "范围说明",
+             "loader": "", "desc": "说明文字", "detail": "范围说明\n说明文字",
+             "version_requirements": [{"version": "2.8.0", "relation": "below"}],
+             "icon": None,
+             "urls": {"links": [{"url": "https://github.com/a/b/releases", "label": "下载"}],
+                      "github": "https://github.com/a/b/releases", "modrinth": None,
+                      "curseforge": None,
+                      "primary": "https://github.com/a/b/releases",
+                      "direct": ["https://github.com/a/b/releases"]},
+             "aliases": [], "local": False, "wiki_removed": False},
+            {"id": "pack-manual", "kind": packwiki.KIND_RESOURCE, "name_en": "Manual Pack",
+             "name_cn": "", "category": "升级与重制", "author": "", "scope": "",
+             "loader": "", "desc": "", "detail": "", "version_requirements": [],
+             "icon": None,
+             "urls": {"links": [{"url": "https://www.curseforge.com/x", "label": "cf"}],
+                      "github": None, "modrinth": None,
+                      "curseforge": "https://www.curseforge.com/x",
+                      "primary": "https://www.curseforge.com/x", "direct": []},
+             "aliases": [], "local": False, "wiki_removed": False},
+            {"id": "shader-demo", "kind": packwiki.KIND_SHADER, "name_en": "Demo Shader",
+             "name_cn": "", "category": "推荐列表", "author": "", "scope": "",
+             "loader": "Angelica", "desc": "", "detail": "", "version_requirements": [],
+             "icon": None,
+             "urls": {"links": [{"url": "https://modrinth.com/shader/demo", "label": "m"}],
+                      "github": None, "modrinth": "https://modrinth.com/shader/demo",
+                      "curseforge": None, "primary": "https://modrinth.com/shader/demo",
+                      "direct": ["https://modrinth.com/shader/demo"]},
+             "aliases": [], "local": False, "wiki_removed": False},
+        ])
+
+    def test_tab_exists_and_refreshes(self):
+        titles = [self.app.nb.tab(i, "text") for i in range(len(self.app.nb.tabs()))]
+        self.assertIn("资源包与光影", titles)
+        self.app.refresh_packs()
+        self.assertEqual(len(self.app.pack_tree.get_children()), 2)   # 默认只看资源包
+        self.app.pack_kind.set("shader")
+        self.app.refresh_packs()
+        self.assertEqual(len(self.app.pack_tree.get_children()), 1)
+        self.app.pack_kind.set("resourcepack")
+
+    def test_category_filter_and_search(self):
+        self.app.refresh_packs()
+        self.app.pack_cat.set("深色模式")
+        self.app.refresh_packs()
+        self.assertEqual([e["id"] for e in self.app.pack_rows], ["pack-demo"])
+        self.app.pack_cat.set("")
+        self.app.pack_search.set("manual")
+        self.app.refresh_packs()
+        self.assertEqual([e["id"] for e in self.app.pack_rows], ["pack-manual"])
+        self.app.pack_search.set("")
+
+    def test_status_column_marks_updates(self):
+        """磁盘上有包 + 检查更新记录了目标版本 → 状态列显示「可更新 → x」。"""
+        self._make_zip("Demo.Pack.v1.0.zip")
+        self.app.packs.set_installed("resourcepack", "pack-demo",
+                                     {"file_name": "Demo.Pack.v1.0.zip", "version": "v1.0"})
+        self.app._pack_updates = {("resourcepack", "pack-demo"): "v9.9"}
+        self.app.refresh_packs()
+        row = self.app.pack_tree.item("pack-demo", "values")
+        self.assertIn("可更新", row[6])
+        self.assertIn("v9.9", row[6])
+
+    def test_removed_file_clears_installed_mark(self):
+        """用户手动删掉包后，列表不再显示已安装（与 mod 的校正语义一致）。"""
+        self._make_zip("Demo.Pack.v1.0.zip")
+        self.app.packs.set_installed("resourcepack", "pack-demo",
+                                     {"file_name": "Demo.Pack.v1.0.zip", "version": "v1.0"})
+        self.app.refresh_packs()
+        self.assertEqual(self.app.pack_tree.item("pack-demo", "values")[4], "是")
+        (self.rp_dir / "Demo.Pack.v1.0.zip").unlink()
+        self.app.refresh_packs()
+        self.assertEqual(self.app.pack_tree.item("pack-demo", "values")[4], "否")
+
+    def _non_modal(self):
+        """把 _dialog 变成非模态：模态 grab 会阻塞事件泵，测试无法检查其内容。"""
+        original = gui.GuiApp._dialog
+
+        def wrapper(app, title, size="600x400", **kw):
+            return original(app, title, size, modal=False)
+        return mock.patch.object(gui.GuiApp, "_dialog", wrapper)
+
+    def _first_toplevel(self):
+        return next((w for w in self.app.root.winfo_children()
+                     if isinstance(w, tk.Toplevel)), None)
+
+    def test_detail_dialog_opens_for_every_entry_kind(self):
+        """详情弹窗对「可自动下载」「只能手动下载」两种条目都要能构建。"""
+        self.app.refresh_packs()
+        for pack_id in ("pack-demo", "pack-manual"):
+            with self.subTest(pack_id=pack_id), self._non_modal():
+                self.app.pack_tree.selection_set(pack_id)
+                self.app.show_pack_detail()
+                self.assertTrue(_pump(self.app.root, lambda: self._first_toplevel()))
+                top = self._first_toplevel()
+                try:
+                    self.assertIn("详情", top.title())
+                    self.assertTrue(any(isinstance(c, tk.Text) for c in _walk(top)))
+                finally:
+                    top.destroy()
+
+    def test_detail_dialog_installed_record_shown(self):
+        self._make_zip("Demo.Pack.v1.0.zip")
+        self.app.packs.set_installed("resourcepack", "pack-demo",
+                                     {"file_name": "Demo.Pack.v1.0.zip", "version": "v1.0",
+                                      "installed_at": "2026-01-01 00:00:00", "note": "提示"})
+        self.app.refresh_packs()
+        self.app.pack_tree.selection_set("pack-demo")
+        with self._non_modal():
+            self.app.show_pack_detail()
+            self.assertTrue(_pump(self.app.root, lambda: self._first_toplevel()))
+            top = self._first_toplevel()
+            try:
+                text = next(c for c in _walk(top) if isinstance(c, tk.Text))
+                body = text.get("1.0", "end")
+            finally:
+                top.destroy()
+        self.assertIn("Demo.Pack.v1.0.zip", body)
+        self.assertIn("本地已装", body)
+
+    def test_asset_picker_dialog_binds_without_nameerror(self):
+        """资产选择弹窗必须能真正完成绑定。
+
+        真实回归：gui.py 里用了 ``re.escape`` 却从未 ``import re``，
+        点「绑定此文件」直接抛 ``NameError: name 're' is not defined``——
+        只有走到真正的绑定分支才暴露，单纯打开弹窗不会。
+        """
+        from gtnhmod import net
+        assets = [packs.PackAsset(url="https://x/Shadow.UI.v5.45.zip",
+                                  file_name="Shadow.UI.v5.45.zip", version="v5.45",
+                                  tag="v5.45", published_at="2026-09-24", source="github"),
+                  packs.PackAsset(url="https://x/Shadow.UI.v5.45-Modernity.version.zip",
+                                  file_name="Shadow.UI.v5.45-Modernity.version.zip",
+                                  version="v5.45", tag="v5.45", published_at="2026-09-24",
+                                  source="github")]
+        result = packs.PackSourceResult(source="github", status="ok", assets=assets,
+                                        url="https://github.com/Ranzuu/Shadow-UI",
+                                        note="GitHub Ranzuu/Shadow-UI")
+        entry = self.app.packs.get("pack-demo")
+        with self._non_modal(), \
+                mock.patch.object(gui.packmod, "list_assets", return_value=result), \
+                mock.patch.object(self.app, "_run_async",
+                                  side_effect=lambda job, done: done(job())):
+            self.app._pack_asset_dialog(entry)
+            self.assertTrue(_pump(self.app.root, lambda: self._first_toplevel()))
+            top = self._first_toplevel()
+            try:
+                listbox = next(c for c in _walk(top) if isinstance(c, tk.Listbox))
+                listbox.selection_clear(0, "end")
+                listbox.selection_set(0)
+                bind = next(c for c in _walk(top) if isinstance(c, ttk.Button)
+                            and c.cget("text") == "绑定此文件")
+                bind.invoke()
+            finally:
+                if top.winfo_exists():
+                    top.destroy()
+        saved = self.app.packs.get("pack-demo")
+        self.assertEqual(saved.get("bound_source"), "https://github.com/Ranzuu/Shadow-UI")
+        self.assertTrue(saved.get("asset_regex"))
+        self.assertTrue(re.search(saved["asset_regex"], "Shadow.UI.v5.45.zip"))
+
+    def test_source_dialog_uses_gui_re_module(self):
+        """设置下载源弹窗内部的 re 依赖（同 re 未导入类回归）。"""
+        entry = self.app.packs.get("pack-demo")
+        with self._non_modal():
+            self.app._pack_source_dialog(entry)
+            self.assertTrue(_pump(self.app.root, lambda: self._first_toplevel()))
+            top = self._first_toplevel()
+            try:
+                self.assertTrue(any(isinstance(c, ttk.Entry) for c in _walk(top)))
+            finally:
+                top.destroy()
+
+    def test_backup_dialog_opens(self):
+        with self._non_modal():
+            self.app.pack_backup_dialog()
+            self.assertTrue(_pump(self.app.root, lambda: self._first_toplevel()))
+            top = self._first_toplevel()
+            try:
+                self.assertEqual(top.title(), "备份与恢复")
+                # 备份列表控件存在
+                self.assertTrue(any(isinstance(c, ttk.Treeview) for c in _walk(top)))
+            finally:
+                top.destroy()
+
+    def test_context_menu_builds_without_error(self):
+        menu = tk.Menu(self.app.root, tearoff=0)
+        self.app._pack_menu(menu, "pack-demo")
+        labels = [menu.entrycget(i, "label")
+                  for i in range(menu.index("end") + 1)
+                  if menu.type(i) != "separator"]
+        for expected in ("详情", "安装/更新", "选择下载资产...", "打开下载页面", "检查更新"):
+            self.assertIn(expected, labels)
+
+    def test_refresh_without_wiki_data_is_safe(self):
+        from gtnhmod import packs as packmod
+        empty = packmod.PacksDB(Path(self.tmp) / "empty_packs.json")
+        original = self.app.packs
+        try:
+            self.app.packs = empty
+            self.app.refresh_packs()          # 不应抛异常
+            self.assertEqual(self.app.pack_tree.get_children(), ())
+        finally:
+            self.app.packs = original
+
+    def test_folder_label_uses_hint(self):
+        self.app.refresh_packs()
+        txt = self.app.pack_dir_label.cget("text")
+        self.assertTrue(txt.startswith("安装目录："), txt)
 
 
 if __name__ == "__main__":

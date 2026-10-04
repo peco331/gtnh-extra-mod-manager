@@ -17,6 +17,8 @@ DEFAULTS = {
     "core_mod_confirm": True,     # 禁用 mod 前二次确认
     "wiki_cookie": "",            # Cloudflare 反爬：浏览器通过验证后的 Cookie（cf_clearance）
     "wiki_ua": "",                # 与 cookie 配套的浏览器 User-Agent（cf_clearance 与 UA 绑定）
+    # 资源包与光影：空串=由客户端实例目录推断，填写即固定该目录
+    "pack_folders": {"resourcepack": "", "shader": ""},
 }
 
 
@@ -39,6 +41,9 @@ class Config:
         merged["mods_folders"] = dict(merged.get("mods_folders") or {})
         merged["mods_folders"].setdefault("client", "")
         merged["mods_folders"].setdefault("server", "")
+        merged["pack_folders"] = dict(merged.get("pack_folders") or {})
+        merged["pack_folders"].setdefault("resourcepack", "")
+        merged["pack_folders"].setdefault("shader", "")
         if not isinstance(merged.get("ignored_files"), list):
             merged["ignored_files"] = []
         else:
@@ -65,6 +70,19 @@ class Config:
 
     def set_mods_dir(self, side: str, path) -> None:
         self.data["mods_folders"][side] = str(path) if path else ""
+        self.save()
+
+    @property
+    def pack_folders(self) -> dict:
+        return self.data.setdefault("pack_folders", {"resourcepack": "", "shader": ""})
+
+    def pack_dir(self, kind: str) -> Path | None:
+        """显式设置的资源包/光影包目录（未设置返回 None，由 packs.resolve_pack_dir 推断）。"""
+        p = (self.pack_folders.get(kind) or "").strip()
+        return Path(p) if p else None
+
+    def set_pack_dir(self, kind: str, path) -> None:
+        self.pack_folders[kind] = str(path) if path else ""
         self.save()
 
     @property
@@ -120,11 +138,23 @@ class Config:
         return self.data_dir / "backup"
 
 
+def _detect_pack_dirs_into(base: Path, res: dict) -> None:
+    """在实例根、``.minecraft``、``minecraft`` 三层里探测资源包/光影包目录。"""
+    for cand in (base, base / ".minecraft", base / "minecraft"):
+        if not cand.is_dir():
+            continue
+        for key, dirname in (("resourcepacks", "resourcepacks"),
+                             ("shaderpacks", "shaderpacks")):
+            if res.get(key) is None and (cand / dirname).is_dir():
+                res[key] = cand / dirname
+
+
 def detect_instance_paths(path) -> dict:
     """智能从所选目录（实例根目录或 mods 目录）识别客户端/服务端 mods 路径与整合包版本。"""
     import re
     p = Path(path) if path else None
-    res = {"client_mods": None, "server_mods": None, "gtnh_version": None}
+    res = {"client_mods": None, "server_mods": None, "gtnh_version": None,
+           "resourcepacks": None, "shaderpacks": None}
     if not p or not p.exists():
         return res
 
@@ -141,6 +171,7 @@ def detect_instance_paths(path) -> dict:
                     m = re.search(r"2\.\d+(?:\.\d+)?(?:[-\s]?(?:beta|rc|pre)\s*\d*)?", line, re.I)
                     if m:
                         res["gtnh_version"] = m.group(0).strip()
+        _detect_pack_dirs_into(p.parent, res)
         return res
 
     # 2. 实例根目录：探测客户端 mods
@@ -155,7 +186,10 @@ def detect_instance_paths(path) -> dict:
             res["server_mods"] = cand
             break
 
-    # 4. 尝试探测 GTNH 版本
+    # 4. 探测资源包/光影包目录（实例根、.minecraft、minecraft 三层）
+    _detect_pack_dirs_into(p, res)
+
+    # 5. 尝试探测 GTNH 版本
     for cfg_cand in (p / "instance.cfg", p / "mmc-pack.json"):
         if cfg_cand.exists():
             for line in cfg_cand.read_text(encoding="utf-8", errors="ignore").splitlines():
