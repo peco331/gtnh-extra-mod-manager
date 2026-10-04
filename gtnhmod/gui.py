@@ -3512,16 +3512,36 @@ class GuiApp:
         for c in changes[:30]:
             self._log(f"  - {c}")
         self.refresh_addable()
-        # 目录同步与 GitHub 发布时间查询解耦：刷新完成后立即可浏览，
-        # 发布时间按后续更新检查/缓存策略获取，避免 80+ 源串行拖住 Wiki。
+        # 目录同步完成即释放界面；工作线程只读快照、返回查询结果，
+        # 主线程回调再写 DB，避免并发修改目录。
         self._set_busy(False)
-        self._log("Wiki 刷新完成；下载页发布时间将在需要时后台获取")
+        import copy
+        entries = copy.deepcopy(self.db.all())
+        self._log("Wiki 刷新完成；正在后台获取下载页发布时间...")
+        self._run_async(
+            lambda: updater.fetch_release_dates(self.cfg, entries),
+            on_done=lambda result: self._on_release_dates_done(result, entries=entries))
 
-    def _on_release_dates_done(self, result):
-        self._set_busy(False)
-        result = result or {}
-        self._log(f"下载页发布时间已更新：{result.get('updated', 0)} 个，"
-                  f"{result.get('failed', 0)} 个失败")
+    def _on_release_dates_done(self, result, *, entries=None):
+        # 日期查询不占用 busy，不能在完成时解除其他安装/更新任务的锁。
+        if result is None:
+            self._log("[错误] 下载页发布时间后台获取失败；已保留原有日期")
+            return
+        dates = result.get("dates", {})
+        if entries is not None:
+            # 用户可能在查询期间重新绑定下载源；拒绝回填旧源的日期。
+            unchanged = set()
+            for old in entries:
+                current = self.db.get(old["id"])
+                if current and all(current.get(key) == old.get(key)
+                                   for key in ("source_type", "source")):
+                    unchanged.add(old["id"])
+            dates = {mod_id: date for mod_id, date in dates.items() if mod_id in unchanged}
+        updated = updater.apply_release_dates(self.db, dates)
+        self._log(f"下载页发布时间已更新：{updated} 个，"
+                  f"{result.get('failed', 0)} 个失败（检查 {result.get('checked', 0)} 个 GitHub 源）")
+        for mod_id, error in result.get("errors", {}).items():
+            self._log(f"[警告] {mod_id} 发布时间获取失败：{error}")
         self.refresh_addable()
 
     # ---------- 未受管页 ----------

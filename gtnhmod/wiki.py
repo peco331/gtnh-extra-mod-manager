@@ -1009,22 +1009,43 @@ def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None
 
     proc = subprocess.Popen(cmd)
     ws = None
+    temporary_profile = None
     try:
         # 等待 CDP 调试端口就绪
         ws_url = None
+        startup_note = "调试端口未就绪"
         t0 = time.time()
         while time.time() - t0 < 15:
             time.sleep(0.5)
             try:
                 tabs = _read_local_cdp_json(port)
+                startup_note = "调试端口已就绪，但未找到目标 Wiki 页面"
                 target = _select_wiki_cdp_target(tabs, page_url)
                 if target and target.get("webSocketDebuggerUrl"):
                     ws_url = target["webSocketDebuggerUrl"]
                     break
             except Exception:
                 pass
+            # Chromium 的同目录单实例机制会拒绝新进程，或把网页交给
+            # 已有进程；新指定的调试端口不会生效。不要动已有会话，
+            # 只在启动进程退出时用临时独立目录重试一次。
+            exit_code = proc.poll()
+            if exit_code is not None:
+                if temporary_profile is not None:
+                    raise net.HttpError(
+                        -1, f"浏览器验证启动失败（退出码 {exit_code}）")
+                import tempfile
+                temporary_profile = tempfile.TemporaryDirectory(
+                    prefix="gtnh-wiki-browser-", ignore_cleanup_errors=True)
+                cmd = [f"--user-data-dir={temporary_profile.name}"
+                       if arg.startswith("--user-data-dir=") else arg for arg in cmd]
+                if progress_cb:
+                    progress_cb("专用浏览器启动进程已退出，正在用临时独立会话重试验证...")
+                proc = subprocess.Popen(cmd)
+                startup_note = "临时会话的调试端口未就绪"
+                t0 = time.time()
         if not ws_url:
-            raise net.HttpError(-1, "未能连接到浏览器调试会话")
+            raise net.HttpError(-1, f"未能连接到浏览器调试会话：{startup_note}")
 
         ws = websocket.create_connection(ws_url, timeout=5)
         raw_url = f"{base_url}/index.php?title={urllib.parse.quote(page_name)}&action=raw"
@@ -1085,3 +1106,5 @@ def fetch_wikitext_via_browser(cfg, timeout_seconds: int = 120, progress_cb=None
                 proc.wait(timeout=3)
         except Exception:
             pass
+        if temporary_profile is not None:
+            temporary_profile.cleanup()
