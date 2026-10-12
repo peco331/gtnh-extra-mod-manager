@@ -18,3 +18,12 @@ dist/
 GTNHModManager.exe
 gtnh-cli.exe
 *.spec
+
+.env
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+gitleaks-report*.json
+HANDOFF.md

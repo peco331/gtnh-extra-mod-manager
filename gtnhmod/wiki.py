@@ -82,6 +82,13 @@ def _wiki_headers(cfg, profile: "WikiProfile | None" = None) -> dict:
     # 用户点击“刷新”时必须穿透中间缓存；Cookie/UA 仍只用于请求，绝不输出到日志。
     headers = {"Referer": _referer(cfg, profile),
                "Cache-Control": "no-cache", "Pragma": "no-cache"}
+    def config_quote(value):
+        value = str(value)
+        if any(ord(char) < 32 for char in value):
+            raise net.HttpError(-1, "凭据含非法控制字符")
+        return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+    config_lines = []
     cookie = getattr(cfg, "wiki_cookie", "") or ""
     ua = getattr(cfg, "wiki_ua", "") or ""
     if cookie:
@@ -180,18 +187,27 @@ def _fetch_curl_wikitext(cfg, profile: "WikiProfile | None" = None) -> str:
     ua = getattr(cfg, "wiki_ua", "") or net.USER_AGENT
     cmd = [curl, "-sS", "-f", "-m", "30", "-A", ua, "-e", _referer(cfg, profile),
            "-H", "Cache-Control: no-cache", "-H", "Pragma: no-cache"]
+    def config_quote(value):
+        value = str(value)
+        if any(ord(char) < 32 for char in value):
+            raise net.HttpError(-1, "凭据含非法控制字符")
+        return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+    config_lines = []
     cookie = getattr(cfg, "wiki_cookie", "") or ""
     if cookie:
-        cmd += ["-b", cookie]
+        config_lines.append("cookie = " + config_quote(cookie))
     proxy = cfg.proxy
     if proxy and proxy.get("host"):
-        auth = f'{proxy["user"]}:{proxy["pass"]}@' if proxy.get("user") else ""
-        cmd += ["-x", f'http://{auth}{proxy["host"]}:{proxy.get("port", 8080)}']
-    cmd.append(url)
+        cmd += ["-x", f'http://{proxy["host"]}:{proxy.get("port", 8080)}']
+        if proxy.get("user"):
+            config_lines.append("proxy-user = " + config_quote(f'{proxy["user"]}:{proxy.get("pass", "")}'))
+    cmd += ["--config", "-", url]
+    config_input = ("\n".join(config_lines) + "\n").encode("utf-8")
     try:
-        out = subprocess.run(cmd, capture_output=True, timeout=45)
+        out = subprocess.run(cmd, input=config_input, capture_output=True, timeout=45)
     except (OSError, subprocess.TimeoutExpired) as e:
-        raise net.HttpError(-1, f"curl 执行失败: {e}")
+        raise net.HttpError(-1, "curl 执行失败") from None
     if out.returncode != 0:
         raise net.HttpError(-1, f"curl 返回码 {out.returncode}")
     return out.stdout.decode("utf-8", "replace")
