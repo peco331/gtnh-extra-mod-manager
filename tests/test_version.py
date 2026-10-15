@@ -40,6 +40,19 @@ class TestDisplayVersion(unittest.TestCase):
             self.assertEqual(gtnhmod.display_version(), f"{gtnhmod.__version__}-dev+abc1234.dirty")
 
 
+class TestReleaseNotes(unittest.TestCase):
+    def test_current_version_has_changelog_section(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            import release_notes
+        finally:
+            sys.path.pop(0)
+        text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        notes = release_notes.section(text, gtnhmod.__version__)
+        self.assertIn("### ", notes)
+        self.assertNotIn("## 未发布", notes)
+
+
 class TestReleaseGuard(unittest.TestCase):
     def test_release_build_refuses_mismatched_tag(self):
         target = ROOT / "gtnhmod" / "_build_info.py"
