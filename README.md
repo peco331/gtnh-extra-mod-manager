@@ -205,6 +205,6 @@ py -3.10 -m pip install pyinstaller curl_cffi websocket-client Pillow
 .\scripts\build_exe.bat
 ```
 
-输出为 `dist/GTNHModManager.exe` 和 `dist/gtnh-cli.exe`。成品 Wiki 验证入口为 `scripts/verify_packaged_wiki.py`，资源包与光影使用 `scripts/verify_packaged_packs.py`。版本号需同时更新 `pyproject.toml` 与 `gtnhmod/__init__.py`。
+输出为 `dist/GTNHModManager.exe` 和 `dist/gtnh-cli.exe`。成品 Wiki 验证入口为 `scripts/verify_packaged_wiki.py`，资源包与光影使用 `scripts/verify_packaged_packs.py`。版本号只在 `gtnhmod/__init__.py` 维护，发布时才修改；本地构建的窗口标题显示 `<版本>-dev+<提交号>`，只有从对应 `v<版本>` 标签构建的成品显示纯版本号。改动记录见 `CHANGELOG.md`。
 
 推送 `v*` tag 会触发 [Release 工作流](.github/workflows/release.yml)：运行测试、构建、成品 Wiki 验证、打包并发布。普通分支推送不创建 Release；[Secret scan 工作流](.github/workflows/secret-scan.yml)检查提交历史中的凭据。贡献前请阅读 [AGENTS.md](AGENTS.md)，保持本地数据、会话、成品和恢复记录不入库。

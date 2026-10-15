@@ -21,7 +21,7 @@ from copy import deepcopy
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import SIDES, SIDE_LABELS, __version__, net, updater, utils, cookies
+from . import SIDES, SIDE_LABELS, display_version, net, updater, utils, cookies
 from . import packs as packmod
 from . import packs_wiki as packwiki
 from . import wiki as wikimod
@@ -83,7 +83,7 @@ class GuiApp(PacksGuiMixin):
             except (AttributeError, OSError):
                 pass
         self.root = tk.Tk()
-        self.root.title(f"GTNH 额外MOD管理工具 v{__version__}")
+        self.root.title(f"GTNH 额外MOD管理工具 v{display_version()}")
         self._set_app_icon()
         self.theme = theme.ThemeManager(self.root, FONT, self.cfg.data.get("theme", "system"))
         self.theme.on_change(self._on_theme_changed)

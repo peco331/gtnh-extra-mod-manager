@@ -3,7 +3,8 @@
 ## 工程边界
 
 - 面向 Windows 的 GTNH 额外 MOD、资源包与光影管理工具。核心逻辑在 `gtnhmod/`；CLI 与 Tkinter GUI 共用核心行为，交互抽象见 `gtnhmod/ui.py`。
-- 功能说明见 `README.md`；版本以 `pyproject.toml` 与 `gtnhmod/__init__.py` 为准，两处必须一致。`build/`、`dist/` 与根目录 exe 是成品或恢复材料，不作为开发源。
+- 功能说明见 `README.md`，变更记录见 `CHANGELOG.md`。`build/`、`dist/` 与根目录 exe 是成品或恢复材料，不作为开发源。
+- 版本号只在 `gtnhmod/__init__.py` 的 `__version__` 维护（`pyproject.toml` 从它读取），表示下一次发布的版本，遵循语义化版本。日常修复和本地构建不改版本号，改动记到 `CHANGELOG.md` 的「未发布」下；本地构建由 `scripts/write_build_info.py` 标注为 `<版本>-dev+<提交号>`。只有准备发布 `v*` 标签时才确定版本号，发布工作流会拒绝与 `__version__` 不一致的标签。
 - 文档和审计任务不顺带更新依赖、重构界面、修改运行行为或重新打包。构建、替换本地 exe、推送代码与发布分别按当前任务授权执行；推送 `v*` tag 会触发 Release 工作流。
 - 用户描述的行为与本文件规则冲突时，先指出冲突并按用户的新要求修改，同时更新本文件与 README，不要按旧规则曲解需求。对“某功能不好用”一类反馈，先确认用户期望的交互，再动手。
 
@@ -25,6 +26,6 @@
 - 源码修改后在 Windows 运行 `py -3.10 -m unittest discover -s tests`；用现有测试覆盖受影响行为。GUI 测试需要可用的 Tk 桌面环境，测试使用临时目录和模拟上游响应，不操作真实游戏目录。真实浏览器专项需设置 `GTNHMOD_TEST_WIKI_BROWSER=1` 后单独运行。
 - 修改扫描或名称匹配规则时，用 `data/` 的副本对比真实 mods、resourcepacks、shaderpacks 目录的新旧匹配结果，确认只有预期条目变化，并在回归测试中固定这些真实文件名。
 - 单元测试、隔离 GUI/HTTP 测试、成品验证与真实 Wiki / 游戏验收分别报告；不能以离线测试通过代替线上或游戏内兼容结论。没能亲自看到的界面效果要明确说明。
-- 成品验证：打包到 `build/` 下的版本目录，先用 `scripts/verify_packaged_wiki.py`、`scripts/verify_packaged_packs.py` 验证 CLI；GUI 用 `GTNHMOD_DATA_DIR` 指向数据副本启动，确认无 `logs/gui_error.log`。
-- 替换本地 exe 前确认管理器与 CLI 均未运行；不得结束用户正在使用的进程，应请用户关闭。替换前把旧 exe 备份到 `dist/rollback/<时间>-before-v<版本>/` 并写 manifest，替换后核对与验收成品的哈希一致、`data/*.json` 未变。
+- 成品验证：先运行 `scripts/write_build_info.py` 再打包（`scripts/build_exe.bat` 已包含，结束后清理），打包到 `build/` 下的目录，先用 `scripts/verify_packaged_wiki.py`、`scripts/verify_packaged_packs.py` 验证 CLI；GUI 用 `GTNHMOD_DATA_DIR` 指向数据副本启动，确认无 `logs/gui_error.log`。
+- 替换本地 exe 前确认管理器与 CLI 均未运行；不得结束用户正在使用的进程，应请用户关闭。替换前把旧 exe 备份到 `dist/rollback/<时间>-before-<提交号>/` 并写 manifest，替换后核对与验收成品的哈希一致、`data/*.json` 未变。
 - `data/`、`.claude/`、`.zcode/` 与 `HANDOFF.md` 是本地配置、会话或交接材料，不提交。公开文档和日志不得带入用户路径、Token、Cookie、代理凭据或本地恢复记录。

@@ -24,6 +24,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install curl_cffi websocket-client Pillow pyinstaller
 
+      - name: 核对标签与版本号
+        # 标签必须等于 gtnhmod/__init__.py 的 v__version__，否则不发布
+        run: python scripts/write_build_info.py --require-release
+
       - name: 运行测试
         run: python -m unittest discover -s tests
 
@@ -40,7 +44,7 @@ jobs:
       - name: 打包 zip
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist/GTNHModManager.exe","dist/gtnh-cli.exe","README.md" `
+          Compress-Archive -Path "dist/GTNHModManager.exe","dist/gtnh-cli.exe","README.md","CHANGELOG.md" `
             -DestinationPath "dist/GTNHModManager-${{ github.ref_name }}-win64.zip"
 
       - name: 发布 Release

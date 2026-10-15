@@ -14,7 +14,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from . import SIDES, SIDE_LABELS, __version__, updater, utils
+from . import SIDES, SIDE_LABELS, display_version, updater, utils
 from . import packs as packmod
 from . import packs_wiki as packwiki
 from . import wiki as wikimod
@@ -77,7 +77,7 @@ class CliApp:
         ]
         while True:
             print()
-            print(f"===== GTNH 额外MOD管理工具 v{__version__} =====")
+            print(f"===== GTNH 额外MOD管理工具 v{display_version()} =====")
             if self.cfg.client_mods_dir:
                 print(f"客户端: {self.cfg.client_mods_dir}")
             if self.cfg.server_mods_dir:

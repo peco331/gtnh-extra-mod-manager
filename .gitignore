@@ -27,3 +27,6 @@ gtnh-cli.exe
 *.key
 gitleaks-report*.json
 HANDOFF.md
+
+# 打包时生成的构建信息
+gtnhmod/_build_info.py
