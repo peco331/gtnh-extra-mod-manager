@@ -57,11 +57,27 @@ class TestReleaseGuard(unittest.TestCase):
     def test_release_build_refuses_mismatched_tag(self):
         target = ROOT / "gtnhmod" / "_build_info.py"
         existed = target.exists()
-        env = dict(os.environ, GITHUB_REF_TYPE="tag", GITHUB_REF_NAME="v0.0.0")
+        # 模拟 GitHub Windows 运行器的 cp1252 控制台：中文提示不能导致崩溃
+        env = dict(os.environ, GITHUB_REF_TYPE="tag", GITHUB_REF_NAME="v0.0.0", PYTHONIOENCODING="cp1252")
         result = subprocess.run([sys.executable, str(ROOT / "scripts" / "write_build_info.py"),
-                                 "--require-release"], env=env, capture_output=True, text=True)
+                                 "--require-release"], env=env, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(b"UnicodeEncodeError", result.stderr)
+        self.assertIn("拒绝发布构建", result.stderr.decode("utf-8"))
         self.assertEqual(target.exists(), existed, "失败时不能留下构建信息")
+
+    def test_matching_tag_passes_on_cp1252_console(self):
+        target = ROOT / "gtnhmod" / "_build_info.py"
+        existed = target.exists()
+        env = dict(os.environ, GITHUB_REF_TYPE="tag", GITHUB_REF_NAME=f"v{gtnhmod.__version__}",
+                   PYTHONIOENCODING="cp1252")
+        try:
+            result = subprocess.run([sys.executable, str(ROOT / "scripts" / "write_build_info.py")],
+                                    env=env, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        finally:
+            if not existed:
+                target.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

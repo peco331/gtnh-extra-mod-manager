@@ -26,6 +26,9 @@ def git(*args):
 
 
 def main():
+    # CI 的 Windows 控制台是 cp1252，中文提示会直接抛 UnicodeEncodeError
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors="replace")
     if "--clean" in sys.argv:
         TARGET.unlink(missing_ok=True)
         return
