@@ -317,9 +317,24 @@ def _sequential_coverage(cand_tokens: list, file_tokens: list, allow_prefix: boo
         ct = cand_tokens[i]
         if ft == ct:
             i += 1
-        elif allow_prefix and len(ct) >= 5 and (ft.startswith(ct) or ct.startswith(ft)):
+        # 只允许文件名的词更长（complementary → complementaryunbound）；
+        # 反过来文件名缺词（ModernityAdjunct 条目 ← Modernity-f1 文件）是另一个包。
+        elif allow_prefix and len(ct) >= 5 and ft.startswith(ct):
             i += 1
     return i
+
+
+def _is_token_span(cand_norm: str, file_tokens: list) -> bool:
+    """条目名是否恰好等于文件名中连续几个完整词的拼接。"""
+    for start in range(len(file_tokens)):
+        joined = ""
+        for token in file_tokens[start:]:
+            joined += token
+            if joined == cand_norm:
+                return True
+            if len(joined) >= len(cand_norm):
+                break
+    return False
 
 
 def _ordered_coverage(cand_tokens: list, file_tokens: list,
@@ -422,7 +437,8 @@ def match_score(cand_tokens: list, file_tokens: list,
                 and bare_stem is not None and not _single_token_ok(cand_norm, bare_stem):
             return False, 0.0, False
         return True, 120.0 + 5.0 * covered + len(cand_norm), exact
-    if cand_norm and len(cand_norm) >= 6 and cand_norm in file_norm:
+    # 整体出现必须与完整词对齐：Modernity-GTNH 不能吞掉 Modernity-GTNHAddon-…
+    if cand_norm and len(cand_norm) >= 6 and _is_token_span(cand_norm, file_tokens):
         return True, 95.0 + len(cand_norm), True
     identity = [t for t in cand_tokens if re.search('[a-z]', t)
                 and not re.fullmatch(r'[vbr]\d+[a-z]*', t)]

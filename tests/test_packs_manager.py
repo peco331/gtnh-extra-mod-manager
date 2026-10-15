@@ -320,6 +320,23 @@ class TestMatchPackOnRealNames(unittest.TestCase):
         got = self._match("GTNH-OutlinedOres.2.1.-.Modernity.version.zip", self.ENTRIES)
         self.assertEqual(got[0], "pack-outlined-ores")
 
+    def test_unrelated_gtnh_addons_are_not_copies_of_modernity_gtnh(self):
+        """GTNHAddon 系列是独立的附加包，不能被记成 Modernity-GTNH 的重复副本。"""
+        for name in ("Modernity-GTNHAddon-GTNHColorComponent.zip",
+                     "Modernity-GTNHAddon-Just-Productive-Bees.zip",
+                     "Modernity-GTNHAddon-Medium-Large-Turbine.zip"):
+            with self.subTest(name=name):
+                self.assertEqual(self._match(name, self.ENTRIES), (None, "none"))
+
+    def test_entry_with_extra_word_does_not_claim_shorter_file(self):
+        """ModernityAdjunct f1 条目不能认领 Modernity-f1 文件；后者属于 Modernity f1。"""
+        entries = [("custom-modernity-f1", "Modernity f1"),
+                   ("custom-modernityadjunct-f1", "ModernityAdjunct f1")]
+        self.assertEqual(self._match("Modernity-f1-3.10.3.1.zip", entries)[0], "custom-modernity-f1")
+        self.assertEqual(self._match("ModernityAdjunct-f1-1.7.1.zip", entries)[0],
+                         "custom-modernityadjunct-f1")
+        self.assertEqual(self._match("Modernity-f1-3.10.3.1.zip", entries[1:]), (None, "none"))
+
     def test_addon_outlined_ores_goes_to_modern_variant(self):
         got = self._match("Modernity-GTNHAddon-OutlinedOres.zip", self.ENTRIES)
         self.assertEqual(got[0], "pack-modern-outlined-ores")
