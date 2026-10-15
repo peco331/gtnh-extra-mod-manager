@@ -2715,7 +2715,11 @@ class GuiApp(PacksGuiMixin):
         """右键：只检查这一个mod的更新。"""
         if self.busy:
             return
-        self._checked_updates = None
+        # 只让这个 MOD 的旧检查结果失效，其余条目仍可「全部更新」
+        snapshot = self._checked_updates
+        if snapshot:
+            self._checked_updates = {**snapshot, "plan": [
+                p for p in snapshot["plan"] if p["mod_id"] != m["mod_id"]]}
         self._set_busy(True)
         self._log(f"检查更新: {m['name_en']}...")
         self._run_async(

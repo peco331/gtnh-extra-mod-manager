@@ -136,6 +136,19 @@ class TestCheckedUpdates(unittest.TestCase):
         plan = app._show_update_plan_dialog.call_args.args[0]
         self.assertEqual([p["mod_id"] for p in plan], [other])
 
+    def test_single_mod_recheck_keeps_other_results(self):
+        other = self.add_second_update()
+        with patch.object(updater, "list_install_options", side_effect=self.lookup):
+            snapshot = updater.check_update_plan(self.cfg, self.db, self.inst)
+        app = self.app(snapshot)
+        app._on_check_done = Mock()
+        with patch.object(updater, "check_updates", return_value=[]):
+            app._check_single({"mod_id": self.mid, "name_en": "PlanMod"})
+        app.busy = False
+        app.update_all()
+        plan = app._show_update_plan_dialog.call_args.args[0]
+        self.assertEqual([p["mod_id"] for p in plan], [other])
+
     def test_changed_item_is_skipped_but_others_still_update(self):
         other = self.add_second_update()
         with patch.object(updater, "list_install_options", side_effect=self.lookup):
