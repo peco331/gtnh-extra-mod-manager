@@ -120,11 +120,11 @@ def _unique_backup_path(backup_dir: Path, file_name: str) -> Path:
     return bak
 
 
-def _backup_mtime(p: Path) -> float:
+def _backup_mtime(p: Path) -> int:
     try:
-        return p.stat().st_mtime
+        return p.stat().st_mtime_ns  # 纳秒精度，配合 utils.mark_newest 保证创建顺序
     except OSError:
-        return 0.0
+        return 0
 
 
 def backup_files(backup_dir: Path) -> list:
@@ -302,7 +302,7 @@ def update_with_backup(cand, dest_dir: Path, backup_dir: Path, *,
         for v in victims:
             bak = _unique_backup_path(backup_dir, v.name)
             shutil.copy2(v, bak)
-            os.utime(bak, None)
+            utils.mark_newest(bak)
         try:
             atomic_replace(tmp, target)
         except PermissionError:

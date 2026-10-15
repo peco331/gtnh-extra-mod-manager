@@ -1282,7 +1282,7 @@ def backup_existing(cfg, kind: str, pack_id: str, source: Path, *, prune=True) -
     else:
         shutil.copy2(source, target)
     # copy2 保留源文件的旧 mtime；轮换应按备份创建时间，而非包的发布时间。
-    os.utime(target, None)
+    utils.mark_newest(target)
     if prune:
         _prune_backups(dest, cfg.backup_keep)
     return target
@@ -1292,7 +1292,7 @@ def _prune_backups(folder: Path, keep: int) -> None:
     """只保留最近 keep 份（按 mtime），避免备份无限增长。"""
     try:
         keep = max(1, int(keep))
-        items = sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+        items = sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime_ns, reverse=True)
     except (OSError, ValueError):
         return
     for old in items[keep:]:

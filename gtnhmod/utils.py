@@ -119,6 +119,22 @@ def timestamp_str() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
+def mark_newest(path: Path) -> None:
+    """把刚写入的备份标为所在目录中最新的一份。
+
+    备份按修改时间轮换；快速磁盘上同一时钟刻度内写入的几份备份时间相同，
+    轮换时可能误删最新那份。这里保证新备份的时间严格晚于同目录其他条目。"""
+    os.utime(path, None)
+    try:
+        newest = max((p.stat().st_mtime_ns for p in path.parent.iterdir() if p != path), default=0)
+        current = path.stat().st_mtime_ns
+        if current <= newest:
+            stamp = newest + 1_000_000  # 1 毫秒，足以越过文件系统的时间精度
+            os.utime(path, ns=(stamp, stamp))
+    except OSError:
+        pass
+
+
 def fmt_ts(ts: float) -> str:
     """Unix 时间戳 → "YYYY-MM-DD HH:MM"（列表显示/排序用，ISO 字符串可直接按时间排序）。
 

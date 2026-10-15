@@ -37,10 +37,13 @@ def main():
     commit = git("rev-parse", "--short", "HEAD")
     # 只看已跟踪文件的改动：构建产物和本地数据不算“未提交修改”
     dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
-    tags = git("tag", "--points-at", "HEAD").split()
-    # GitHub Actions 的标签构建是浅克隆，直接以触发它的标签为准
-    if os.environ.get("GITHUB_REF_TYPE") == "tag":
-        tags.append(os.environ.get("GITHUB_REF_NAME", ""))
+    # GitHub Actions 中以触发构建的那个标签为准（浅克隆里的本地标签不可靠）；
+    # 本地构建则看当前提交上的标签。
+    if os.environ.get("GITHUB_ACTIONS") or os.environ.get("GITHUB_REF_TYPE"):
+        ref_type = os.environ.get("GITHUB_REF_TYPE")
+        tags = [os.environ.get("GITHUB_REF_NAME", "")] if ref_type == "tag" else []
+    else:
+        tags = git("tag", "--points-at", "HEAD").split()
     release = f"v{version}" in tags and not dirty
     if "--require-release" in sys.argv and not release:
         sys.exit(f"标签 {tags or '（无）'} 与 __version__ {version} 不一致，或工作区有未提交修改，拒绝发布构建")
