@@ -120,8 +120,12 @@ def timestamp_str() -> str:
 
 
 def fmt_ts(ts: float) -> str:
-    """Unix 时间戳 → "YYYY-MM-DD HH:MM"（列表显示/排序用，ISO 字符串可直接按时间排序）。"""
+    """Unix 时间戳 → "YYYY-MM-DD HH:MM"（列表显示/排序用，ISO 字符串可直接按时间排序）。
+
+    1981 年以前的时间来自 zip 打包占位（DOS 纪元 1980-01-01），不是真实更新时间，返回空串。"""
     try:
+        if ts < 347155200:  # 1981-01-01 UTC
+            return ""
         return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
     except (OSError, ValueError):
         return ""

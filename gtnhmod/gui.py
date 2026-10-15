@@ -3396,7 +3396,6 @@ class GuiApp(PacksGuiMixin):
         self._clear_new_mark(e)  # 查看过详情后不再高亮"新增"
         nav_ids = ([e['id'] for e in self.db.wiki_mods()] if entry is not None else
                    list(self.add_tree.get_children("")))
-        marks = self._installed_marks()
         top = self._dialog(f"{e['name_en']} {e['name_cn']}", "680x520")
         frame = ttk.Frame(top)
         frame.pack(fill="both", expand=True, padx=8, pady=8)
@@ -3903,11 +3902,7 @@ class GuiApp(PacksGuiMixin):
         return updater.unmatched_files(self.cfg, self.db)
 
     def _fmt_time(self, ts):
-        from datetime import datetime
-        try:
-            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-        except (OSError, ValueError):
-            return "?"
+        return utils.fmt_ts(ts) or "—"
 
     def refresh_unmanaged(self):
         if not hasattr(self, "um_tree"):
