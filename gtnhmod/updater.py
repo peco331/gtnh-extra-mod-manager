@@ -17,7 +17,6 @@ from .versions import (VersionParseError, compare, order_key, parse_version,
                        split_mc_mod_version)
 
 IGNORED_HINT = "（已忽略）"
-UPDATE_CHECK_TTL = 300
 
 
 def _update_target_context(cfg, db, installed, side, mod_id, names):
@@ -68,11 +67,12 @@ def check_update_plan(cfg, db, installed, *, progress_cb=None):
 
 
 def validate_checked_updates(cfg, db, installed, snapshot, plan):
-    """返回失效原因；失效只提示重新检查，绝不隐式发起新查询。"""
+    """返回失效原因；失效只提示重新检查，绝不隐式发起新查询。
+
+    结果不按时间过期：只要相关文件、目录、锁定和下载源与检查时一致，
+    检查得到的资产就仍可执行；下载内容在落盘前另有校验。"""
     if not snapshot:
         return "尚未检查更新，请先点击“检查更新”。"
-    if time.monotonic() - snapshot["checked_at"] >= UPDATE_CHECK_TTL:
-        return "检查结果已超过 5 分钟，请重新点击“检查更新”。"
     for item in plan:
         for side in item["sides"]:
             old = snapshot["context"].get((side, item["mod_id"]))
@@ -84,6 +84,15 @@ def validate_checked_updates(cfg, db, installed, snapshot, plan):
             if current != old or current is None or current["locked"] or current["ignored"]:
                 return f'{item["name"]} 的文件、锁定或下载源设置已变化，请重新点击“检查更新”。'
     return None
+
+
+def split_checked_updates(cfg, db, installed, snapshot, plan):
+    """把计划分成仍有效与检查后已变化两组；变化的条目需重新检查，不影响其余条目。"""
+    valid, changed = [], []
+    for item in plan:
+        bad = validate_checked_updates(cfg, db, installed, snapshot, [item])
+        (changed if bad else valid).append(item)
+    return valid, changed
 
 
 def _log_op(cfg, msg: str) -> None:

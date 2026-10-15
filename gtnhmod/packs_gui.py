@@ -474,7 +474,7 @@ class PacksGuiMixin:
                           f'响应={res.response_bytes} 字节；内容指纹={res.text_hash[:12]}')
                 entries, warnings, changes = packmod.apply_wiki_result(self.packs, res)
                 self._pack_auto_sync = True
-                self._invalidate_pack_checks()
+                # 不整体作废检查结果：下载源有变化的条目会在执行更新时逐项识别并要求重新检查
                 for warning in warnings:
                     self._log(f'[警告] {warning}')
                 self._log(f'资源包与光影在线同步完成：{len(entries)} 个条目，{len(changes)} 处变化')
@@ -487,6 +487,17 @@ class PacksGuiMixin:
                 self._set_busy(False)
                 self.refresh_packs()
         self._run_async(work, done)
+
+    def _drop_pack_checks(self, keys):
+        """从本次检查结果中移除指定 (kind, id)，其余结果保留。"""
+        snapshot = self._pack_checked_updates
+        if snapshot:
+            self._pack_checked_updates = {**snapshot, 'plan': [
+                p for p in snapshot['plan'] if (p.kind, p.pack_id) not in keys]}
+        for key in keys:
+            self._pack_updates.pop(key, None)
+            self._pack_check_status.pop(key, None)
+        self._sync_pack_update_buttons()
 
     def _invalidate_pack_checks(self):
         self._pack_checked_updates = None
@@ -539,13 +550,23 @@ class PacksGuiMixin:
         if self.busy:
             return
         snapshot = self._pack_checked_updates
-        plans = deepcopy([p for p in snapshot['plan'] if p.action == 'update'
-                          and (selected is None or p.pack_id in selected)]) if snapshot else []
-        reason = packmod.validate_checked_updates(self.cfg, self.packs, snapshot, plans)
-        if reason:
-            self._invalidate_pack_checks()
-            messagebox.showinfo('需要重新检查', reason)
+        if not snapshot:
+            messagebox.showinfo('请先检查更新', '尚未检查更新，请先点击“检查更新”。')
             return
+        plans = deepcopy([p for p in snapshot['plan'] if p.action == 'update'
+                          and (selected is None or p.pack_id in selected)])
+        plans, changed = packmod.split_checked_updates(self.cfg, self.packs, snapshot, plans)
+        if changed:
+            # 只移除检查后发生变化的条目，其余检查结果照常可用
+            self._drop_pack_checks({(p.kind, p.pack_id) for p in changed})
+            snapshot = self._pack_checked_updates
+            names = '、'.join(p.name for p in changed)
+            self._log(f'检查后文件、锁定或下载源已变化，已移出本次更新：{names}（需重新检查）')
+            if not plans:
+                messagebox.showinfo('需要重新检查', f'{names} 在检查后发生了变化，请重新检查更新。')
+                return
+            messagebox.showinfo('部分项目需重新检查',
+                                f'{names} 在检查后发生了变化，已跳过；其余项目继续使用本次检查结果。')
         if not plans:
             messagebox.showinfo('没有可更新项目', '本次检查没有符合条件的选中项目，请查看检查结果。')
             return
@@ -557,7 +578,8 @@ class PacksGuiMixin:
             self._invalidate_pack_checks()
             messagebox.showinfo('需要重新检查', reason)
             return
-        self._invalidate_pack_checks()
+        # 只消费本次执行的条目，其余检查结果保留给后续「全部更新」
+        self._drop_pack_checks({(p.kind, p.pack_id) for p in plans})
         self._run_pack_installs(plans, {}, snapshot=snapshot)
 
     def _change_pack_enabled(self, enabled):
@@ -581,7 +603,8 @@ class PacksGuiMixin:
                 action(entry)
             except Exception as exc:
                 errors.append(f"{entry.get('name_en')}：{exc}")
-        self._invalidate_pack_checks()
+        # 只作废被操作条目的检查结果，其余条目仍可「全部更新」
+        self._drop_pack_checks({(e['kind'], e['id']) for e in entries})
         self.refresh_packs()
         if errors:
             messagebox.showwarning('部分操作未完成', '\n'.join(errors))

@@ -148,10 +148,10 @@ class TestPackManagement(unittest.TestCase):
         with mock.patch.object(packs, 'list_assets', side_effect=AssertionError('must not query again')):
             self.assertIsNone(packs.validate_checked_updates(self.cfg, self.db, snapshot, snapshot['plan']))
 
-    def test_checked_plan_expires_and_rejects_changed_file_source_lock_or_directory(self):
+    def test_checked_plan_does_not_expire_but_rejects_changed_file_source_lock_or_directory(self):
         snapshot = self.snapshot()
-        snapshot['checked_at'] -= 301
-        self.assertIn('5 分钟', packs.validate_checked_updates(self.cfg, self.db, snapshot, snapshot['plan']))
+        snapshot['checked_at'] -= 6 * 3600  # 时间流逝本身不让结果失效
+        self.assertIsNone(packs.validate_checked_updates(self.cfg, self.db, snapshot, snapshot['plan']))
         mutations = [lambda: self.db.set_installed('resourcepack', 'pack-demo', {'locked': True}),
                      lambda: self.entry.update(bound_source='https://github.com/new/source'),
                      lambda: self.file.write_bytes(b'changed'),

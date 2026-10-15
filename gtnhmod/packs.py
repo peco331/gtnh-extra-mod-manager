@@ -1748,9 +1748,6 @@ def restore_installed_backup(cfg, db, record):
     return dest
 
 
-UPDATE_CHECK_TTL = 300
-
-
 def _checked_context(cfg, db, kind, pack_id):
     entry, rec = db.get(pack_id), db.installed(kind).get(pack_id) or {}
     paths = _entry_paths(cfg, db, kind, pack_id)
@@ -1785,10 +1782,9 @@ def check_update_plan(cfg, db, *, progress_cb=None):
 
 
 def validate_checked_updates(cfg, db, snapshot, plans):
+    """不按时间过期；本地文件、目录、锁定或下载源与检查时不一致才要求重新检查。"""
     if not snapshot:
         return '尚未检查更新，请先点击“检查更新”。'
-    if time.monotonic() - snapshot['checked_at'] >= UPDATE_CHECK_TTL:
-        return '检查结果已超过 5 分钟，请重新检查更新。'
     for plan in plans:
         old = snapshot['context'].get((plan.kind, plan.pack_id))
         try:
@@ -1798,6 +1794,14 @@ def validate_checked_updates(cfg, db, snapshot, plans):
         if current != old or not current or current['locked'] or not current['enabled']:
             return f'{plan.name} 的文件、目录、锁定或下载源已变化，请重新检查更新。'
     return None
+
+
+def split_checked_updates(cfg, db, snapshot, plans):
+    """仍有效的计划与检查后已变化的计划；变化的需重新检查，不影响其余条目。"""
+    valid, changed = [], []
+    for plan in plans:
+        (changed if validate_checked_updates(cfg, db, snapshot, [plan]) else valid).append(plan)
+    return valid, changed
 
 
 def folder_hint(cfg, kind: str) -> str:

@@ -83,7 +83,7 @@ class TestCheckedUpdates(unittest.TestCase):
         self.assertTrue((self.cfg.mods_dir("client") / "PlanMod-2.0.jar").exists())
         self.assertFalse((self.cfg.mods_dir("client") / "PlanMod-1.0.jar").exists())
         self.assertEqual(app._on_update_done.call_args.args[0][0]["action"], "updated")
-        self.assertIsNone(app._checked_updates)
+        self.assertFalse([p for p in app._checked_updates["plan"] if p["action"] == "update"])
 
     def test_no_check_does_not_start_work(self):
         app = self.app(None)
@@ -94,16 +94,60 @@ class TestCheckedUpdates(unittest.TestCase):
         query.assert_not_called()
         app._show_update_plan_dialog.assert_not_called()
 
-    def test_expiry_does_not_implicitly_recheck(self):
+    def test_result_does_not_expire_with_time(self):
         snapshot = self.check()
-        snapshot["checked_at"] -= updater.UPDATE_CHECK_TTL
+        snapshot["checked_at"] -= 6 * 3600  # 检查后过了几个小时，本地状态未变
         app = self.app(snapshot)
         with patch.object(gui.messagebox, "showinfo") as info, \
                 patch.object(updater, "check_update_plan") as query:
             app.update_all()
         query.assert_not_called()
-        self.assertIn("5 分钟", info.call_args.args[1])
-        self.assertIsNone(app._checked_updates)
+        info.assert_not_called()
+        app._show_update_plan_dialog.assert_called_once()
+
+    def add_second_update(self):
+        other = self.db.add_custom({"name_en": "OtherMod", "side": "client",
+            "source_type": "github", "source": {"owner": "example", "repo": "OtherMod"}})
+        self.jar(self.cfg.mods_dir("client") / "OtherMod-1.0.jar")
+        self.other_asset = self.root / "OtherMod-2.0.jar"
+        self.jar(self.other_asset)
+        original = self.lookup
+
+        def lookup(entry, *args, **kwargs):
+            if entry["id"] != other:
+                return original(entry, *args, **kwargs)
+            return [{"version": "2.0", "tag": "v2.0", "target_status": "eligible", "body": "",
+                     "published_at": "2026-10-15", "prerelease": False,
+                     "candidates": [DownloadCandidate(str(self.other_asset), "OtherMod-2.0.jar")]}], None
+        self.lookup = lookup
+        return other
+
+    def test_updating_selected_keeps_the_rest_for_update_all(self):
+        other = self.add_second_update()
+        with patch.object(updater, "list_install_options", side_effect=self.lookup):
+            snapshot = updater.check_update_plan(self.cfg, self.db, self.inst)
+        app = self.app(snapshot)
+        first = [p for p in snapshot["plan"] if p["action"] == "update" and p["mod_id"] == self.mid]
+        with patch.object(updater, "list_install_options", side_effect=AssertionError("unexpected query")):
+            app._execute_update_plan(first, snapshot=snapshot)
+        self.assertNotIn(self.mid, {p["mod_id"] for p in app._checked_updates["plan"]})
+        app.busy = False  # 上一批更新完成
+        app.update_all()
+        plan = app._show_update_plan_dialog.call_args.args[0]
+        self.assertEqual([p["mod_id"] for p in plan], [other])
+
+    def test_changed_item_is_skipped_but_others_still_update(self):
+        other = self.add_second_update()
+        with patch.object(updater, "list_install_options", side_effect=self.lookup):
+            snapshot = updater.check_update_plan(self.cfg, self.db, self.inst)
+        self.inst.set("client", self.mid, locked=True)  # 检查后锁定其中一个
+        app = self.app(snapshot)
+        with patch.object(gui.messagebox, "showinfo") as info:
+            app.update_all()
+        self.assertIn("PlanMod", info.call_args.args[1])
+        plan = app._show_update_plan_dialog.call_args.args[0]
+        self.assertEqual([p["mod_id"] for p in plan], [other])
+        self.assertNotIn(self.mid, {p["mod_id"] for p in app._checked_updates["plan"]})
 
     def test_changed_file_source_lock_and_directory_require_recheck(self):
         for change in ("file", "source", "lock", "directory", "disable"):

@@ -612,7 +612,8 @@ class TestPacksTabSmoke(unittest.TestCase):
         self.assertEqual([p.pack_id for p in plans], ['pack-demo'])
         self.assertEqual(plans[0].asset.url, snapshot['plan'][0].asset.url)
         self.assertIs(execute.call_args.kwargs['snapshot'], snapshot)
-        self.assertIsNone(self.app._pack_checked_updates)
+        # 已执行的条目从检查结果中移除，其余结果（这里没有）保留
+        self.assertEqual(self.app._pack_checked_updates['plan'], [])
 
     def test_update_rechecks_local_state_after_confirmation(self):
         self._checked_snapshot()

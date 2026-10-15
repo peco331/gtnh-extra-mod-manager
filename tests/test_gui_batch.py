@@ -14,18 +14,18 @@ def _sync_run_async(fn, on_done=None):
 
 
 class TestGuiBatch(unittest.TestCase):
-  def test_expired_update_plan_requires_explicit_check_without_querying(self):
+  def test_plan_without_check_result_requires_explicit_check_without_querying(self):
     plan = [{"mod_id": "one", "name": "One", "sides": ["client"],
              "action": "update", "target_version": "2.0", "prefetched": ([], None)}]
     app = SimpleNamespace(
         cfg=object(), db=object(), installed=object(),
         _set_busy=lambda value: None, _log=lambda message: None,
+        _sync_update_button=lambda: None,
         _run_async=_sync_run_async, _show_update_plan_dialog=mock.Mock(),
         _execute_update_plan=gui.GuiApp._execute_update_plan,
     )
     fresh_plan = [{**plan[0], "target_version": "3.0"}]
-    with mock.patch.object(gui.time, "monotonic", return_value=1000), \
-            mock.patch.object(gui.updater, "build_registry", return_value={}), \
+    with mock.patch.object(gui.updater, "build_registry", return_value={}), \
             mock.patch.object(gui.updater, "build_update_plan", return_value=fresh_plan) as query, \
             mock.patch.object(gui.messagebox, "showinfo") as info, \
             mock.patch.object(gui.updater, "update_mod") as update:
@@ -112,8 +112,10 @@ class TestGuiBatch(unittest.TestCase):
         _on_update_done=lambda rs: (captured.extend(rs), setattr(app, "busy", False)),
     )
 
-    with mock.patch.object(gui.updater, "update_mod", return_value={"action": "updated", "from": "1.0", "to": "2.0"}):
-        gui.GuiApp._execute_update_plan(app, plan)
+    snapshot = {"plan": plan, "checked_at": 0, "context": {}}
+    with mock.patch.object(gui.updater, "update_mod", return_value={"action": "updated", "from": "1.0", "to": "2.0"}), \
+            mock.patch.object(gui.updater, "validate_checked_updates", return_value=None):
+        gui.GuiApp._execute_update_plan(app, plan, snapshot=snapshot)
 
     self.assertEqual([(r["name"], r["action"]) for r in captured], [
         ("Update", "updated"), ("Manual", "manual"),

@@ -2341,12 +2341,20 @@ class GuiApp(PacksGuiMixin):
             return
         plan = deepcopy([p for p in snapshot["plan"] if p["action"] == "update"
                          and (target_ids is None or p["mod_id"] in target_ids)])
-        reason = updater.validate_checked_updates(self.cfg, self.db, self.installed, snapshot, plan)
-        if reason:
-            self._checked_updates = None
+        plan, changed = updater.split_checked_updates(self.cfg, self.db, self.installed, snapshot, plan)
+        if changed:
+            # 只移除检查后发生变化的条目，其余检查结果照常可用
+            stale = {p["mod_id"] for p in changed}
+            self._checked_updates = {**snapshot, "plan": [p for p in snapshot["plan"]
+                                                          if p["mod_id"] not in stale]}
             self._sync_update_button()
-            messagebox.showinfo("需要重新检查", reason)
-            return
+            names = "、".join(dict.fromkeys(p["name"] for p in changed))
+            self._log(f"检查后文件、锁定或下载源已变化，已移出本次更新：{names}（需重新检查）")
+            if not plan:
+                messagebox.showinfo("需要重新检查", f"{names} 在检查后发生了变化，请重新点击“检查更新”。")
+                return
+            messagebox.showinfo("部分项目需重新检查",
+                                f"{names} 在检查后发生了变化，已跳过；其余项目继续使用本次检查结果。")
         if not plan:
             messagebox.showinfo("没有可自动更新的项目", "本次检查没有符合条件的更新项目，请查看列表和检查日志。")
             return
@@ -2356,16 +2364,17 @@ class GuiApp(PacksGuiMixin):
 
     def _execute_update_plan(self, plan: list, *, checked_at=None, snapshot=None):
         """一次确认后执行计划中的所有更新项，消除二次联网与多余弹窗。"""
-        reason = (updater.validate_checked_updates(self.cfg, self.db, self.installed, snapshot, plan)
-                  if snapshot is not None else
-                  ("更新计划已超过 5 分钟，请重新点击“检查更新”。"
-                   if checked_at is not None and time.monotonic() - checked_at >= 300 else None))
+        reason = updater.validate_checked_updates(self.cfg, self.db, self.installed, snapshot, plan)
         if reason:
             self._checked_updates = None
             self._set_busy(False)
+            self._sync_update_button()
             messagebox.showinfo("需要重新检查", reason)
             return
-        self._checked_updates = None
+        # 只消费本次执行的条目；其余检查结果仍可用于「全部更新」/「更新选中」
+        done_ids = {p["mod_id"] for p in plan}
+        self._checked_updates = {**snapshot, "plan": [p for p in snapshot["plan"]
+                                                      if p["mod_id"] not in done_ids]}
         updatable = [p for p in plan if p["action"] == "update"]
         self._set_busy(True)
         self._log(f"开始执行更新计划（共 {len(updatable)} 项端别计划）...")
