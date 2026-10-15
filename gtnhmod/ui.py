@@ -25,6 +25,9 @@ class UIProtocol:
     def input_text(self, prompt: str, default: str = "") -> str:
         raise NotImplementedError
 
+    def input_secret(self, prompt: str) -> str:
+        return self.input_text(prompt)
+
 
 class ConsoleUI(UIProtocol):
     """控制台交互（ANSI 色，非 tty 时自动关闭）。"""
@@ -89,3 +92,10 @@ class ConsoleUI(UIProtocol):
         except (EOFError, KeyboardInterrupt):
             return default
         return s or default
+
+    def input_secret(self, prompt):
+        import getpass
+        try:
+            return getpass.getpass(prompt + ': ').strip()
+        except (EOFError, KeyboardInterrupt):
+            return ''

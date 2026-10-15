@@ -132,6 +132,13 @@ class TestGitHubSource(unittest.TestCase):
         self.assertEqual(extract_version("1.7.10-0.8.0"), "0.8.0")
         self.assertEqual(extract_version("0.8.0"), "0.8.0")
 
+    def test_mod_prerelease_is_not_a_minecraft_prefix(self):
+        for tag in ("1.0.63-rc1", "1.0.49-rc1", "1.0.25-rc1",
+                    "1.2.3-beta2", "1.12.0-alpha1", "1.0.63-2"):
+            with self.subTest(tag=tag):
+                self.assertEqual(extract_version(tag), tag)
+        self.assertEqual(extract_version("MC1.7.10-0.8.0-rc1"), "0.8.0-rc1")
+
     def test_junk_patch_tag_rejected(self):
         # 真实案例：仓库杂项 tag "p3" 不是可比较的版本（会被补丁规则解析成"版本3"
         # 排到 v1.7.49 前面），必须返回 None 让列表跳过

@@ -1239,11 +1239,11 @@ class TestSetDownloadSource(unittest.TestCase):
                                         "https://modrinth.com/shader/complementary-unbound")
         self.assertEqual(res["kind"], "modrinth")
 
-    def test_org_only_github_url_maps_to_same_name_repo(self):
-        """github.com/<name> 视为 owner 与仓库同名（GitHub 的跳转规则）。"""
-        res = packs.set_download_source(self.db, "pack-modernity-gtnh",
-                                        "https://github.com/ModernityGTNH")
-        self.assertEqual(res["repo"], ("ModernityGTNH", "ModernityGTNH"))
+    def test_org_only_github_url_requires_repository(self):
+        """组织页不提供仓库名称，不能凭空猜测同名仓库。"""
+        with self.assertRaisesRegex(packs.PacksError, '仓库'):
+            packs.set_download_source(self.db, "pack-modernity-gtnh",
+                                      "https://github.com/ModernityGTNH")
 
     def test_invalid_inputs_rejected(self):
         for bad in ("not a url", "ftp://example.com/x", "https://github.com"):

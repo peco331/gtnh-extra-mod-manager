@@ -109,8 +109,84 @@ class TestSettingsSave(unittest.TestCase):
 
         self.assertEqual(self.cfg.pack_folders, {"resourcepack": "", "shader": ""})
 
+    def test_save_failure_does_not_apply_unsaved_settings(self):
+        app = self._app()
+        with mock.patch.object(self.cfg, 'save', side_effect=OSError('disk full')), \
+                mock.patch.object(gui.messagebox, 'showerror') as error:
+            app.save_settings()
+        self.assertEqual(self.cfg.github_token, '')
+        app.refresh_all.assert_not_called()
+        error.assert_called_once()
+
+    def test_busy_save_does_not_change_active_configuration(self):
+        app = self._app()
+        app.busy = True
+        with mock.patch.object(gui.messagebox, 'showinfo'):
+            app.save_settings()
+        self.assertEqual(self.cfg.github_token, '')
+
+    def test_save_and_test_persists_only_network_fields_before_testing(self):
+        app = self._app(interval='invalid', mode='direct')
+        app.busy = False
+        app.test_network_settings = mock.Mock()
+        app.save_and_test_network_settings()
+        self.assertEqual(Config(self.cfg.data_dir).github_token, 'new-token')
+        self.assertEqual(self.cfg.proxy, {'host': '', 'port': 0})
+        self.assertIsNone(self.cfg.client_mods_dir)  # 无关目录输入不顺带保存
+        self.assertEqual(self.cfg.check_interval_hours, 6)
+        app.test_network_settings.assert_called_once()
+
+    def test_network_save_failure_does_not_start_test_or_apply_token(self):
+        app = self._app()
+        app.busy = False
+        app.test_network_settings = mock.Mock()
+        with mock.patch.object(self.cfg, 'save', side_effect=OSError('disk full')), \
+                mock.patch.object(gui.messagebox, 'showerror'):
+            app.save_and_test_network_settings()
+        self.assertEqual(self.cfg.github_token, '')
+        app.test_network_settings.assert_not_called()
+
+    def test_nan_and_zero_backup_count_rejected(self):
+        for interval, keep in (('nan', '3'), ('inf', '3'), ('6', '0')):
+            with self.subTest(interval=interval, keep=keep), \
+                    mock.patch.object(gui.messagebox, 'showerror'):
+                self._app(interval=interval, backup=keep).save_settings()
+            self.assertFalse(self.cfg.path.exists())
+
 
 class TestNetworkSettingsGui(unittest.TestCase):
+    def _test_result(self, *, saved='', entered='new-token', remaining=4999):
+        app = object.__new__(gui.GuiApp)
+        app.cfg = mock.Mock(github_token=saved, proxy=None)
+        app.token_entry = _Entry(entered)
+        app.proxy_mode = _Mode('system')
+        app.proxy_entry = _Entry('')
+        app.busy = False
+        app._set_busy = mock.Mock()
+        app._log = mock.Mock()
+        app._run_async = lambda job, on_done: on_done(job())
+        payload = {'resources': {'core': {'remaining': remaining, 'limit': 5000}}}
+        with mock.patch.object(net, 'http_get', return_value=json.dumps(payload)), \
+                mock.patch.object(gui.messagebox, 'showinfo') as info, \
+                mock.patch.object(gui.messagebox, 'showwarning') as warning:
+            app.test_network_settings()
+        return info, warning
+
+    def test_unsaved_token_test_explicitly_requires_save(self):
+        info, warning = self._test_result()
+        self.assertIn('尚未保存', info.call_args.args[1])
+        warning.assert_not_called()
+
+    def test_saved_token_test_reports_saved_state(self):
+        info, _warning = self._test_result(saved='new-token')
+        self.assertIn('已保存', info.call_args.args[1])
+        self.assertNotIn('尚未保存', info.call_args.args[1])
+
+    def test_exhausted_rate_limit_is_warning(self):
+        info, warning = self._test_result(remaining=0)
+        warning.assert_called_once()
+        self.assertIn('耗尽', warning.call_args.args[0])
+        info.assert_not_called()
     def test_network_test_parses_http_get_text_response(self):
         app = object.__new__(gui.GuiApp)
         app.token_entry = _Entry("")

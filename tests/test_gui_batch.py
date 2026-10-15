@@ -14,7 +14,7 @@ def _sync_run_async(fn, on_done=None):
 
 
 class TestGuiBatch(unittest.TestCase):
-  def test_expired_update_plan_rechecks_before_execution(self):
+  def test_expired_update_plan_requires_explicit_check_without_querying(self):
     plan = [{"mod_id": "one", "name": "One", "sides": ["client"],
              "action": "update", "target_version": "2.0", "prefetched": ([], None)}]
     app = SimpleNamespace(
@@ -26,13 +26,15 @@ class TestGuiBatch(unittest.TestCase):
     fresh_plan = [{**plan[0], "target_version": "3.0"}]
     with mock.patch.object(gui.time, "monotonic", return_value=1000), \
             mock.patch.object(gui.updater, "build_registry", return_value={}), \
-            mock.patch.object(gui.updater, "build_update_plan", return_value=fresh_plan), \
+            mock.patch.object(gui.updater, "build_update_plan", return_value=fresh_plan) as query, \
+            mock.patch.object(gui.messagebox, "showinfo") as info, \
             mock.patch.object(gui.updater, "update_mod") as update:
         gui.GuiApp._execute_update_plan(app, plan, checked_at=0)
 
     update.assert_not_called()
-    app._show_update_plan_dialog.assert_called_once_with(
-        fresh_plan, gui.GuiApp._execute_update_plan)
+    query.assert_not_called()
+    info.assert_called_once()
+    app._show_update_plan_dialog.assert_not_called()
 
   def test_install_addable_forwards_every_selected_entry_to_batch(self):
     """主按钮多选时不能悄悄只安装列表第一项。"""
@@ -65,6 +67,7 @@ class TestGuiBatch(unittest.TestCase):
         _push_progress=lambda *args: None,
         refresh_all=lambda: None,
         _offer_open_download_page=lambda entry: None,
+        _install_summary_dialog=mock.Mock(),
         _run_async=_sync_run_async,
     )
     original_done = gui.GuiApp._on_install_batch_done

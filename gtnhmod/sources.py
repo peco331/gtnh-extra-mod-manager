@@ -52,6 +52,7 @@ class VersionOption:
     prerelease: bool = False         # 默认包含测试发布
     target_status: str = "eligible"
     target_reason: str = ""
+    asset_ambiguous: bool = False
 
 
 def sort_version_options(options: list) -> list:
@@ -123,7 +124,11 @@ def extract_version(tag: str) -> str | None:
         return None
     parts = tag.split("-")
     ver = tag
-    if len(parts) >= 2 and MC_VERSION_RE.match(parts[0]) and parts[1] not in _MC_SET:
+    # 裸 1.x.x 也可能是 MOD 版本（如 WTCT 的 1.0.63-rc1）。
+    # 只有已知 MC 锚点或显式 MC 前缀，且后段是数字版本时才剥离。
+    if (len(parts) >= 2 and MC_VERSION_RE.match(parts[0])
+            and (parts[0] in _MC_SET or parts[0].lower().startswith("mc"))
+            and re.match(r"[vV]?\d", parts[1]) and parts[1] not in _MC_SET):
         ver = "-".join(parts[1:])
     if not re.match(r"[vV]?\d", ver):
         return None
@@ -159,7 +164,7 @@ def pick_assets(assets: list, tag: str, repo: str,
             continue
         if asset_regex and not re.search(asset_regex, name, re.I):
             continue
-        if re.search(r"(?i)(?:^|[-_.])(sources|deobf|javadoc|api|dev)(?:[-_.]|$)", name):
+        if re.search(r"(?i)(?:^|[-_.])(sources|deobf|javadoc|api|dev|predowngrade)(?:[-_.]|$)", name):
             continue
         if classify_target(name, release_tag=tag, target_profile=target_profile,
                            repo_context=repo_context,
@@ -219,6 +224,8 @@ class GitHubSource(Source):
         if (isinstance(data, dict) and data.get("not_found")) or data is None:
             # data=None：not_found 标记缓存（http_get_cached 返回 cache["data"]）
             raise net.HttpError(404, f"{self.owner}/{self.repo} 无 {path}（缓存）")
+        if src == "cache_stale":
+            raise SourceError("GitHub 查询失败，只剩过期缓存，无法确认最新版本；请稍后重试")
         return data, src
 
     def _tag_ok(self, tag: str) -> bool:
@@ -237,7 +244,7 @@ class GitHubSource(Source):
         option = self._release_option(rel)
         if option is None or option.target_status != "eligible":
             raise SourceError("标签对应发布不适用于 GTNH 或游戏平台需确认")
-        return UpdateInfo(option.version, option.candidates, option.body, utils.now_str(),
+        return UpdateInfo(option.version, None if option.asset_ambiguous else option.candidates, option.body, utils.now_str(),
                           option.target_reason, option.published_at)
 
     def _check_via_tags(self, *, force: bool = False) -> UpdateInfo:
@@ -271,7 +278,7 @@ class GitHubSource(Source):
         option = options[0]
         if option.target_status != "eligible":
             raise SourceError(option.target_reason or "游戏平台需确认")
-        return UpdateInfo(option.version, option.candidates, option.body, utils.now_str(),
+        return UpdateInfo(option.version, None if option.asset_ambiguous else option.candidates, option.body, utils.now_str(),
                           "；".join(x for x in (option.target_reason, self._rate_note()) if x),
                           option.published_at)
 
@@ -291,7 +298,7 @@ class GitHubSource(Source):
         assets = rel.get("assets") or []
         jars = [a for a in assets if isinstance(a, dict)
                 and (a.get("name") or "").lower().endswith(".jar")
-                and not re.search(r"(?i)(?:^|[-_.])(sources|deobf|javadoc|api|dev)(?:[-_.]|$)", a["name"])
+                and not re.search(r"(?i)(?:^|[-_.])(sources|deobf|javadoc|api|dev|predowngrade)(?:[-_.]|$)", a["name"])
                 and (not self.exclude_regex or not re.search(self.exclude_regex, a["name"], re.I))
                 and (not self.asset_regex or re.search(self.asset_regex, a["name"], re.I))]
         cands = pick_assets(jars, tag, self.repo, self.asset_regex, self.exclude_regex,
@@ -304,6 +311,13 @@ class GitHubSource(Source):
                                  source_context=self.source_context).status for a in jars]
         if decision.status == "excluded" or (states and all(s == "excluded" for s in states)):
             return None
+        ambiguous = (len(cands) > 1 and not self.asset_regex
+                     and _score_asset(cands[0].file_name, tag, tag.lstrip('vV'), self.repo)
+                     == _score_asset(cands[1].file_name, tag, tag.lstrip('vV'), self.repo))
+        if ambiguous:
+            return VersionOption(ver, tag, rel.get("body"), rel.get("published_at"),
+                                 cands, bool(rel.get("prerelease")), "eligible",
+                                 "同一发布有多个无法区分的 jar，请选择下载资产或手动下载", True)
         status = "eligible" if cands else decision.status
         if not cands and "unknown" in states:
             status = "unknown"

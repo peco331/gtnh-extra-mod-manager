@@ -7,12 +7,83 @@
   source{owner,repo,asset_regex,exclude_regex} 或 {path,name_regex},
   desc, detail(原文), urls{...}, aliases[](用户手动关联的jar前缀), wiki_removed
 """
+from copy import deepcopy
 from pathlib import Path
 
 from . import utils
-from .wiki import make_id
+from .wiki import github_repo_from_url, make_id, strip_markup, _strip_refs
 
 WIKI_GROUPS = ("星门规则", "非星门规则")
+
+
+def _name_key(entry):
+    name = entry.get("name_en") or entry.get("name_cn") or ""
+    return "".join(c for c in strip_markup(_strip_refs(name)).casefold() if c.isalnum())
+
+
+def _source_keys(entry):
+    """只用项目地址证明身份；共用一个仓库的不同名字仍是不同条目。"""
+    source, urls = entry.get("source") or {}, entry.get("urls") or {}
+    keys = set()
+    if entry.get("source_type") == "github" and source.get("owner") and source.get("repo"):
+        keys.add((source["owner"].casefold(), source["repo"].removesuffix(".git").casefold()))
+    for url in (urls.get("github"), urls.get("preferred")):
+        repo = github_repo_from_url(url)
+        if repo:
+            keys.add(tuple(s.casefold() for s in repo))
+    if urls.get("curseforge"):
+        keys.add(("curseforge", urls["curseforge"].rstrip("/").casefold()))
+    return keys
+
+
+def _same_identity(left, right):
+    key = _name_key(left)
+    if not key or key != _name_key(right):
+        return False
+    # 两个独立的用户绑定不能因同名而丢失其中一个。
+    if left.get("source_override") and right.get("source_override"):
+        if (left.get("source_type"), left.get("source")) != (right.get("source_type"), right.get("source")):
+            return False
+    a, b = _source_keys(left), _source_keys(right)
+    if a or b:
+        if not a.intersection(b):
+            return False
+        # 同一项目可同时发布不同 MOD，明确的资产/版本过滤也要尊重。
+        for field in ("asset_regex", "tag_regex"):
+            av, bv = (left.get("source") or {}).get(field), (right.get("source") or {}).get(field)
+            if av and bv and av != bv:
+                return False
+        return True
+    # 无项目地址时只认可链接格式导致的名称变化，不猜测一般重命名。
+    return any("[[" in (e.get("name_en") or "") for e in (left, right))
+
+
+def _retain_user_fields(old, fresh):
+    fresh["aliases"] = list(dict.fromkeys((old.get("aliases") or []) + (fresh.get("aliases") or [])))
+    fresh["legacy_ids"] = list(dict.fromkeys(
+        (old.get("legacy_ids") or []) + (fresh.get("legacy_ids") or [])
+        + ([fresh["id"]] if fresh["id"] != old["id"] else [])))
+    fresh["id"] = old["id"]
+    fresh["legacy_ids"] = [mid for mid in fresh["legacy_ids"] if mid != fresh["id"]]
+    if old.get("source_override"):
+        fresh["source"] = deepcopy(old.get("source") or fresh.get("source") or {})
+        fresh["source_type"] = old.get("source_type") or fresh.get("source_type")
+        fresh["source_override"] = True
+    old_source, new_source = old.get("source") or {}, fresh.get("source") or {}
+    if old.get("source_type") == fresh.get("source_type") == "github":
+        same_source = all(str(old_source.get(k) or "").casefold() ==
+                          str(new_source.get(k) or "").casefold() for k in ("owner", "repo"))
+    else:
+        same_source = (old.get("source_type"), old_source) == (fresh.get("source_type"), new_source)
+    if same_source:
+        for field in ("target_profile", "tag_regex"):
+            if old_source.get(field):
+                new_source[field] = old_source[field]
+        if old.get("release_date"):
+            fresh["release_date"] = max(old["release_date"], fresh.get("release_date") or "")
+    if old.get("name_cn_override"):
+        fresh["name_cn"] = old.get("name_cn") or fresh.get("name_cn")
+        fresh["name_cn_override"] = True
 
 
 class ModsDB:
@@ -20,6 +91,8 @@ class ModsDB:
         self.path = Path(path)
         self.mods: list = []
         self.meta: dict = {}
+        self.catalog_dirty = False
+        self.catalog_repairs = []
         self.load()
 
     def load(self):
@@ -35,22 +108,83 @@ class ModsDB:
                                         {"version": 1, "meta": self.meta, "mods": self.mods})
                 utils.append_log(self.path.parent,
                                  "mods_db.json 缺失或损坏，已从 mods_db.json.bak 自动恢复")
+                self.repair_catalog()
                 return
             self.mods, self.meta = [], {}
         else:
             self.mods = [m for m in (data.get("mods") or []) if isinstance(m, dict)]
             self.meta = data.get("meta") or {}
+        self.repair_catalog()
+
+    def repair_catalog(self):
+        """修复旧解析器生成的重复 Wiki 条目；加载时仅改内存，启动维护再备份落盘。"""
+        groups = {}
+        for entry in self.mods:
+            if entry.get("group") in WIKI_GROUPS:
+                groups.setdefault(_name_key(entry), []).append(entry)
+        for key, rows in groups.items():
+            active = [e for e in rows if not e.get("wiki_removed")]
+            retired = [e for e in rows if e.get("wiki_removed")]
+            # 多个在用条目或历史条目都可能有独立用途，歧义时不自动合并。
+            if not key or len(active) != 1 or len(retired) != 1:
+                continue
+            current, old = active[0], retired[0]
+            if not _same_identity(old, current):
+                continue
+            merged = {**deepcopy(old), **deepcopy(current)}
+            _retain_user_fields(old, merged)
+            self.mods[self.mods.index(current)] = merged
+            self.mods.remove(old)
+            self.catalog_repairs.append(f'{old["id"]}: 合并 Wiki 名称格式变化产生的重复条目')
+            self.catalog_dirty = True
+        for entry in self.mods:
+            if entry.get("group") not in WIKI_GROUPS:
+                continue
+            # 只有一个历史链接条目时仍沿用旧 ID，同时让新解析器的名称 ID 可定位它。
+            raw_en, raw_cn = entry.get("name_en") or "", entry.get("name_cn") or ""
+            if "[[" in raw_en or "[[" in raw_cn:
+                plain_id = make_id(raw_en, raw_cn)
+                if plain_id != entry["id"] and plain_id not in (entry.get("legacy_ids") or []):
+                    entry.setdefault("legacy_ids", []).append(plain_id)
+                    self.catalog_dirty = True
+            for field in ("name_en", "name_cn"):
+                text = entry.get(field) or ""
+                clean = strip_markup(_strip_refs(text))
+                if clean != text:
+                    entry[field] = clean
+                    self.catalog_dirty = True
+
+    def id_redirects(self) -> dict:
+        actual = {m["id"] for m in self.mods}
+        candidates = {}
+        for entry in self.mods:
+            for mid in entry.get("legacy_ids") or []:
+                if mid not in actual:
+                    candidates.setdefault(mid, set()).add(entry["id"])
+        return {mid: next(iter(ids)) for mid, ids in candidates.items() if len(ids) == 1}
+
+    def entry_ids(self, mod_id):
+        entry = self.get(mod_id)
+        if not entry:
+            return [mod_id]
+        redirects = self.id_redirects()
+        return [entry["id"], *(mid for mid in entry.get("legacy_ids") or []
+                               if redirects.get(mid) == entry["id"])]
 
     def save(self, backup: bool = False):
         if backup:
             utils.backup_file(self.path)  # 结构变更前留 .bak（损坏可恢复）
         utils.atomic_write_json(self.path, {"version": 1, "meta": self.meta, "mods": self.mods})
+        self.catalog_dirty = False
 
     # ---- 查询 ----
     def get(self, mod_id: str):
         for m in self.mods:
             if m["id"] == mod_id:
                 return m
+        canonical = self.id_redirects().get(mod_id)
+        if canonical:
+            return next(m for m in self.mods if m["id"] == canonical)
         return None
 
     def all(self) -> list:
@@ -157,39 +291,26 @@ class ModsDB:
             # 全部 wiki 条目误标记为 wiki_removed，可添加列表直接清空
             raise ValueError("wiki 解析结果为空，已取消合并（本地数据未改动）。"
                              "请稍后重试；若反复出现，可能是页面结构变更，需更新解析器")
+        fresh = deepcopy(fresh)
         changes = []
-        old_by_id = {m["id"]: m for m in self.mods}
-        fresh_ids = {m["id"] for m in fresh}
         new_mods = []
+        used_ids = set()
         for fe in fresh:
-            old = old_by_id.get(fe["id"])
+            old = self.get(fe["id"])
+            if old and old["id"] in used_ids:
+                old = None
+            if old is None:
+                candidates = [m for m in self.mods
+                              if m.get("group") in WIKI_GROUPS and m["id"] not in used_ids
+                              and _same_identity(m, fe)]
+                if len(candidates) == 1:
+                    candidate = candidates[0]
+                    # 双向唯一，避免把一个旧条目套用到同名的多个新条目。
+                    if sum(_same_identity(candidate, e) for e in fresh) == 1:
+                        old = candidate
             if old:
-                # 用户手动关联的别名保留（可能包含 wiki 上没有的拼写）
-                merged_aliases = list(dict.fromkeys(
-                    (old.get("aliases") or []) + (fe.get("aliases") or [])))
-                fe["aliases"] = merged_aliases
-                # 用户手动绑定的下载源在刷新后保留
-                if old.get("source_override"):
-                    fe["source"] = old.get("source") or fe.get("source")
-                    fe["source_type"] = old.get("source_type") or fe.get("source_type")
-                    fe["source_override"] = True
-                old_source, fresh_source = old.get("source") or {}, fe.get("source") or {}
-                if (old.get("source_type") == fe.get("source_type") == "github"
-                        and old_source.get("owner") == fresh_source.get("owner")
-                        and old_source.get("repo") == fresh_source.get("repo")
-                        and old_source.get("target_profile") == "gtnh"):
-                    fresh_source["target_profile"] = "gtnh"
-                # 用户配置的版本过滤（如 GitHub 只取带 GTNH 的版本）在刷新后保留
-                old_tag_regex = (old.get("source") or {}).get("tag_regex")
-                if old_tag_regex:
-                    fe.setdefault("source", {})["tag_regex"] = old_tag_regex
-                # 用户编辑过的中文名在刷新后保留
-                if old.get("name_cn_override"):
-                    fe["name_cn"] = old.get("name_cn") or fe.get("name_cn")
-                    fe["name_cn_override"] = True
-                # 下载页最新版发布时间不是wiki字段，刷新wiki时必须保留缓存
-                if old.get("release_date"):
-                    fe["release_date"] = old["release_date"]
+                _retain_user_fields(old, fe)
+                used_ids.add(old["id"])
                 # 同名自定义源与 wiki 新收录条目合并 → 明确提示（用户字段已保留）
                 if old.get("group") == "自定义":
                     changes.append(f'自定义源 {old.get("name_en") or old["id"]} 已被 wiki 收录，'
@@ -206,6 +327,7 @@ class ModsDB:
             else:
                 changes.append(f'新增: {fe["name_en"] or fe["id"]}（{fe["group"]}/{fe["category"]}）')
             new_mods.append(fe)
+        fresh_ids = {m["id"] for m in new_mods}
         # 从 wiki 消失的条目保留记录但标记（已安装引用不丢）；自定义源原样保留
         for m in self.mods:
             if m.get("group") in WIKI_GROUPS:
@@ -219,6 +341,7 @@ class ModsDB:
                     continue  # 与wiki条目同名的自定义源已在上面合并处理，避免重复id
                 new_mods.append(m)
         self.mods = new_mods
+        self.repair_catalog()
         # 缓存回退与离线导入不能伪装成已完成线上刷新。调用方只有在
         # 经验证的实时 Wiki 内容到达时才推进这个时间。
         if update_fetched_at:

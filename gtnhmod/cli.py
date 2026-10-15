@@ -8,6 +8,7 @@
   py -m gtnhmod cli --packs-update   非交互：安装/更新已安装的资源包与光影
 """
 import os
+import math
 import re
 import sys
 import webbrowser
@@ -279,6 +280,14 @@ class CliApp:
         if options[idx].get("target_status", "eligible") != "eligible":
             self.ui.warn(options[idx].get("target_reason") or "请先核实并确认 GTNH 下载源")
             return None
+        selected = options[idx]
+        if selected.get('asset_ambiguous'):
+            candidates = selected.get('candidates') or []
+            asset_index = self.ui.choose('选择要下载的 jar', [c.file_name for c in candidates])
+            if asset_index is None:
+                return None
+            selected['candidates'] = [candidates[asset_index]]
+            selected['asset_ambiguous'] = False
         return options[idx]["version"]
 
     def _install_to(self, entry):
@@ -475,7 +484,11 @@ class CliApp:
             st = reg[side].get(mod_id) or {}
             cur = st.get("version")
             status = updater.version_status(cur, info.latest_version)
-            if status == "update":
+            if status == 'local_newer':
+                self.ui.warn(f"  {SIDE_LABELS[side]} {name}: 本地 v{cur} 高于上游 v{info.latest_version}，不会自动降级")
+            elif status == 'update' and not info.candidates:
+                self.ui.warn(f"  {SIDE_LABELS[side]} {name}: 有新版 v{info.latest_version}，需手动选择资产或下载")
+            elif status == "update":
                 self.ui.ok(f"  {SIDE_LABELS[side]} {name}: v{cur} → v{info.latest_version} 可更新")
             elif status == "uptodate":
                 self.ui.info(f"  {SIDE_LABELS[side]} {name}: v{cur} 已是最新")
@@ -485,7 +498,7 @@ class CliApp:
                 self.ui.warn(f"      （无自动下载资产，需手动下载）")
         print()
         self.ui.info(f"可更新 {counts['update']} 个 / 已最新 {counts['uptodate']} 个 "
-                     f"/ 需手动 {counts['manual']} 个 / 出错 {counts['error']} 个")
+                     f"/ 需手动 {counts['manual']} 个 / 无法比较 {counts['unknown']} 个 / 出错 {counts['error']} 个")
 
     # ---------- 5 更新 ----------
     def do_update_menu(self):
@@ -1015,11 +1028,14 @@ class CliApp:
     # ---------- 10 设置 ----------
     def do_settings(self):
         while True:
+            proxy = self.cfg.proxy
+            proxy_display = ('跟随系统' if proxy is None else
+                             f"{proxy['host']}:{proxy.get('port', 8080)}" if proxy.get('host') else '直接连接')
             options = [
                 f"客户端mods目录: {self.cfg.client_mods_dir or '（未设置）'}",
                 f"服务端mods目录: {self.cfg.server_mods_dir or '（未设置）'}",
                 f"GitHub Token: {'已配置' if self.cfg.github_token else '（未配置，匿名限额60次/时）'}",
-                f"代理: {self.cfg.proxy or '（跟随系统）'}",
+                f"代理: {proxy_display}",
                 f"检查结果缓存时长: {self.cfg.check_interval_hours} 小时",
                 f"每mod保留备份数: {self.cfg.backup_keep}",
                 f"GTNH整合包版本（仅供说明提示）: {self.cfg.data.get('gtnh_version') or '（未设置）'}",
@@ -1043,9 +1059,9 @@ class CliApp:
                 self.cfg.set_mods_dir("server", p)
                 self.ui.ok("已保存")
             elif idx == 2:
-                t = self.ui.input_text("GitHub Token（https://github.com/settings/tokens 生成，"
-                                       "留空=匿名）", self.cfg.github_token)
-                self.cfg.data["github_token"] = t
+                read_secret = getattr(self.ui, 'input_secret', self.ui.input_text)
+                t = read_secret("GitHub Token（留空保持当前设置，输入 - 清除）")
+                self.cfg.data["github_token"] = '' if t == '-' else (t.strip() or self.cfg.github_token)
                 self.cfg.save()
                 self.ui.ok("已保存")
             elif idx == 3:
@@ -1054,9 +1070,12 @@ class CliApp:
                 if host:
                     port = self.ui.input_text("端口", "7890")
                     try:
-                        self.cfg.data["proxy"] = {"host": host, "port": int(port)}
+                        port_number = int(port)
+                        if not 1 <= port_number <= 65535:
+                            raise ValueError('端口超出范围')
+                        self.cfg.data["proxy"] = {"host": host, "port": port_number}
                     except ValueError:
-                        self.ui.error("端口必须是数字，代理未保存")
+                        self.ui.error("端口必须是 1 到 65535 的整数，代理未保存")
                         continue
                 else:
                     self.cfg.data["proxy"] = None
@@ -1065,7 +1084,10 @@ class CliApp:
             elif idx == 4:
                 h = self.ui.input_text("缓存时长（小时）", str(self.cfg.check_interval_hours))
                 try:
-                    self.cfg.data["check_interval_hours"] = float(h)
+                    value = float(h)
+                    if not math.isfinite(value) or value < 0:
+                        raise ValueError('无效缓存时长')
+                    self.cfg.data["check_interval_hours"] = value
                     self.cfg.save()
                     self.ui.ok("已保存")
                 except ValueError:
@@ -1073,7 +1095,10 @@ class CliApp:
             elif idx == 5:
                 k = self.ui.input_text("备份保留数", str(self.cfg.backup_keep))
                 try:
-                    self.cfg.data["backup_keep"] = int(k)
+                    keep = int(k)
+                    if keep < 1:
+                        raise ValueError('至少保留一份备份')
+                    self.cfg.data["backup_keep"] = keep
                     self.cfg.save()
                     self.ui.ok("已保存")
                 except ValueError:

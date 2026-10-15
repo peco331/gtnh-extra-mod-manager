@@ -2,9 +2,11 @@
 
 壳（CLI/GUI）只调本模块；所有交互经 UIProtocol（见 ui.py）。
 """
+import json
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 
 from . import SIDES, SIDE_LABELS, utils
@@ -15,6 +17,73 @@ from .versions import (VersionParseError, compare, order_key, parse_version,
                        split_mc_mod_version)
 
 IGNORED_HINT = "（已忽略）"
+UPDATE_CHECK_TTL = 300
+
+
+def _update_target_context(cfg, db, installed, side, mod_id, names):
+    """只校验已检查项目的已知文件，不重新遍历 MOD 目录或查询上游。"""
+    entry, folder = db.get(mod_id), cfg.mods_dir(side)
+    if not entry or not folder or not names:
+        raise ValueError("安装目录或条目已变化")
+    files = []
+    for name in names:
+        path = folder / name
+        if path.resolve().parent != folder.resolve() or path.is_symlink():
+            raise ValueError("文件位置已变化")
+        stat = path.stat()
+        files.append((name, stat.st_size, stat.st_mtime_ns, stat.st_ino))
+    return {
+        "directory": str(folder.resolve()), "files": files,
+        "locked": bool(installed.merged_record(side, db.entry_ids(mod_id)).get("locked")),
+        "ignored": any(name in (cfg.data.get("ignored_files") or []) for name in names),
+        "source": json.dumps({key: entry.get(key) for key in
+            ("source_type", "source", "urls", "group", "compat")}, sort_keys=True),
+        "gtnh_version": cfg.data.get("gtnh_version") or "",
+    }
+
+
+def check_update_plan(cfg, db, installed, *, progress_cb=None):
+    """一次检查产生展示结果、可执行资产和本地状态快照。"""
+    checked_at = time.monotonic()
+    registry = build_registry(cfg, db, installed)
+    context = {}
+    for side, rows in registry.items():
+        for mid, state in rows.items():
+            if state["enabled"] and not state["locked"]:
+                names = [state["file_name"], *(state.get("duplicates") or [])]
+                context[(side, mid)] = _update_target_context(cfg, db, installed, side, mid, names)
+    plan = build_update_plan(cfg, db, installed, registry=registry, progress_cb=progress_cb)
+    dirty = False
+    for item in plan:
+        if item.get("target_version") and item["action"] != "error":
+            options, _ = item["prefetched"]
+            published = options[0].get("published_at") if options else None
+            for side in item["sides"]:
+                installed.touch_checked(side, item["mod_id"], item["target_version"],
+                                        remote_date=published, save=False)
+                dirty = True
+    if dirty:
+        installed.save()
+    return {"plan": plan, "checked_at": checked_at, "context": context}
+
+
+def validate_checked_updates(cfg, db, installed, snapshot, plan):
+    """返回失效原因；失效只提示重新检查，绝不隐式发起新查询。"""
+    if not snapshot:
+        return "尚未检查更新，请先点击“检查更新”。"
+    if time.monotonic() - snapshot["checked_at"] >= UPDATE_CHECK_TTL:
+        return "检查结果已超过 5 分钟，请重新点击“检查更新”。"
+    for item in plan:
+        for side in item["sides"]:
+            old = snapshot["context"].get((side, item["mod_id"]))
+            try:
+                current = _update_target_context(cfg, db, installed, side, item["mod_id"],
+                                                 [row[0] for row in old["files"]]) if old else None
+            except (OSError, ValueError):
+                current = None
+            if current != old or current is None or current["locked"] or current["ignored"]:
+                return f'{item["name"]} 的文件、锁定或下载源设置已变化，请重新点击“检查更新”。'
+    return None
 
 
 def _log_op(cfg, msg: str) -> None:
@@ -128,6 +197,7 @@ def list_install_options(entry: dict, cfg, db=None, *, force: bool = False) -> t
             "target_reason": o.target_reason,
             "prerelease": o.prerelease,
             "published_at": o.published_at,
+            "asset_ambiguous": o.asset_ambiguous,
         })
     if not result:
         return [], None
@@ -149,18 +219,20 @@ def _pick_default_option(options: list, old_version: str | None = None) -> tuple
     chosen = options[0]
     if chosen.get("target_status", "unknown") != "eligible":
         return None, chosen.get("target_reason") or "游戏平台需确认"
+    if chosen.get('asset_ambiguous'):
+        return None, "同一发布有多个下载资产，请手动选择具体 jar"
     note = chosen.get("target_reason") or ""
     if chosen.get("compat") == "incompatible":
         note = "；".join(x for x in (note, "发布说明提示可能不兼容（仅供参考，仍使用最新 GTNH 发布）") if x)
     return chosen, note
 
 
-def scan_sides(cfg, db) -> dict:
+def scan_sides(cfg, db, *, strict: bool = False) -> dict:
     """扫描两端 mods 目录并匹配 db，返回 {side: [InstalledFile]}。"""
     result = {}
     for side in SIDES:
         folder = cfg.mods_dir(side)
-        files = scanner.scan_folder(folder) if folder else []
+        files = scanner.scan_folder(folder, strict=strict) if folder else []
         scanner.match_all(files, db.all())
         result[side] = files
     return result
@@ -181,7 +253,7 @@ def reconcile_installed(cfg, db, installed) -> int:
     在程序启动时调用一次。只处理已配置目录的端别——未配置目录时扫描结果
     为空，若照常校正会把该端别的记录全部误删。返回清理的记录数。
     """
-    scan = {side: files for side, files in scan_sides(cfg, db).items()
+    scan = {side: files for side, files in scan_sides(cfg, db, strict=True).items()
             if cfg.mods_dir(side) and cfg.mods_dir(side).is_dir()}
     if not scan:
         return 0
@@ -196,6 +268,12 @@ def reconcile_installed(cfg, db, installed) -> int:
 def startup_maintenance(cfg, db, installed) -> None:
     """程序启动维护：校正已安装记录、清理积压备份、清扫孤儿临时文件。"""
     try:
+        # 先迁移目录身份与安装增量状态，再扫描校正，避免旧 ID 的锁定/缓存被当残留清掉。
+        if db.catalog_dirty:
+            db.save(backup=True)
+            for repair in db.catalog_repairs:
+                _log_op(cfg, repair)
+        installed.remap_ids(db.id_redirects())
         reconcile_installed(cfg, db, installed)
         prune_all_backups(cfg)
         n = utils.clean_orphan_tmp(cfg.cache_dir)
@@ -224,7 +302,7 @@ def build_registry(cfg, db, installed) -> dict:
             ordered = _sort_files_by_version(fs)
             f = ordered[0]
             entry = db.get(f.mod_id) or {}
-            inst = installed.get(side, f.mod_id) or {}
+            inst = installed.merged_record(side, db.entry_ids(f.mod_id))
             latest = inst.get("last_remote_version")
             status = "disabled" if not f.enabled else "installed"
             if f.enabled and latest and f.version:
@@ -331,11 +409,14 @@ def _sort_files_by_version(files: list) -> list:
     parseable = [f for f in files if f.version and _opt_parse(f.version)]
     unparse = [f for f in files if not (f.version and _opt_parse(f.version))]
     parseable.sort(key=lambda f: parse_version(f.version).key(), reverse=True)
-    return parseable + unparse
+    ordered = parseable + unparse
+    return [f for f in ordered if f.enabled] + [f for f in ordered if not f.enabled]
 
 
 def find_installed_files(cfg, db, side: str, mod_id: str) -> list:
     """某端别某 mod 在磁盘上的所有匹配文件（版本降序）。"""
+    entry = db.get(mod_id)
+    mod_id = entry["id"] if entry else mod_id
     folder = cfg.mods_dir(side)
     if not folder:
         return []
@@ -381,7 +462,7 @@ def cleanup_duplicates(cfg, db, installed, mod_id: str) -> dict:
         if not hits:
             continue
         keep = hits[0]  # 版本最高者
-        rec_name = (installed.get(side, mod_id) or {}).get("file_name")
+        rec_name = installed.merged_record(side, db.entry_ids(mod_id)).get("file_name")
         for h in hits:
             if h.file_name == rec_name:
                 keep = h
@@ -543,7 +624,7 @@ def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
             entry = db.get(f.mod_id)
             if not entry:
                 continue
-            inst = installed.get(side, f.mod_id) or {}
+            inst = installed.merged_record(side, db.entry_ids(f.mod_id))
             if inst.get("locked"):
                 continue
             item = to_check.setdefault(f.mod_id, {"entry": entry, "targets": []})
@@ -632,7 +713,10 @@ def summarize_check(results: list, reg: dict) -> dict:
         else:
             cur = (reg.get(side, {}).get(mod_id) or {}).get("version")
             s = version_status(cur, info.latest_version)
-            st.add(s if s in ("update", "uptodate") else "unknown")
+            if s == 'local_newer' or (s == 'update' and not info.candidates):
+                st.add('manual')
+            else:
+                st.add(s if s in ("update", "uptodate") else "unknown")
     counts = {"update": 0, "uptodate": 0, "unknown": 0, "manual": 0, "error": 0}
     for st in per_mod.values():
         for key in ("update", "error", "unknown", "manual", "uptodate"):
@@ -643,11 +727,12 @@ def summarize_check(results: list, reg: dict) -> dict:
 
 
 def version_status(current, latest) -> str:
-    """比较已装版本与远端版本：update=可更新 / uptodate=已最新 / unknown=无法判断。"""
+    """区分可更新、已最新、本地更高与无法比较。"""
     if not current or not latest:
         return "unknown"
     try:
-        return "update" if compare(latest, current) > 0 else "uptodate"
+        comparison = compare(latest, current)
+        return 'update' if comparison > 0 else 'local_newer' if comparison < 0 else 'uptodate'
     except VersionParseError:
         return "unknown"
 
@@ -666,6 +751,7 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
     entry = db.get(mod_id)
     if not entry:
         return {"action": "error", "error": f"未知mod: {mod_id}"}
+    mod_id = entry["id"]
     folder = cfg.mods_dir(side)
     if not folder or not folder.is_dir():
         return {"action": "error",
@@ -687,6 +773,9 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
             return {"action": "error", "error": f"版本 {version} 不可用（列表可能已过期，请重试）"}
         if opt.get("target_status", "unknown") != "eligible":
             return {"action": "manual", "note": opt.get("target_reason") or "游戏平台需确认",
+                    "entry": entry, "warning": warn}
+        if opt.get('asset_ambiguous'):
+            return {"action": "manual", "note": "同一发布有多个下载资产，请先选择具体 jar",
                     "entry": entry, "warning": warn}
         if not opt["candidates"]:
             return {"action": "manual", "note": f"版本 {version} 无自动下载资产，需手动下载",
@@ -853,6 +942,10 @@ def _cleanup_extras(cfg, db, side: str, mod_id: str, dest: Path,
     for extra in find_installed_files(cfg, db, side, mod_id):
         if extra.path.resolve() == dest.resolve():
             continue
+        if extra.match_quality != 'exact' and extra.file_name not in failed:
+            continue  # 名称前缀/缩写只是推测，不能据此自动移走另一份 jar。
+        if extra.path.is_symlink() or extra.path.resolve().parent != dest.parent.resolve():
+            continue
         if backup_and_remove_extra(cfg, db, side, mod_id, extra):
             if extra.file_name in failed:
                 failed.remove(extra.file_name)
@@ -872,6 +965,7 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
     entry = db.get(mod_id)
     if not entry:
         return {"action": "error", "error": f"未知mod: {mod_id}"}
+    mod_id = entry["id"]
     warn = _side_warning(entry, side)
     folder = cfg.mods_dir(side)
     if not folder or not folder.is_dir():
@@ -880,6 +974,9 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
     old = find_installed_file(cfg, db, side, mod_id)
     if not old:
         return {"action": "error", "error": f"{SIDE_LABELS[side]}未找到已安装文件"}
+    if not old.enabled or installed.merged_record(side, db.entry_ids(mod_id)).get("locked"):
+        return {"action": "manual", "note": "该端 MOD 已禁用或锁定，请先启用并解锁再更新",
+                "entry": entry}
     gtnh = (cfg.data.get("gtnh_version") or "").strip()
     if prefetched is not None:
         options, err = prefetched
@@ -902,6 +999,9 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
         if not opt["candidates"]:
             return {"action": "manual", "note": f"版本 {version} 无自动下载资产，需手动下载",
                     "entry": entry, "warning": warn}
+        if opt.get('asset_ambiguous'):
+            return {"action": "manual", "note": "同一发布有多个下载资产，请先选择具体 jar",
+                    "entry": entry, "warning": warn}
         info = UpdateInfo(opt["version"], opt["candidates"], opt["body"],
                           utils.now_str(), f"已选版本 {version}",
                           opt.get("published_at"))
@@ -921,6 +1021,9 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
         chosen, note = _pick_default_option(options, old_version=old.version)
         if chosen is None:
             return {"action": "manual", "note": note, "entry": entry, "warning": warn}
+        if not old.version:
+            return {"action": "manual", "note": "已安装版本未知，无法比较版本，请手动选择目标版本",
+                    "entry": entry, "warning": warn}
         if old.version:
             try:
                 comparison = compare(chosen["version"], old.version)
@@ -1073,7 +1176,7 @@ def delete_mod(cfg, db, installed, mod_id: str, *, sides: tuple = SIDES) -> dict
         for f in files:
             dest_dir = cfg.backup_dir / side / mod_id
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / f"{utils.timestamp_str()}_{f.file_name}.deleted"
+            dest = downloader._unique_backup_path(dest_dir, f.file_name + ".deleted")
             try:
                 shutil.move(str(f.path), str(dest))
                 deleted.append(f"{SIDE_LABELS[side]}: {f.file_name}")
@@ -1140,6 +1243,9 @@ def restore_backup(cfg, db, installed, side: str, backup_path: Path) -> dict:
     if not folder or not folder.is_dir():
         return {"action": "error", "error": f"{SIDE_LABELS[side]}mods目录未设置或不存在"}
     mod_id = backup_path.parent.name
+    entry = db.get(mod_id)
+    if entry:
+        mod_id = entry["id"]
     name = re.sub(r"^\d{8}_\d{6}(?:_\d+)?_", "", backup_path.name)  # 时间戳[_序号]_原文件名
     if name.endswith(".deleted"):
         name = name[:-len(".deleted")]  # 删除操作移入的备份，恢复时还原原名
@@ -1149,13 +1255,15 @@ def restore_backup(cfg, db, installed, side: str, backup_path: Path) -> dict:
         dest, unremoved = downloader.update_with_backup(
             cand, folder, cfg.backup_dir / side / mod_id,
             old_file=old.path if old else None, backup_keep=cfg.backup_keep,
-            dl_cache_dir=cfg.cache_dir)
+            dl_cache_dir=cfg.cache_dir, allow_disabled=True)
     except downloader.FileBusyError as e:
         return {"action": "error", "error": str(e)}
     except Exception as e:
         return {"action": "error", "error": f"恢复失败: {e}"}
-    ver = split_mc_mod_version(dest.stem)[2] or ""
+    stem = dest.name[:-13] if dest.name.lower().endswith('.jar.disabled') else dest.stem
+    ver = split_mc_mod_version(stem)[2] or ""
     installed.set(side, mod_id, file_name=dest.name, parsed_version=ver,
+                  enabled=not dest.name.lower().endswith(".disabled"),
                   updated_at=utils.now_str())
     entry = db.get(mod_id) or {}
     _log_op(cfg, f"{SIDE_LABELS[side]} 恢复备份 {entry.get('name_en') or mod_id} → {dest.name}")
@@ -1182,23 +1290,33 @@ def rollback_mod(cfg, db, installed, mod_id: str, *, sides: tuple = SIDES) -> li
         except OSError:
             return (0, p.name)
 
+    entry = db.get(mod_id)
+    if entry:
+        mod_id = entry["id"]
     all_jars = []
     for side in sides:
-        bak_dir = cfg.backup_dir / side / mod_id
-        if bak_dir.is_dir():
-            # 只回滚普通备份；.deleted（用户主动删除的）不参与
-            all_jars += [p for p in downloader.backup_files(bak_dir)
-                         if p.is_file() and not p.name.endswith(".deleted")]
+        for previous_id in db.entry_ids(mod_id):
+            bak_dir = cfg.backup_dir / side / previous_id
+            if bak_dir.is_dir():
+                # 旧 ID 目录中的备份仍可回滚，无需移动历史备份文件。
+                all_jars += [p for p in downloader.backup_files(bak_dir)
+                             if p.is_file() and not p.name.endswith(".deleted")]
     if not all_jars:
         return [{"side": side, "action": "nobackup"} for side in sides]
     src = max(all_jars, key=backup_key)
     results = []
-    for side in sides:
-        if not find_installed_file(cfg, db, side, mod_id):
-            continue  # 该端别未安装，跳过（只回滚已安装的端别）
-        r = restore_backup(cfg, db, installed, side, src)
-        r["side"], r["backup_file"] = side, src.name
-        results.append(r)
+    import tempfile
+    # 首端恢复会触发备份轮换；先留独立副本，不能让次端依赖可能被轮换掉的文件。
+    with tempfile.TemporaryDirectory(prefix='gtnh_rollback_') as work:
+        snapshot = Path(work) / mod_id / src.name
+        snapshot.parent.mkdir()
+        shutil.copy2(src, snapshot)
+        for side in sides:
+            if not find_installed_file(cfg, db, side, mod_id):
+                continue
+            r = restore_backup(cfg, db, installed, side, snapshot)
+            r["side"], r["backup_file"] = side, src.name
+            results.append(r)
     return results
 
 
@@ -1287,7 +1405,7 @@ def build_update_plan(cfg, db, installed, *, target_mod_ids=None, sides=SIDES,
         mod_id, name, mod_sides, cur_ver = item
         entry = db.get(mod_id) or {}
         try:
-            options, err = list_install_options(entry, cfg, db, force=True)
+            options, err = list_install_options(entry, cfg, force=True)
         except Exception as exc:
             options, err = [], str(exc)
         return mod_id, name, mod_sides, cur_ver, options, err
@@ -1307,6 +1425,13 @@ def build_update_plan(cfg, db, installed, *, target_mod_ids=None, sides=SIDES,
     plan = []
     for mod_id, name, mod_sides, _ in order:
         name, mod_sides, cur_ver, options, err = raw_results[mod_id]
+        entry = db.get(mod_id) or {}
+        if options:
+            for option in options:
+                if option.get("candidates"):
+                    _learn_asset_name(db, entry, option["candidates"][0].file_name)
+                    break
+            _touch_release_date(db, entry, options[0].get("published_at"))
         if err:
             plan.append({
                 "mod_id": mod_id,
@@ -1353,32 +1478,34 @@ def build_update_plan(cfg, db, installed, *, target_mod_ids=None, sides=SIDES,
             })
             continue
 
-        action = "update"
-        if cur_ver and cur_ver != "未知":
+        # 两端可能版本不同，分别比较后按结果分组，不能用首端的版本代替另一端。
+        groups = {}
+        for side in mod_sides:
+            current = reg[side][mod_id].get("version") or "未知"
+            action, side_note = "update", note
             try:
-                comp = compare(chosen["version"], cur_ver)
+                comp = compare(chosen["version"], current)
                 if comp == 0:
-                    action = "uptodate"
+                    action, side_note = "uptodate", "已是最新 GTNH 发布"
                 elif comp < 0:
-                    action = "manual_downgrade"
-                    note = "发布版本低于当前已安装版本，需手动确认"
+                    action, side_note = "manual_downgrade", "发布版本低于当前已安装版本，需手动确认"
             except VersionParseError:
+                action, side_note = "manual", f"无法比较版本（已装 {current}，目标 {chosen['version']}），请手动选择"
+            if not chosen.get("candidates"):
                 action = "manual"
-                note = f"版本格式无法比较（已装 {cur_ver}，目标 {chosen['version']}）"
-
-        if not chosen.get("candidates"):
-            action = "manual"
-            note = note or "该版本无自动下载资产，需手动下载"
-
-        plan.append({
+                side_note = "该版本无自动下载资产，需手动下载"
+            key = (action, side_note, current)
+            groups.setdefault(key, []).append(side)
+        for (action, side_note, current), group_sides in groups.items():
+            plan.append({
             "mod_id": mod_id,
             "name": name,
-            "sides": mod_sides,
-            "current_version": cur_ver,
+            "sides": group_sides,
+            "current_version": current,
             "target_version": chosen["version"],
             "prerelease": bool(chosen.get("prerelease")),
             "action": action,
-            "note": note or ("可更新" if action == "update" else "已最新"),
+            "note": side_note or ("可更新" if action == "update" else "需手动处理"),
             "prefetched": (options, err),
             "options": options,
         })

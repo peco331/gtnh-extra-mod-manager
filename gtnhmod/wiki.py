@@ -82,6 +82,13 @@ def _wiki_headers(cfg, profile: "WikiProfile | None" = None) -> dict:
     # 用户点击“刷新”时必须穿透中间缓存；Cookie/UA 仍只用于请求，绝不输出到日志。
     headers = {"Referer": _referer(cfg, profile),
                "Cache-Control": "no-cache", "Pragma": "no-cache"}
+    def config_quote(value):
+        value = str(value)
+        if any(ord(char) < 32 for char in value):
+            raise net.HttpError(-1, "凭据含非法控制字符")
+        return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+    config_lines = []
     cookie = getattr(cfg, "wiki_cookie", "") or ""
     ua = getattr(cfg, "wiki_ua", "") or ""
     if cookie:
@@ -180,18 +187,27 @@ def _fetch_curl_wikitext(cfg, profile: "WikiProfile | None" = None) -> str:
     ua = getattr(cfg, "wiki_ua", "") or net.USER_AGENT
     cmd = [curl, "-sS", "-f", "-m", "30", "-A", ua, "-e", _referer(cfg, profile),
            "-H", "Cache-Control: no-cache", "-H", "Pragma: no-cache"]
+    def config_quote(value):
+        value = str(value)
+        if any(ord(char) < 32 for char in value):
+            raise net.HttpError(-1, "凭据含非法控制字符")
+        return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+    config_lines = []
     cookie = getattr(cfg, "wiki_cookie", "") or ""
     if cookie:
-        cmd += ["-b", cookie]
+        config_lines.append("cookie = " + config_quote(cookie))
     proxy = cfg.proxy
     if proxy and proxy.get("host"):
-        auth = f'{proxy["user"]}:{proxy["pass"]}@' if proxy.get("user") else ""
-        cmd += ["-x", f'http://{auth}{proxy["host"]}:{proxy.get("port", 8080)}']
-    cmd.append(url)
+        cmd += ["-x", f'http://{proxy["host"]}:{proxy.get("port", 8080)}']
+        if proxy.get("user"):
+            config_lines.append("proxy-user = " + config_quote(f'{proxy["user"]}:{proxy.get("pass", "")}'))
+    cmd += ["--config", "-", url]
+    config_input = ("\n".join(config_lines) + "\n").encode("utf-8")
     try:
-        out = subprocess.run(cmd, capture_output=True, timeout=45)
+        out = subprocess.run(cmd, input=config_input, capture_output=True, timeout=45)
     except (OSError, subprocess.TimeoutExpired) as e:
-        raise net.HttpError(-1, f"curl 执行失败: {e}")
+        raise net.HttpError(-1, "curl 执行失败") from None
     if out.returncode != 0:
         raise net.HttpError(-1, f"curl 返回码 {out.returncode}")
     return out.stdout.decode("utf-8", "replace")
@@ -477,11 +493,17 @@ def github_repo_from_url(url: str):
     """从 GitHub 链接提取 (owner, repo)；非仓库链接（releases/tags 等）返回 None。"""
     if not url:
         return None
-    m = GITHUB_REPO_RE.search(url)
-    if not m:
+    parsed = urllib.parse.urlsplit(url.strip())
+    if parsed.scheme not in ('https', 'http') or parsed.hostname not in ('github.com', 'www.github.com'):
         return None
-    owner, repo = m.group(1), m.group(2).rstrip("/")
-    if owner in ("releases", "tags", "issues", "pull", "actions", "marketplace"):
+    parts = parsed.path.strip('/').split('/')
+    if len(parts) < 2:
+        return None
+    owner, repo = parts[:2]
+    repo = repo.removesuffix('.git')
+    if not all(re.fullmatch(r'[A-Za-z0-9_.-]+', component) for component in (owner, repo)):
+        return None
+    if owner.lower() in ("releases", "tags", "issues", "pull", "actions", "marketplace", 'settings', 'search'):
         return None
     return owner, repo
 
@@ -683,7 +705,9 @@ def strip_markup(s: str) -> str:
 
 
 def make_id(name_en: str, name_cn: str) -> str:
-    """条目 id：英文名小写去非字母数字；无英文名时用中文名哈希。"""
+    """以可读名称生成 id，链接目标、标签和引用不属于条目身份。"""
+    name_en = strip_markup(_strip_refs(name_en))
+    name_cn = strip_markup(_strip_refs(name_cn))
     base = re.sub(r"[^a-z0-9]+", "-", (name_en or "").lower()).strip("-")
     if not base:
         base = "mod-" + hashlib.md5((name_cn or "未知").encode("utf-8")).hexdigest()[:8]
@@ -699,6 +723,8 @@ def _strip_refs(s: str) -> str:
 def _entry_from_params(params: dict, group: str, category: str) -> dict:
     name_en = _strip_refs(params.get("模组英文名") or "")
     name_cn = _strip_refs(params.get("模组中文名") or "")
+    name_en, name_cn = strip_markup(name_en), strip_markup(name_cn)
+    entry_id = make_id(name_en, name_cn)
     side, uncertain = parse_side(params.get("运行环境") or params.get("标签") or "", "both")
     urls = parse_urls(params.get("相关地址") or "")
     # 默认下载源：优先带"推荐/特供"等标记的链接，其次第一个github链接
@@ -712,7 +738,7 @@ def _entry_from_params(params: dict, group: str, category: str) -> dict:
     else:
         source, source_type = {}, "manual"
     return {
-        "id": make_id(name_en, name_cn),
+        "id": entry_id,
         "name_en": name_en,
         "name_cn": name_cn,
         "group": group,

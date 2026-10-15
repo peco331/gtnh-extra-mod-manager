@@ -183,6 +183,13 @@ def validate_pack(path: Path, kind: str) -> tuple[bool, str]:
         return (ok, "" if ok else "文件夹内没有 assets/ 或 pack.mcmeta")
     if path.suffix.lower() != ".zip":
         return False, f"不是 .zip 文件（{path.suffix or '无扩展名'}）"
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as archive:
+            if archive.testzip() is not None:
+                return False, "压缩包内部文件损坏，已拒绝安装"
+    except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, NotImplementedError):
+        return False, "压缩包损坏或无法读取，已拒绝安装"
     if kind == KIND_SHADER:
         probes = ("shaders/", "shaders")
         ok = _zip_has(path, probes)
@@ -442,7 +449,7 @@ def _candidate_tokens(entry: dict) -> list:
     return out
 
 
-def scan_pack_dir(folder: Path, kind: str, *, with_size: bool = True) -> list:
+def scan_pack_dir(folder: Path, kind: str, *, with_size: bool = True, strict: bool = False) -> list:
     """扫描 resourcepacks/shaderpacks 目录 → PackFile 列表（zip 与文件夹）。
 
     跳过隐藏项、``.disabled`` 与下载中断的 ``.part``；文件夹形态也计入
@@ -457,6 +464,8 @@ def scan_pack_dir(folder: Path, kind: str, *, with_size: bool = True) -> list:
     try:
         items = sorted(Path(folder).iterdir(), key=lambda p: p.name.lower())
     except OSError:
+        if strict:
+            raise
         return out
     for p in items:
         name = p.name
@@ -475,6 +484,8 @@ def scan_pack_dir(folder: Path, kind: str, *, with_size: bool = True) -> list:
             else:
                 continue
         except OSError:
+            if strict:
+                raise
             continue
         rec.mtime = st.st_mtime
         stem = name[:-4] if name.lower().endswith(".zip") else name
@@ -892,7 +903,8 @@ def _pick_asset(assets: list, entry: dict, *, asset_regex: str = "") -> PackAsse
     历史版本的文件（Complementary 有 25 个、BSL 有 49 个），只看"候选总数"
     永远判为歧义、无法一键安装。先收敛到最新发布，再看该次发布里是否唯一。
     """
-    real = [a for a in assets if not META_ASSET_RE.match(a.file_name or "")]
+    real = [a for a in assets if (a.file_name or "").lower().endswith(".zip")
+            and not META_ASSET_RE.match(a.file_name or "")]
     if not real:
         return None
     if asset_regex:
@@ -900,11 +912,7 @@ def _pick_asset(assets: list, entry: dict, *, asset_regex: str = "") -> PackAsse
             rx = re.compile(asset_regex, re.I)
         except re.error as e:
             raise PacksError(f"资产筛选正则无效: {e}")
-        matched = [a for a in real if rx.search(a.file_name)]
-        if matched:
-            return matched[0]     # 用户显式绑定优先于任何自动推断
-        # 绑定过却匹配不上（上游改名了）：在最新一次发布里再试，
-        # 仍匹配不上返回 None 让用户重新选择——绝不悄悄换成别的文件
+        # 只在最新发布里沿用绑定；匹配旧发布不能证明上游最新命名仍有效。
         latest_binding = [a for a in _release_groups(real)[0] if rx.search(a.file_name)]
         return latest_binding[0] if len(latest_binding) == 1 else None
 
@@ -980,14 +988,19 @@ def _github_assets(cfg, url: str, *, force: bool = False) -> PackSourceResult:
                                     note="仓库没有 Release，只能从源码页手动下载")
         return PackSourceResult(source="github", status="error", url=url,
                                 note=f"GitHub 查询失败: {e}")
-    releases = data if isinstance(data, list) else []
+    if src == "cache_stale" or not isinstance(data, list) or any(not isinstance(r, dict) for r in data):
+        return PackSourceResult(source="github", status="error", url=url,
+                                note="GitHub 查询失败或响应异常，无法确认最新版本（不能使用过期缓存）")
+    releases = [r for r in data if not r.get("draft")]
     assets: list = []
     for rel in releases:
         tag = rel.get("tag_name") or ""
         published = rel.get("published_at") or rel.get("created_at") or ""
         for a in (rel.get("assets") or []):
+            if not isinstance(a, dict):
+                return PackSourceResult(source="github", status="error", url=url, note="GitHub 下载资产格式错误")
             fname = a.get("name") or ""
-            if not fname or META_ASSET_RE.match(fname):
+            if not fname.lower().endswith('.zip') or META_ASSET_RE.match(fname):
                 continue
             if not a.get("browser_download_url"):
                 continue
@@ -1024,14 +1037,19 @@ def _modrinth_assets(cfg, url: str, *, force: bool = False) -> PackSourceResult:
     except net.HttpError as e:
         return PackSourceResult(source="modrinth", status="error", url=url,
                                 note=f"Modrinth 查询失败: {e}")
-    versions_list = data if isinstance(data, list) else []
+    if src == "cache_stale" or not isinstance(data, list) or any(not isinstance(v, dict) for v in data):
+        return PackSourceResult(source="modrinth", status="error", url=url,
+                                note="Modrinth 查询失败或响应异常，无法确认最新版本（不能使用过期缓存）")
+    versions_list = data
     assets: list = []
     for v in versions_list:
         ver = v.get("version_number") or ""
         published = v.get("date_published") or ""
         for f in (v.get("files") or []):
+            if not isinstance(f, dict):
+                return PackSourceResult(source="modrinth", status="error", url=url, note="Modrinth 下载文件格式错误")
             fname = f.get("filename") or ""
-            if not f.get("url"):
+            if not f.get("url") or not fname.lower().endswith('.zip'):
                 continue
             assets.append(PackAsset(
                 url=f["url"], file_name=fname, version=ver or None, tag=ver,
@@ -1096,13 +1114,7 @@ def set_download_source(db: PacksDB, pack_id: str, url: str, *,
     from .wiki import github_repo_from_url
     repo = github_repo_from_url(url) if kind == "github" else None
     if kind == "github" and not repo:
-        # 组织页/非仓库页：GitHub 上同名仓库可省略仓库名，但必须能取出 owner/repo
-        m = re.match(r"https?://github\.com/([\w.\-]+)/?$", url)
-        if not m:
-            raise PacksError(
-                "该 GitHub 链接不是仓库地址（如 https://github.com/作者/仓库）。"
-                "组织页请改用具体仓库链接")
-        repo = (m.group(1), m.group(1))
+        raise PacksError("该 GitHub 链接不是仓库地址，请填写 https://github.com/作者/仓库；组织页无法用于自动下载")
     note = ""
     if kind == "modrinth":
         from .packs_wiki import modrinth_ref
@@ -1111,6 +1123,8 @@ def set_download_source(db: PacksDB, pack_id: str, url: str, *,
     if kind == "manual":
         note = host_note(url)
     fields = {"bound_source": url, "source_override": True}
+    if entry.get("bound_source") != url:
+        fields["asset_regex"] = None
     if asset_regex is not None:
         fields["asset_regex"] = asset_regex
     db.update_entry(pack_id, fields)
@@ -1268,20 +1282,39 @@ def list_backups(cfg, kind: str | None = None) -> list:
 
 
 def restore_backup(cfg, record: dict, target_dir: Path) -> Path:
-    """把备份还原到安装目录（覆盖同名）。返回落盘路径。"""
-    src: Path = record["path"]
+    """先暂存完整副本并备份当前内容，再原子恢复；失败保留当前文件。"""
+    src = Path(record["path"])
     if not src.exists():
         raise PacksError(f"备份不存在: {src}")
+    name = record.get("original_name") or re.sub(
+        r'\.\d{8}_\d{6}(?:\.\d+)?(?=\.zip$|$)', '', record["file_name"])
+    if not _safe_component(name):
+        raise PacksError("备份文件名不安全，已拒绝恢复")
     target_dir.mkdir(parents=True, exist_ok=True)
-    dest = target_dir / record["file_name"]
-    if src.is_dir():
+    dest = target_dir / name
+    if src.is_symlink() or dest.is_symlink() or dest.resolve().parent != target_dir.resolve():
+        raise PacksError("备份或恢复目标是外部链接，已拒绝恢复")
+    with tempfile.TemporaryDirectory(dir=target_dir, prefix='.restore-') as work:
+        staging = Path(work) / name
+        if src.is_dir():
+            shutil.copytree(src, staging)
+        else:
+            shutil.copy2(src, staging)
+        kind = next((k for k, dirname in DIR_NAMES.items()
+                     if record.get('kind') in (k, dirname)), None)
         if dest.exists():
-            shutil.rmtree(dest, ignore_errors=True)
-        shutil.copytree(src, dest)
-    else:
-        if dest.exists():
-            dest.unlink()
-        shutil.copy2(src, dest)
+            if kind is None or not record.get('pack_id'):
+                raise PacksError("备份记录缺少条目信息，无法安全备份当前文件")
+            backup_existing(cfg, kind, record['pack_id'], dest)
+        displaced = Path(work) / 'previous'
+        if dest.is_dir():
+            os.replace(dest, displaced)
+        try:
+            os.replace(staging, dest)
+        except BaseException:
+            if displaced.exists():
+                os.replace(displaced, dest)
+            raise
     utils.append_log(cfg.data_dir, f"恢复资源包备份 {record['file_name']} → {dest}")
     return dest
 
@@ -1315,11 +1348,16 @@ def install_asset(cfg, entry: dict, asset, *, progress_cb=None,
     valid, note = validate_pack(cache, kind)
     if not valid:
         raise PacksError(f"下载文件校验失败: {note}")
+    expected_size = getattr(asset, 'size', None)
+    if expected_size and cache.stat().st_size != expected_size:
+        raise PacksError("下载文件大小与上游声明不符，已拒绝替换")
     folder.mkdir(parents=True, exist_ok=True)
     dest = folder / file_name
     if dest.is_symlink() or dest.resolve().parent != folder.resolve():
         raise PacksError(f"安装目标超出指定目录: {dest}")
     if previous_file is not None:
+        if previous_file.is_symlink() or previous_file.resolve().parent != folder.resolve():
+            raise PacksError("旧包超出指定安装目录，已拒绝替换")
         backup_existing(cfg, kind, entry["id"], previous_file)
     backup_existing(cfg, kind, entry["id"], dest)
     staging = None
@@ -1332,7 +1370,10 @@ def install_asset(cfg, entry: dict, asset, *, progress_cb=None,
         raise PacksError(f"写入 {dest} 失败（游戏/服务端可能正在运行）: {e}")
     finally:
         if staging is not None:
-            staging.unlink(missing_ok=True)
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                pass
     version = (normalize_version(getattr(asset, "version", None))
                or entry.get("installed_version"))
     utils.append_log(
@@ -1377,7 +1418,11 @@ def plan_install(cfg, db: PacksDB, entries: list, *, results: dict | None = None
         if res is None:
             if progress_cb:
                 progress_cb(f"查询 {name} 的下载源...")
-            res = list_assets(cfg, entry)
+            try:
+                res = list_assets(cfg, entry)
+            except Exception as error:
+                plans.append(InstallPlanItem(entry['id'], name, kind, 'error', detail=f'查询失败: {error}'))
+                continue
             if results is not None:
                 results[entry["id"]] = res
         if res.status == "unsupported":
@@ -1390,7 +1435,11 @@ def plan_install(cfg, db: PacksDB, entries: list, *, results: dict | None = None
                                          detail=res.note or "没有可下载文件",
                                          url=res.url))
             continue
-        chosen = pick_asset(res, entry)
+        try:
+            chosen = pick_asset(res, entry)
+        except (PacksError, ValueError, TypeError) as error:
+            plans.append(InstallPlanItem(entry['id'], name, kind, 'error', detail=str(error)))
+            continue
         rec = db.installed(kind).get(entry["id"]) or {}
         local_ver = rec.get("version")
         if chosen is None:
@@ -1449,12 +1498,15 @@ def apply_install(cfg, db: PacksDB, entry: dict, asset, *, progress_cb=None,
     try:
         dest = install_asset(cfg, entry, asset, progress_cb=progress_cb,
                              target_dir=target_dir, previous_file=old)
-        # 只处理当前目标目录中该条目记录的旧 zip，保留其他文件及外部路径。
-        if (old is not None and old != dest and old.is_file() and not old.is_symlink()
-                and old.suffix.lower() == ".zip" and old.resolve().parent == dest.parent.resolve()):
-            old.unlink()
     except (PacksError, net.HttpError, OSError) as e:
         return False, f"安装失败: {e}"
+    leftover = ''
+    if (old is not None and old != dest and old.is_file() and not old.is_symlink()
+            and old.suffix.lower() == ".zip" and old.resolve().parent == dest.parent.resolve()):
+        try:
+            old.unlink()
+        except OSError:
+            leftover = f'旧文件 {old.name} 被占用，请关闭游戏后移除重复包'
     info = entry.get("_last_install") or {}
     db.set_installed(kind, entry["id"], {
         "file_name": info.get("file_name") or dest.name,
@@ -1462,11 +1514,11 @@ def apply_install(cfg, db: PacksDB, entry: dict, asset, *, progress_cb=None,
         "version": info.get("version"),
         "installed_at": utils.now_str(),
         "valid": info.get("valid"),
-        "note": info.get("note") or "",
+        "note": '；'.join(s for s in (info.get("note"), leftover) if s),
         "source_url": getattr(asset, "url", ""),
     })
     db.add_alias(entry["id"], dest.stem if not dest.is_dir() else dest.name)
-    note = info.get("note") or ""
+    note = '；'.join(s for s in (info.get("note"), leftover) if s)
     return True, (f"已安装到 {dest}" + (f"（提示: {note}）" if note else ""))
 
 
@@ -1487,7 +1539,11 @@ def reconcile_installed(cfg, db: PacksDB, *, kinds=None) -> dict:
             live[kind] = {}
             continue
         # 列表刷新只关心文件名与匹配关系，不算文件夹体积（大包会明显卡）
-        files = scan_pack_dir(folder, kind, with_size=False)
+        try:
+            files = scan_pack_dir(folder, kind, with_size=False, strict=True)
+        except OSError:
+            live[kind] = {}
+            continue  # 读取失败不等于空目录，保留该类型全部安装记录。
         entries = db.by_kind(kind)
         for f in files:
             f.pack_id, f.match_quality = match_pack(f, entries)

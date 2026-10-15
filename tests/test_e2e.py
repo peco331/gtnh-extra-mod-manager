@@ -401,7 +401,7 @@ class TestE2E(unittest.TestCase):
 
     def test_uptodate_compare(self):
         self.assertEqual(updater.version_status("1.0.0", "1.0.0"), "uptodate")
-        self.assertEqual(updater.version_status("1.0.0", "0.9.0"), "uptodate")
+        self.assertEqual(updater.version_status("1.0.0", "0.9.0"), "local_newer")
         self.assertEqual(updater.version_status("dev-build", "1.0.0"), "unknown")
 
     def test_operation_log(self):

@@ -9,6 +9,23 @@ from pathlib import Path
 from . import utils
 
 
+def merge_records(records):
+    """合并同一条目的历史 ID 状态：锁定从严保留，远端缓存取最近检查结果。"""
+    records = [r for r in records if isinstance(r, dict)]
+    if not records:
+        return {}
+    ordered = sorted(records, key=lambda r: str(r.get("updated_at") or r.get("install_date") or ""))
+    result = {}
+    for record in ordered:
+        result.update(record)
+    result["locked"] = any(r.get("locked") for r in records)
+    checked = max(records, key=lambda r: str(r.get("last_checked") or ""))
+    for key in ("last_checked", "last_remote_version", "last_remote_date"):
+        if key in checked:
+            result[key] = checked[key]
+    return result
+
+
 class InstalledDB:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -52,7 +69,7 @@ class InstalledDB:
                 disk_inst = disk.get("installed") or {}
                 for side in ("client", "server"):
                     disk_side = disk_inst.get(side) or {}
-                    mine = (self.data.get(side) or {})
+                    mine = self.data.setdefault(side, {})
                     for mod_id, rec in disk_side.items():
                         if not isinstance(rec, dict):
                             continue
@@ -71,6 +88,27 @@ class InstalledDB:
     # ---- 访问 ----
     def get(self, side: str, mod_id: str):
         return self.data.get(side, {}).get(mod_id)
+
+    def merged_record(self, side: str, mod_ids):
+        return merge_records(self.get(side, mid) for mid in mod_ids)
+
+    def remap_ids(self, redirects: dict) -> int:
+        """在目录迁移后合并旧 ID，并阻止 save() 从磁盘复活旧记录。"""
+        count = 0
+        for side in ("client", "server"):
+            grouped = {}
+            for old_id, canonical in redirects.items():
+                if self.get(side, old_id) is not None:
+                    grouped.setdefault(canonical, []).append(old_id)
+            for canonical, old_ids in grouped.items():
+                fields = self.merged_record(side, [canonical, *old_ids])
+                self.set(side, canonical, save=False, **fields)
+                for old_id in old_ids:
+                    self.remove(side, old_id, save=False)
+                    count += 1
+        if count:
+            self.save()
+        return count
 
     def set(self, side: str, mod_id: str, *, save: bool = True, **fields) -> None:
         rec = self.data.setdefault(side, {}).setdefault(mod_id, {})

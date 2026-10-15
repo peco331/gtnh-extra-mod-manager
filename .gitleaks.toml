@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+condition = 'AND'
+description = 'Public QQ invitation URLs in third-party wiki fixture'
+paths = ['''(^|/)tests/fixtures/wiki_sample\.txt$''']
+regexTarget = 'line'
+regexes = ['''https://qm\.qq\.com/cgi-bin/qm/qr\?[^\s<>]+''']

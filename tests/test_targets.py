@@ -93,6 +93,21 @@ class TestTargets(unittest.TestCase):
             opts = src.list_versions()
         self.assertEqual([x.version for x in opts], ['2.0-beta1', '8.0'])
 
+    def test_wtct_rc_releases_remain_installable(self):
+        data = [release(tag, [f'wtct-{tag}.jar', f'wtct-{tag}-dev.jar',
+                              f'wtct-{tag}-sources.jar', f'wtct-{tag}-predowngrade.jar'],
+                        prerelease=True)
+                for tag in ('1.0.63-rc1', '1.0.49-rc1', '1.0.25-rc1')]
+        src = GitHubSource('233max258', 'Wtcts-1.7.10')
+        with patch.object(src, '_api', return_value=(data, 'fresh')):
+            info = src.check(None)
+            opts = src.list_versions()
+        self.assertEqual(info.latest_version, '1.0.63-rc1')
+        self.assertEqual(info.candidates[0].file_name, 'wtct-1.0.63-rc1.jar')
+        self.assertEqual([o.version for o in opts],
+                         ['1.0.63-rc1', '1.0.49-rc1', '1.0.25-rc1'])
+        self.assertTrue(all(o.target_status == 'eligible' for o in opts))
+
     def test_mixed_assets_and_unknown(self):
         src = GitHubSource('owner', 'Demo')
         data = [release('4.0', ['Demo-4.0.jar', 'Demo-1.21.1-4.0.jar',

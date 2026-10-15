@@ -113,19 +113,21 @@ class Config:
 
     @property
     def github_token(self) -> str:
-        return self.data.get("github_token") or ""
+        return (self.data.get("github_token") or "").strip()
 
     @property
     def check_interval_hours(self) -> float:
         try:
-            return float(self.data.get("check_interval_hours") or 6)
+            import math
+            value = float(self.data.get("check_interval_hours", 6))
+            return value if math.isfinite(value) and value >= 0 else 6.0
         except (TypeError, ValueError):
             return 6.0
 
     @property
     def backup_keep(self) -> int:
         try:
-            return int(self.data.get("backup_keep") or 3)
+            return max(1, int(self.data.get("backup_keep", 3)))
         except (TypeError, ValueError):
             return 3
 

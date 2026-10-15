@@ -61,7 +61,7 @@ def _token_abbrev_match(f_tokens: list, e_tokens: list) -> bool:
     return True
 
 
-def scan_folder(folder: Path) -> list:
+def scan_folder(folder: Path, *, strict: bool = False) -> list:
     """扫描 mods 目录，返回 InstalledFile 列表（仅 .jar 与 .jar.disabled）。"""
     out = []
     if not folder or not folder.is_dir():
@@ -69,6 +69,8 @@ def scan_folder(folder: Path) -> list:
     try:
         files = sorted(folder.iterdir(), key=lambda p: p.name.lower())
     except OSError:
+        if strict:
+            raise
         return out
     for p in files:
         name = p.name
@@ -118,13 +120,17 @@ def match_db(f: InstalledFile, entries: list) -> tuple[str | None, str]:
             elif len(norm) >= MIN_FUZZY_LEN and nc.startswith(norm):
                 abbrev.append((len(nc), e["id"]))
     if exact:
-        return exact[0], "exact"
+        return (exact[0], "exact") if len(set(exact)) == 1 else (None, "ambiguous")
     if prefix:
         # 最长前缀最具体：foamfixanimations → FoamFix-Animations 而非 FoamFix
-        return max(prefix)[1], "prefix"
+        best_length = max(n for n, _mid in prefix)
+        ids = {mid for n, mid in prefix if n == best_length}
+        return (ids.pop(), "prefix") if len(ids) == 1 else (None, "ambiguous")
     if abbrev:
         # 最短条目名最可能是缩写目标
-        return min(abbrev)[1], "abbrev"
+        best_length = min(n for n, _mid in abbrev)
+        ids = {mid for n, mid in abbrev if n == best_length}
+        return (ids.pop(), "abbrev") if len(ids) == 1 else (None, "ambiguous")
     # 词级缩写：NEC-Rework → NeverEnoughCharacters-Rework
     f_tokens = _word_tokens(f.name_part)
     token_cands = []
@@ -132,7 +138,9 @@ def match_db(f: InstalledFile, entries: list) -> tuple[str | None, str]:
         if _token_abbrev_match(f_tokens, _word_tokens(e.get("name_en") or "")):
             token_cands.append((len(e.get("name_en") or ""), e["id"]))
     if token_cands:
-        return min(token_cands)[1], "abbrev"
+        best_length = min(n for n, _mid in token_cands)
+        ids = {mid for n, mid in token_cands if n == best_length}
+        return (ids.pop(), "abbrev") if len(ids) == 1 else (None, "ambiguous")
     return None, "none"
 
 

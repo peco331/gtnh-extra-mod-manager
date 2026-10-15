@@ -54,11 +54,12 @@ def _clean(s: str) -> str:
     s = re.sub(r"^v(?=\d)", "", s)
     # 仅剥离"已知MC版本 + 分隔符"前缀，避免误伤 1.2.3-rc1 这类版本号
     for mc in KNOWN_MC_VERSIONS:
-        if s.startswith(mc) and len(s) > len(mc) and s[len(mc)] in "-_.":
+        if (s.startswith(mc) and len(s) > len(mc) and s[len(mc)] in "-_."
+                and re.match(r"v?\d", s[len(mc) + 1:])):
             s = s[len(mc) + 1:]
             break
     m = re.match(r"^mc(1\.\d{1,2}(?:\.\d{1,2})?)[\-_.]", s)
-    if m and m.group(1) in _MC_SET:
+    if m and m.group(1) in _MC_SET and re.match(r"v?\d", s[m.end():]):
         s = s[m.end():]
     return s
 
@@ -204,14 +205,18 @@ def _split_mc_mod_version_raw(stem: str):
     mc_idx = None
     for i, p in enumerate(parts[:-1]):
         m = MC_VERSION_RE.match(p)
-        if m and m.group(2) in _MC_SET:
+        if m and m.group(2) in _MC_SET and (m.group(1)
+                or re.match(r"^[vV]?\d", parts[i + 1])
+                or (i >= 2 and re.match(r"^[vV]?\d", parts[i - 1]))):
             mc_idx = i
             break
     if mc_idx is None:
         for i, p in enumerate(parts[:-1]):
             # 通用锚点要求 MC 段之后是 ASCII 版本段："dualhotbar-1.61-超长快捷栏"
             # 的 1.61 不是 MC 版本，后面跟着的中文描述也不是版本号
-            if MC_VERSION_RE.match(p) and parts[i + 1].isascii():
+            m = MC_VERSION_RE.match(p)
+            if m and (m.group(1) or (int(m.group(2).split('.')[1]) >= 8
+                        and re.match(r"^[vV]?\d", parts[i + 1]))):
                 mc_idx = i
                 break
     if mc_idx is not None:

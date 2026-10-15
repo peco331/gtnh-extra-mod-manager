@@ -100,6 +100,107 @@ class TestGuiSmoke(unittest.TestCase):
     def test_app_builds(self):
         self.assertTrue(self.app.inst_tree["columns"])
 
+    def test_mod_asset_picker_requires_and_returns_explicit_choice(self):
+        from gtnhmod.sources import DownloadCandidate
+        candidates = [DownloadCandidate('https://example.invalid/a.jar', 'a.jar'),
+                      DownloadCandidate('https://example.invalid/b.jar', 'b.jar')]
+        def choose_second():
+            top = next(w for w in self.app.root.winfo_children()
+                       if isinstance(w, tk.Toplevel) and w.title() == '选择下载资产')
+            controls = list(_walk(top))
+            lb = next(w for w in controls if isinstance(w, tk.Listbox))
+            self.assertFalse(lb.curselection())
+            lb.selection_set(1)
+            next(w for w in controls if isinstance(w, ttk.Button)
+                 and w.cget('text') == '使用选中文件').invoke()
+        self.app.root.after(100, choose_second)
+        self.assertIs(self.app._mod_asset_picker(candidates), candidates[1])
+
+    def test_nested_dialog_restores_parent_modal_grab(self):
+        parent = self.app._dialog('父窗口')
+        child = self.app._dialog('子窗口')
+        self.assertIs(self.app.root.grab_current(), child)
+        child.destroy()
+        self.assertIs(self.app.root.grab_current(), parent)
+        parent.destroy()
+
+    def test_settings_scrolls_at_minimum_window_size_and_save_stays_visible(self):
+        old_geometry = self.app.root.geometry()
+        old_tab = self.app.nb.index('current')
+        try:
+            self.app.root.deiconify()
+            self.app.root.geometry('980x640')
+            self.app.nb.select(5)
+            self.app.root.update()
+            canvas = self.app.settings_canvas
+            region = tuple(float(v) for v in canvas.cget('scrollregion').split())
+            self.assertGreater(region[3], canvas.winfo_height())
+            self.assertTrue(self.app.settings_save_button.winfo_ismapped())
+            canvas.yview_moveto(1)
+            self.app.root.update()
+            self.assertGreater(canvas.yview()[0], 0)
+        finally:
+            self.app.nb.select(old_tab)
+            self.app.root.geometry(old_geometry)
+            self.app.root.withdraw()
+
+    def test_custom_source_regex_row_does_not_overlap_save_button(self):
+        mid = self.app.db.add_custom({'name_en': 'ReviewDemo', 'source_type': 'github',
+                  'source': {'owner': 'owner', 'repo': 'ReviewDemo', 'target_profile': 'gtnh',
+                             'asset_regex': 'runtime', 'tag_regex': 'GTNH'}})
+        try:
+            self.app._custom_source_dialog(self.app.db.get(mid))
+            top = next(w for w in self.app.root.winfo_children()
+                       if isinstance(w, tk.Toplevel) and w.title() == '编辑自定义源')
+            controls = list(_walk(top))
+            regex = next(w for w in controls if isinstance(w, ttk.Entry)
+                         and w.grid_info().get('row') == 5)
+            save = next(w for w in controls if isinstance(w, ttk.Button) and w.cget('text') == '保存')
+            self.assertEqual(regex.get(), 'runtime')
+            self.assertNotEqual(regex.grid_info()['row'], save.grid_info()['row'])
+            save.invoke()
+            updated = self.app.db.get(mid)
+            self.assertEqual(updated['source']['target_profile'], 'gtnh')
+            self.assertEqual(updated['source']['tag_regex'], 'GTNH')
+            self.assertEqual(updated['source']['asset_regex'], 'runtime')
+        finally:
+            self.app.db.remove_custom(mid)
+
+    def test_manual_install_results_use_one_summary_without_browser_prompts(self):
+        entry = {'id': 'demo', 'urls': {'github': 'https://github.com/owner/Demo'}}
+        rows = [{'action': 'manual', 'side': s, 'name': 'Demo', 'note': '需手动', 'entry': entry}
+                for s in ('client', 'server')]
+        with mock.patch.object(self.app, '_install_summary_dialog') as summary, \
+                mock.patch.object(gui.messagebox, 'askyesno') as ask, \
+                mock.patch.object(self.app, 'refresh_all'):
+            self.app._on_install_batch_done(rows)
+        summary.assert_called_once_with(rows)
+        ask.assert_not_called()
+
+    def test_gui_logs_are_persisted(self):
+        marker = 'review: simulated upstream request failed'
+        self.app._log(marker)
+        content = gui.utils.log_file_path(self.app.cfg.data_dir).read_text(encoding='utf-8')
+        self.assertIn(marker, content)
+
+    def test_install_summary_download_button_deduplicates_two_sides(self):
+        entry = {'id': 'demo', 'name_en': 'Demo', 'source_type': 'github',
+                 'source': {'owner': 'owner', 'repo': 'Demo'},
+                 'urls': {'github': 'https://github.com/owner/Demo'}}
+        rows = [{'action': 'manual', 'name': 'Demo', 'side': side, 'entry': entry}
+                for side in ('client', 'server')]
+        self.app._install_summary_dialog(rows)
+        top = next(w for w in self.app.root.winfo_children()
+                   if isinstance(w, tk.Toplevel) and w.title() == '安装结果')
+        try:
+            button = next(w for w in _walk(top) if isinstance(w, ttk.Button)
+                          and w.cget('text') == '打开手动处理下载页')
+            with mock.patch.object(gui.webbrowser, 'open') as open_page:
+                button.invoke()
+            open_page.assert_called_once_with('https://github.com/owner/Demo')
+        finally:
+            top.destroy()
+
     def test_source_confirmation_requires_explicit_yes(self):
         entry = {'id': 'demo', 'name_en': 'Demo', 'source_type': 'github',
                  'source': {'owner': 'owner', 'repo': 'demo'}}
@@ -534,6 +635,189 @@ class TestPacksTabSmoke(unittest.TestCase):
         self.app.refresh_packs()
         txt = self.app.pack_dir_label.cget("text")
         self.assertTrue(txt.startswith("安装目录："), txt)
+
+
+class TestCatalogInstallationMarks(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import json
+        from gtnhmod.config import Config
+        from tests.test_catalog_identity import duplicate_pair, entry
+        cls.tmp = Path(tempfile.mkdtemp(prefix="gtnh_gui_identity_"))
+        cfg = Config(cls.tmp / "data")
+        rows, cls.expected = [], {}
+        for side in ("client", "server"):
+            folder = cls.tmp / side
+            folder.mkdir()
+            cfg.data["mods_folders"][side] = str(folder)
+        for name, alias, prefix in (
+                ("GT-Simple-Wireless-Network", "gtswn", "GTSWN"),
+                ("GT-Interesting-Thing", "gtit", "GTIT"),
+                ("GT-Steam-Reborn", "gtsr", "GTSR"),
+                ("Twist Space Technology Mod", "TwistSpaceTechnology", "TST"),
+                ("Programmable Hatch Mod", "programmablehatches", "PH")):
+            old, current = duplicate_pair(name, alias, prefix)
+            current["aliases"] = [alias]
+            rows.extend([current, old])
+            cls.expected[old["id"]] = f"{alias}-1.0.jar"
+            for side in ("client", "server"):
+                (cfg.mods_dir(side) / cls.expected[old["id"]]).write_bytes(b"fixture")
+        # 单端安装和未安装条目，验证端别与“仅未安装”过滤。
+        single = entry("ClientOnly", aliases=["ClientOnly"])
+        rows.extend([single, entry("NotInstalled")])
+        (cfg.mods_dir("client") / "ClientOnly-1.0.jar.disabled").write_bytes(b"fixture")
+        cfg.save()
+        (cls.tmp / "data" / "mods_db.json").write_text(
+            json.dumps({"mods": rows}), encoding="utf-8")
+        cls.app = _new_app(cls.tmp / "data")
+        cls.app.root.update_idletasks()
+
+    @classmethod
+    def tearDownClass(cls):
+        _clear_app(cls.app)
+        cls.app = None
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+        gc.collect()
+
+    def setUp(self):
+        self.app.only_uninstalled.set(False)
+        self.app.add_search.set("")
+        self.app.refresh_installed()
+        self.app.refresh_addable()
+        self.app.refresh_unmanaged()
+
+    def test_duplicate_wiki_entries_show_installed_on_both_pages(self):
+        for mid in self.expected:
+            with self.subTest(mid=mid):
+                self.assertTrue(self.app.inst_tree.exists(mid))
+                self.assertEqual(self.app.add_tree.set(mid, "installed"), "双端")
+                self.assertTrue(self.app.add_tree.set(mid, "name").startswith("✓ "))
+                self.assertNotIn("[[", self.app.add_tree.set(mid, "name"))
+                self.assertIn("inst", self.app.add_tree.item(mid, "tags"))
+
+    def test_freshly_installed_aliases_do_not_appear_as_unmanaged(self):
+        unmanaged = {f.file_name for files in gui.updater.unmatched_files(
+            self.app.cfg, self.app.db).values() for f in files}
+        self.assertFalse(set(self.expected.values()).intersection(unmanaged))
+        self.assertEqual(self.app.um_tree.get_children(), ())
+
+    def test_uninstalled_filter_and_disabled_single_side_mark(self):
+        self.assertEqual(self.app.add_tree.set("clientonly", "installed"), "仅客户端")
+        self.app.only_uninstalled.set(True)
+        self.app.refresh_addable()
+        self.assertEqual(self.app.add_tree.get_children(), ("notinstalled",))
+
+    def test_wiki_refresh_keeps_marks_and_unique_ids(self):
+        from tests.test_catalog_identity import entry
+        fresh = [entry(e["name_en"], aliases=[]) for e in self.app.db.wiki_mods()]
+        self.app.db.merge_wiki(fresh)
+        self.app.refresh_all()
+        for mid in self.expected:
+            self.assertEqual(self.app.add_tree.set(mid, "installed"), "双端")
+        self.assertEqual(len(self.app.db.all()), 7)
+
+    def test_f5_rescans_installed_marks_after_external_file_change(self):
+        path = self.app.cfg.mods_dir("client") / "NotInstalled-1.0.jar"
+        self.app.nb.select(1)
+        self.app.root.update()
+        self.assertEqual(self.app.add_tree.set("notinstalled", "installed"), "—")
+        try:
+            path.write_bytes(b"fixture")
+            self.app._refresh_current_tab()
+            self.assertEqual(self.app.add_tree.set("notinstalled", "installed"), "仅客户端")
+        finally:
+            path.unlink(missing_ok=True)
+            self.app._merged_cache = None
+
+
+class TestBackupOverview(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="gtnh_backup_gui_"))
+        cls.app = _new_app(cls.tmp)
+
+    @classmethod
+    def tearDownClass(cls):
+        _clear_app(cls.app)
+        cls.app = None
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+        gc.collect()
+
+    def setUp(self):
+        self.folder = self.app.cfg.backup_dir / "client" / self._testMethodName
+        self.folder.mkdir(parents=True)
+        self.files = [self.folder / f"20261015_02000{i}_Demo-{i}.jar" for i in range(3)]
+        for path in self.files:
+            path.write_bytes(b"backup")
+        self.app._backup_overview_dialog()
+        self.top = next(w for w in self.app.root.winfo_children()
+                        if isinstance(w, tk.Toplevel) and w.title() == "备份管理（全部）")
+        self.tree = next(w for w in _walk(self.top) if isinstance(w, ttk.Treeview))
+
+    def tearDown(self):
+        self.top.destroy()
+        for path in self.files:
+            path.unlink(missing_ok=True)
+        self.folder.rmdir()
+
+    def button(self, text):
+        return next(w for w in _walk(self.top) if isinstance(w, ttk.Button) and w.cget("text") == text)
+
+    def test_no_selection_explains_how_to_locate(self):
+        with mock.patch.object(gui.messagebox, "showinfo") as info, \
+                mock.patch.object(self.app, "_reveal") as reveal:
+            self.button("定位选中备份").invoke()
+        info.assert_called_once()
+        reveal.assert_not_called()
+
+    def test_selected_backup_is_revealed_and_double_click_is_bound(self):
+        iid = self.tree.get_children()[0]
+        self.tree.selection_set(iid)
+        with mock.patch.object(self.app, "_reveal") as reveal:
+            self.button("定位选中备份").invoke()
+        self.assertEqual(reveal.call_args.args[0], Path(iid.split("|", 2)[2]))
+        self.assertTrue(self.tree.bind("<Double-Button-1>"))
+        self.assertTrue(self.tree.bind("<Return>"))
+
+    def test_open_backup_directory_does_not_require_a_selection(self):
+        with mock.patch.object(self.app, "_reveal") as reveal:
+            self.button("打开备份目录").invoke()
+        reveal.assert_called_once_with(self.app.cfg.backup_dir)
+
+    def test_delete_only_removes_selected_file_without_pruning_others(self):
+        self.app.cfg.data["backup_keep"] = 1
+        iid = self.tree.get_children()[0]
+        selected = Path(iid.split("|", 2)[2])
+        self.tree.selection_set(iid)
+        with mock.patch.object(gui.messagebox, "askyesno", return_value=True):
+            self.button("删除选中").invoke()
+        self.assertFalse(selected.exists())
+        self.assertTrue(all(p.exists() for p in self.files if p != selected))
+        self.assertEqual(len(self.tree.get_children()), 2)
+        self.button("刷新").invoke()
+        self.assertEqual(len(self.tree.get_children()), 2)
+
+    def test_missing_file_has_visible_feedback_and_does_not_launch_explorer(self):
+        path = self.files[0]
+        path.unlink()
+        with mock.patch.object(gui.messagebox, "showinfo") as info, \
+                mock.patch.object(gui.subprocess, "Popen") as launch:
+            self.app._reveal(path)
+        info.assert_called_once()
+        launch.assert_not_called()
+
+    def test_reveal_handles_file_paths_with_spaces(self):
+        folder = self.folder / "path with spaces"
+        folder.mkdir()
+        path = folder / "backup file.jar"
+        path.write_bytes(b"backup")
+        try:
+            with mock.patch.object(gui.subprocess, "Popen") as launch:
+                self.app._reveal(path)
+            self.assertEqual(launch.call_args.args[0], ["explorer.exe", f"/select,{path.resolve()}"])
+        finally:
+            path.unlink()
+            folder.rmdir()
 
 
 if __name__ == "__main__":

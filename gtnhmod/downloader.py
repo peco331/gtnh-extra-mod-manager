@@ -173,13 +173,16 @@ def _cand_cache_path(cand, dl_cache_dir: Path) -> Path:
     return dl_cache_dir / f"{url_hash}_{cand.file_name}"
 
 
-def _validate_candidate(cand) -> None:
+def _validate_candidate(cand, *, allow_disabled: bool = False) -> None:
     """拒绝不安全的上游文件名；目标与缓存都只能落在应用选定目录中。"""
     name = str(getattr(cand, "file_name", "") or "")
-    if (not name or name in (".", "..") or "\x00" in name or
-            "/" in name or "\\" in name or Path(name).name != name):
+    if (not name or name in (".", "..") or
+            re.search(r'[<>:"/\\|?*\x00-\x1f]', name) or name.endswith((".", " ")) or
+            re.match(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", name, re.I)
+            or Path(name).name != name):
         raise VerifyError("下载资产文件名不安全，已拒绝写入")
-    if not name.lower().endswith(".jar"):
+    if not (name.lower().endswith(".jar") or
+            (allow_disabled and name.lower().endswith(".jar.disabled"))):
         raise VerifyError("下载资产不是 jar 文件，已拒绝写入")
 
 
@@ -218,7 +221,8 @@ def _lock_for_cache(path: Path) -> threading.Lock:
 
 def update_with_backup(cand, dest_dir: Path, backup_dir: Path, *,
                        old_file: Path = None, backup_keep: int = 3,
-                       progress_cb=None, proxy=None, dl_cache_dir: Path = None) -> tuple:
+                       progress_cb=None, proxy=None, dl_cache_dir: Path = None,
+                       allow_disabled: bool = False) -> tuple:
     """下载候选并替换安装（旧文件先备份，再移除）。
 
     - cand: DownloadCandidate
@@ -226,8 +230,17 @@ def update_with_backup(cand, dest_dir: Path, backup_dir: Path, *,
     返回 (新文件 Path, 未能移除的旧文件名列表[文件被占用等])。
     """
     dest_dir = Path(dest_dir)
-    _validate_candidate(cand)
+    _validate_candidate(cand, allow_disabled=allow_disabled)
     dest_dir.mkdir(parents=True, exist_ok=True)
+    target = dest_dir / cand.file_name
+    if target.is_symlink() or target.resolve().parent != dest_dir.resolve():
+        raise VerifyError("安装目标超出指定目录，已拒绝替换")
+    if old_file is not None:
+        old_file = Path(old_file)
+        if old_file.is_symlink() or old_file.resolve().parent != dest_dir.resolve():
+            raise VerifyError("旧文件超出指定目录，已拒绝替换")
+        if target.exists() and target.resolve() != old_file.resolve():
+            raise VerifyError(f"目标文件已存在且不是本次替换的旧文件: {target.name}；请先核对重复文件")
     tmp_dir = Path(dl_cache_dir) if dl_cache_dir else dest_dir
     tmp_dir.mkdir(parents=True, exist_ok=True)
     cached_jar = _cand_cache_path(cand, tmp_dir) if dl_cache_dir else None
@@ -277,22 +290,29 @@ def update_with_backup(cand, dest_dir: Path, backup_dir: Path, *,
             except OSError:
                 pass
             raise
-    target = dest_dir / cand.file_name
     # 备份旧文件（若与新文件同名，replace 前先留档）
     victims = []
     if old_file is not None and Path(old_file).exists():
         victims.append(Path(old_file))
     elif old_file is None and target.exists():
         victims.append(target)
-    if victims:
-        backup_dir.mkdir(parents=True, exist_ok=True)
-    for v in victims:
-        bak = _unique_backup_path(backup_dir, v.name)
-        shutil.copy2(v, bak)
     try:
-        atomic_replace(tmp, target)
-    except PermissionError:
-        raise FileBusyError(f"文件被占用，请先关闭游戏/服务端: {target.name}")
+        if victims:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+        for v in victims:
+            bak = _unique_backup_path(backup_dir, v.name)
+            shutil.copy2(v, bak)
+            os.utime(bak, None)
+        try:
+            atomic_replace(tmp, target)
+        except PermissionError:
+            raise FileBusyError(f"文件被占用，请先关闭游戏/服务端: {target.name}")
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
     # 新文件就位后移除旧文件（已备份）；占用失败时报告给调用方，避免静默双jar
     failed = []
     for v in victims:

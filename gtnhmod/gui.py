@@ -6,6 +6,7 @@
 已安装页：一个 mod 一行，安装端别分三类（双端/仅客户端/仅服务端）。
 """
 import json
+import math
 import os
 import queue
 import re
@@ -15,6 +16,7 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
+from copy import deepcopy
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -30,6 +32,8 @@ from .targets import source_confirmation_state
 
 STATUS_CN = {"installed": "已安装", "update_avail": "可更新",
              "update_incompat": "有新版（可能不兼容）",
+             "query_failed": "查询失败", "manual": "需手动处理",
+             "unknown_version": "无法比较版本", "local_newer": "本地版本较新",
              "disabled": "已禁用"}
 STATUS_COLORS = {"update_avail": "#1a7f37", "disabled": "#999999", "installed": "#000000"}
 INSTALL_SIDE_CN = {"both": "双端", "client": "仅客户端", "server": "仅服务端"}
@@ -57,6 +61,7 @@ class GuiApp:
         updater.startup_maintenance(self.cfg, self.db, self.installed)
         self.queue: queue.Queue = queue.Queue()
         self.busy = False
+        self._active_jobs = 0
 
         self.root = tk.Tk()
         self.root.title(f"GTNH 额外MOD管理工具 v{__version__}")
@@ -66,9 +71,11 @@ class GuiApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.report_callback_exception = self._report_cb_exc
         self._merged_cache = None      # build_merged_registry 结果缓存（一次刷新内复用）
+        self._checked_updates = None   # 本次检查的资产与安装状态；更新按钮只消费它
         self._new_ids: set = set()     # 本次刷新wiki新增的mod（查看详情后清除高亮）
         self._pack_updates: dict = {}  # (kind, pack_id) → 可更新到的版本（检查更新后填充）
         self._build_ui()
+        self._sync_update_button()
         self.root.after(100, self._poll_queue)
         # 启动时刷新全部页签（否则自定义源/未受管页首次是空的）
         self.refresh_installed()
@@ -109,6 +116,9 @@ class GuiApp:
 
     def _on_close(self):
         """退出前取消挂起的防抖定时器（避免对已销毁控件的回调）并记忆窗口状态。"""
+        if self.busy or getattr(self, '_active_jobs', 0):
+            messagebox.showinfo("任务尚未完成", "后台任务仍在执行，请等任务完成或关闭当前操作对话框后退出。")
+            return
         for attr in ("_inst_search_after", "_add_search_after", "_um_search_after",
                      "_pack_search_after"):
             if getattr(self, attr, None):
@@ -148,6 +158,7 @@ class GuiApp:
     def _refresh_current_tab(self):
         if self.busy:
             return  # 后台任务进行中，避免并发扫描/重绘
+        self._merged_cache = None
         (self.refresh_installed, self.refresh_addable,
          self.refresh_unmanaged, self.refresh_custom,
          self.refresh_packs, lambda: None)[self.nb.index("current")]()
@@ -338,6 +349,16 @@ class GuiApp:
     def _dialog(self, title, size="600x400", *, modal=True):
         """统一对话框：Esc 关闭、跟随主窗；modal=False 时不抢占主窗口输入。"""
         top = tk.Toplevel(self.root)
+        previous_grab = self.root.grab_current()
+        def restore_grab(event):
+            if event.widget is top and previous_grab is not None:
+                try:
+                    if previous_grab.winfo_exists():
+                        previous_grab.grab_set()
+                        previous_grab.focus_set()
+                except tk.TclError:
+                    pass
+        top.bind('<Destroy>', restore_grab, add='+')
         top.bind("<Escape>", lambda _e: top.destroy())
         top.title(title)
         top.geometry(size)
@@ -356,8 +377,15 @@ class GuiApp:
 
     def _reveal(self, path):
         """在资源管理器中定位文件。"""
+        path = Path(path).resolve()
+        if not path.exists():
+            messagebox.showinfo("文件不存在", f"文件已被移动或清理，请刷新备份列表。\n{path.name}")
+            return
         try:
-            subprocess.Popen(["explorer", f"/select,{path}"])
+            if path.is_dir():
+                os.startfile(str(path))
+            else:
+                subprocess.Popen(["explorer.exe", f"/select,{path}"])
         except OSError as e:
             messagebox.showerror("错误", f"打开资源管理器失败: {e}")
 
@@ -555,6 +583,24 @@ class GuiApp:
                    command=self._bulk_confirm_gtnh_sources).pack(side="left", padx=2)
 
     def _build_settings_tab(self, tab):
+        footer = ttk.Frame(tab)
+        footer.pack(side='bottom', fill='x', padx=12, pady=6)
+        self.settings_save_button = ttk.Button(footer, text='保存全部设置', command=self.save_settings)
+        self.settings_save_button.pack(side='right')
+        ttk.Label(footer, text='目录和常规设置需保存；网络设置可独立保存并测试。').pack(side='left')
+        viewport = ttk.Frame(tab)
+        viewport.pack(fill='both', expand=True)
+        canvas = tk.Canvas(viewport, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(viewport, orient='vertical', command=canvas.yview)
+        scrollbar.pack(side='right', fill='y')
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side='left', fill='both', expand=True)
+        body = ttk.Frame(canvas)
+        window = canvas.create_window((0, 0), window=body, anchor='nw')
+        body.bind('<Configure>', lambda event: canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.bind('<Configure>', lambda event: canvas.itemconfigure(window, width=event.width))
+        self.settings_canvas = canvas
+        tab = body
         # ---- 目录 ----
         f = ttk.LabelFrame(tab, text="mods 目录")
         f.pack(fill="x", padx=12, pady=(12, 6))
@@ -682,10 +728,11 @@ class GuiApp:
 
         tbtns = ttk.Frame(nf)
         tbtns.grid(row=0, column=2, rowspan=3, sticky="ns", padx=8)
-        ttk.Button(tbtns, text="测试 GitHub API", command=self.test_network_settings).pack(fill="x", pady=2)
+        ttk.Button(tbtns, text="保存并测试 GitHub API", command=self.save_and_test_network_settings).pack(fill="x", pady=2)
+        ttk.Button(tbtns, text="仅测试当前输入", command=self.test_network_settings).pack(fill="x", pady=2)
         ttk.Button(tbtns, text="测试下载连通性", command=self.test_download_connectivity).pack(fill="x", pady=2)
 
-        ttk.Label(nf, text="获取 Token: github.com/settings/tokens（只需公开仓库读取权限）",
+        ttk.Label(nf, text="Token: github.com/settings/tokens；保存并测试后即可用于安装/更新。",
                   foreground="#666").grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 4))
         nf.columnconfigure(1, weight=1)
 
@@ -703,7 +750,6 @@ class GuiApp:
         self.gtnh_entry.grid(row=2, column=1, sticky="w", padx=6)
         act = ttk.Frame(gf)
         act.grid(row=3, column=0, columnspan=2, sticky="w", pady=8)
-        ttk.Button(act, text="保存设置", command=self.save_settings).pack(side="left", padx=2)
         ttk.Button(act, text="打开操作日志", command=self._open_log_file).pack(side="left", padx=8)
 
         # ---- Wiki 反爬 Cookie（站点开启 Cloudflare 人机验证后使用）----
@@ -771,8 +817,19 @@ class GuiApp:
         self.backup_entry.insert(0, str(self.cfg.backup_keep))
         self.gtnh_entry.insert(0, self.cfg.data.get("gtnh_version") or "")
 
+        def scroll_settings(event):
+            canvas.yview_scroll(-int(event.delta / 120) or (-1 if event.delta > 0 else 1), 'units')
+            return 'break'
+        def bind_wheel(widget):
+            widget.bind('<MouseWheel>', scroll_settings, add='+')
+            for child in widget.winfo_children():
+                bind_wheel(child)
+        bind_wheel(body)
+        canvas.bind('<MouseWheel>', scroll_settings)
+
     # ---------- 通用 ----------
     def _log(self, msg):
+        utils.append_log(self.cfg.data_dir, msg)
         # 已在底部才自动滚动；用户往上翻看历史时不打扰
         at_bottom = self.log.yview()[1] >= 0.99
         self.log.configure(state="normal")
@@ -798,6 +855,7 @@ class GuiApp:
         state = "disabled" if busy else "normal"
         for b in self.busy_buttons:
             b.configure(state=state)
+        self._sync_update_button()
         if busy:
             self.progress.configure(mode="indeterminate")
             self.progress.start(12)
@@ -841,6 +899,7 @@ class GuiApp:
     def _run_async(self, fn, on_done=None):
         """在后台线程执行 fn()；完成后在主线程回调 on_done(result)。"""
 
+        self._active_jobs = getattr(self, '_active_jobs', 0) + 1
         def worker():
             try:
                 result = fn()
@@ -853,6 +912,7 @@ class GuiApp:
         """切换页签时刷新对应页（设置页除外）。"""
         if self.busy:
             return  # 后台任务进行中（可能正写 packs_db），避免并发读写
+        self._merged_cache = None
         idx = self.nb.index("current")
         (self.refresh_installed, self.refresh_addable,
          self.refresh_unmanaged, self.refresh_custom,
@@ -872,23 +932,28 @@ class GuiApp:
                 elif kind == "_progress":
                     self._on_progress(payload[1])
                 elif kind == "_done":
+                    self._active_jobs = max(0, getattr(self, '_active_jobs', 0) - 1)
                     if payload[0]:
                         payload[0](payload[1])
                 elif kind == "_error":
+                    self._active_jobs = max(0, getattr(self, '_active_jobs', 0) - 1)
                     msg = payload[1]
+                    self._log(f"[错误] {msg}")
+                    self._set_status(f"操作失败：{msg}")
                     if payload[0]:
                         # 有回调的（批量流程逐项跳过等）由回调决定呈现方式，
                         # 避免网络断开时 N 个失败连弹 N 个模态框
                         payload[0](None)
-                        self._log(f"[错误] {msg}")
                     else:
+                        self._set_busy(False)
                         messagebox.showerror("操作失败", msg)
-                        self._log(f"[错误] {msg}")
         except queue.Empty:
             pass
         except Exception:
             # 单个回调异常不能杀死事件泵（否则 busy 永久卡死、界面假死）
             self._report_cb_exc(*sys.exc_info())
+            if not getattr(self, '_active_jobs', 0):
+                self._set_busy(False)
         finally:
             try:
                 self.root.after(100, self._poll_queue)
@@ -1750,6 +1815,7 @@ class GuiApp:
         only_upd = self.only_update.get()
         rows = []
         for m in merged:
+            m = self._checked_status(m)
             if filt != "all" and m["install_side"] != filt:
                 continue
             if only_upd and m["status"] != "update_avail":
@@ -1760,6 +1826,28 @@ class GuiApp:
                 continue
             rows.append(m)
         return rows
+
+    def _checked_status(self, mod):
+        snapshot = getattr(self, "_checked_updates", None)
+        items = [p for p in snapshot["plan"] if p["mod_id"] == mod["mod_id"]] if snapshot else []
+        if not items:
+            return mod
+        mod = dict(mod)
+        actions = {p["action"] for p in items}
+        if "update" in actions:
+            mod["status"] = "update_avail"
+        elif "error" in actions:
+            mod["status"] = "query_failed"
+            mod["latest_version"] = ""
+        elif any("无法比较版本" in (p.get("note") or "") for p in items):
+            mod["status"] = "unknown_version"
+        elif "manual" in actions:
+            mod["status"] = "manual"
+        elif "manual_downgrade" in actions:
+            mod["status"] = "local_newer"
+        else:
+            mod["status"] = "installed"
+        return mod
 
     def refresh_installed(self):
         if not hasattr(self, "inst_tree"):
@@ -1881,17 +1969,45 @@ class GuiApp:
             return
         if not self._dirs_ok():
             return
+        self._checked_updates = None
         self._set_busy(True)
         self._log("开始检查更新（已安装且未锁定的mod）...")
-        progress_cb = lambda s, m: self.queue.put(("log", f"  已检查 {SIDE_LABELS[s]}: {m}"))
+        progress_cb = lambda done, total, name: self._push_progress(
+            done, total, f"检查更新 {done}/{total}: {name}")
         self._run_async(
-            lambda: updater.check_updates(self.cfg, self.db, self.installed,
-                                          progress_cb=progress_cb, force=True),
-            on_done=self._on_check_done)
+            lambda: updater.check_update_plan(self.cfg, self.db, self.installed,
+                                              progress_cb=progress_cb),
+            on_done=self._on_update_check_done)
+
+    def _sync_update_button(self):
+        snapshot = getattr(self, "_checked_updates", None)
+        count = len({p["mod_id"] for p in snapshot["plan"] if p["action"] == "update"}) if snapshot else 0
+        if hasattr(self, "btn_update_all"):
+            self.btn_update_all.configure(text=f"全部更新 ({count})" if snapshot else "全部更新",
+                                          state="normal" if count and not self.busy else "disabled")
+
+    def _on_update_check_done(self, snapshot):
+        self._checked_updates = snapshot
+        self._set_busy(False)
+        if snapshot is None:
+            return
+        for item in snapshot["plan"]:
+            side = "、".join(SIDE_LABELS[s] for s in item["sides"])
+            note = item.get("note") or item["action"]
+            if item["action"] == "update":
+                note = f'v{item["current_version"]} → v{item["target_version"]} 可更新'
+            self._log(f'{"[错误] " if item["action"] == "error" else ""}{side} {item["name"]}: {note}')
+        counts = {action: len({p["mod_id"] for p in snapshot["plan"] if p["action"] == action})
+                  for action in ("update", "uptodate", "manual", "manual_downgrade", "error")}
+        self._log(f'检查完成：{counts["update"]} 个可自动更新，{counts["uptodate"]} 个已最新，'
+                  f'{counts["manual"] + counts["manual_downgrade"]} 个需手动处理，'
+                  f'{counts["error"]} 个查询失败。全部更新将使用本次结果。')
+        self.refresh_installed()
 
     def _on_check_done(self, results):
         if results is None:
-            results = []
+            self._set_busy(False)
+            return
         self._set_busy(False)
         reg = updater.build_registry(self.cfg, self.db, self.installed)
         counts = updater.summarize_check(results, reg)
@@ -1906,7 +2022,11 @@ class GuiApp:
                 continue
             cur = (reg[side].get(mod_id) or {}).get("version")
             st = updater.version_status(cur, info.latest_version)
-            if st == "update":
+            if st == 'local_newer':
+                self._log(f"{SIDE_LABELS[side]} {name}: 本地 v{cur} 高于上游 v{info.latest_version}，不会自动降级")
+            elif st == 'update' and not info.candidates:
+                self._log(f"{SIDE_LABELS[side]} {name}: 有新版 v{info.latest_version}，需手动选择资产或下载")
+            elif st == "update":
                 self._log(f"{SIDE_LABELS[side]} {name}: v{cur} → v{info.latest_version} 可更新")
             elif st == "uptodate":
                 self._log(f"{SIDE_LABELS[side]} {name}: v{cur} 已最新")
@@ -1916,17 +2036,18 @@ class GuiApp:
                 self._log(f"  提示：{info.note}")
             if info.candidates is None and info.latest_version:
                 self._log(f"  （{name} 无自动下载资产，需手动下载）")
-        self._log(f"检查完成：发现 {counts['update']} 个可更新"
-                  + (f"，{counts['error']} 个出错" if counts["error"] else ""))
+        self._log(f"检查完成：{counts['update']} 个可自动更新，{counts['uptodate']} 个已最新，"
+                  f"{counts['manual']} 个需手动处理，{counts['unknown']} 个无法比较，{counts['error']} 个查询失败")
         self.refresh_installed()
 
 
-    def _show_update_plan_dialog(self, plan: list, on_confirm):
+    def _show_update_plan_dialog(self, plan: list, on_confirm, *, checked_at=None, snapshot=None):
         """展示更新计划表格，用户一次确认后执行，不逐个弹窗打扰。"""
         if not plan:
             messagebox.showinfo("提示", "没有需要更新的 mod（全部已是最新或已锁定）。")
             return
-        checked_at = time.monotonic()
+        if checked_at is None:
+            checked_at = time.monotonic()
 
         self._set_busy(True)
         top = self._dialog("确认更新计划", "760x450", modal=False)
@@ -1941,7 +2062,7 @@ class GuiApp:
 
         # 统计
         updatable = [p for p in plan if p["action"] == "update"]
-        ttk.Label(f, text=f"共检查 {len(plan)} 个 mod，其中 {len(updatable)} 个发现新版本（默认均选用最新发布，含测试版）。",
+        ttk.Label(f, text=f"共检查 {len({p['mod_id'] for p in plan})} 个 mod，{len(updatable)} 项端别计划可更新（选用最新发布，含测试版）。",
                   font=FONT).pack(anchor="w", pady=(0, 6))
 
         cols = ("name", "sides", "cur", "target", "prerelease", "status")
@@ -1970,9 +2091,9 @@ class GuiApp:
 
         def execute():
             top.destroy()
-            on_confirm(plan, checked_at=checked_at)
+            on_confirm(plan, checked_at=checked_at, snapshot=snapshot)
 
-        label = (f"立即执行更新 ({len(updatable)} 个)" if updatable
+        label = (f"立即执行更新 ({len(updatable)} 项)" if updatable
                  else "查看检查结果")
         ttk.Button(btns, text=label, command=execute).pack(side="left")
         ttk.Button(btns, text="取消", command=top.destroy).pack(side="right")
@@ -1984,22 +2105,7 @@ class GuiApp:
             return
         if self.busy:
             return
-        target_ids = {m["mod_id"] for m in sel}
-        self._set_busy(True)
-        self._log(f"正在生成更新计划（选中 {len(sel)} 个mod）...")
-
-        def job():
-            reg = updater.build_registry(self.cfg, self.db, self.installed)
-            return updater.build_update_plan(self.cfg, self.db, self.installed,
-                                             target_mod_ids=target_ids, registry=reg)
-
-        def on_plan_ready(plan):
-            self._set_busy(False)
-            if plan is None:
-                return
-            self._show_update_plan_dialog(plan, self._execute_update_plan)
-
-        self._run_async(job, on_done=on_plan_ready)
+        self._use_checked_updates({m["mod_id"] for m in sel})
 
     def _start_update_flow(self, mods, mode="pick"):
         """逐个处理：弹版本选择器 → 更新 → 下一个（单个mod失败不影响其他）。
@@ -2042,7 +2148,7 @@ class GuiApp:
             return
         if not options:
             # manual/curseforge 源无版本列表 → 直接更新到最新
-            self._run_update_one(m, None)
+            self._run_update_one(m, None, prefetched=result)
             return
         cur = m["sides"].get("client") or next(iter(m["sides"].values()))
         ver = self._version_picker(options, current=cur["version"], prefer_latest=True,
@@ -2084,48 +2190,43 @@ class GuiApp:
     def update_all(self):
         if self.busy:
             return
-        self._set_busy(True)
-        self._log("正在扫描所有 mod 并生成更新计划...")
+        self._use_checked_updates()
 
-        def job():
-            reg = updater.build_registry(self.cfg, self.db, self.installed)
-            def cb(done, total, name):
-                self._push_progress(done, total, f"检查更新 {done}/{total}: {name}")
-            return updater.build_update_plan(self.cfg, self.db, self.installed,
-                                             progress_cb=cb, registry=reg)
-
-        def on_plan_ready(plan):
-            self._set_busy(False)
-            if plan is None:
-                return
-            self._show_update_plan_dialog(plan, self._execute_update_plan)
-
-        self._run_async(job, on_done=on_plan_ready)
-
-    def _execute_update_plan(self, plan: list, *, checked_at=None):
-        """一次确认后执行计划中的所有更新项，消除二次联网与多余弹窗。"""
-        if checked_at is not None and time.monotonic() - checked_at >= 300:
-            self._set_busy(True)
-            self._log("更新计划已超过 5 分钟，正在重新检查并等待再次确认...")
-
-            def recheck():
-                registry = updater.build_registry(self.cfg, self.db, self.installed)
-                return updater.build_update_plan(
-                    self.cfg, self.db, self.installed,
-                    target_mod_ids={item["mod_id"] for item in plan},
-                    registry=registry,
-                )
-
-            def on_rechecked(new_plan):
-                self._set_busy(False)
-                if new_plan is not None:
-                    self._show_update_plan_dialog(new_plan, self._execute_update_plan)
-
-            self._run_async(recheck, on_done=on_rechecked)
+    def _use_checked_updates(self, target_ids=None):
+        snapshot = getattr(self, "_checked_updates", None)
+        if not snapshot:
+            messagebox.showinfo("请先检查更新", "请先点击“检查更新”，全部更新只执行本次检查出的可更新项目。")
             return
+        plan = deepcopy([p for p in snapshot["plan"] if p["action"] == "update"
+                         and (target_ids is None or p["mod_id"] in target_ids)])
+        reason = updater.validate_checked_updates(self.cfg, self.db, self.installed, snapshot, plan)
+        if reason:
+            self._checked_updates = None
+            self._sync_update_button()
+            messagebox.showinfo("需要重新检查", reason)
+            return
+        if not plan:
+            messagebox.showinfo("没有可自动更新的项目", "本次检查没有符合条件的更新项目，请查看列表和检查日志。")
+            return
+        self._log(f'使用本次检查结果，准备更新 {len({p["mod_id"] for p in plan})} 个 MOD。')
+        self._show_update_plan_dialog(plan, self._execute_update_plan,
+                                      checked_at=snapshot["checked_at"], snapshot=snapshot)
+
+    def _execute_update_plan(self, plan: list, *, checked_at=None, snapshot=None):
+        """一次确认后执行计划中的所有更新项，消除二次联网与多余弹窗。"""
+        reason = (updater.validate_checked_updates(self.cfg, self.db, self.installed, snapshot, plan)
+                  if snapshot is not None else
+                  ("更新计划已超过 5 分钟，请重新点击“检查更新”。"
+                   if checked_at is not None and time.monotonic() - checked_at >= 300 else None))
+        if reason:
+            self._checked_updates = None
+            self._set_busy(False)
+            messagebox.showinfo("需要重新检查", reason)
+            return
+        self._checked_updates = None
         updatable = [p for p in plan if p["action"] == "update"]
         self._set_busy(True)
-        self._log(f"开始执行更新计划（共 {len(updatable)} 个 mod）...")
+        self._log(f"开始执行更新计划（共 {len(updatable)} 项端别计划）...")
 
         def job():
             results = []
@@ -2144,7 +2245,8 @@ class GuiApp:
                     try:
                         r = updater.update_mod(
                             self.cfg, self.db, self.installed, p["mod_id"], side,
-                            version=p["target_version"],
+                            # 自动计划仍需按此刻的本地版本比较，不能变成强制降级/重装。
+                            version=None,
                             progress_cb=self._download_progress_cb(f"下载 {p['name']}"),
                             prefetched=p["prefetched"]
                         )
@@ -2159,9 +2261,21 @@ class GuiApp:
     def _offer_open_download_page(self, entry):
         """manual 源的引导闭环：询问是否打开下载页（对齐 CLI）。"""
         urls = (entry or {}).get("urls") or {}
-        url = urls.get("curseforge") or urls.get("github")
+        url = updater.current_source_url(entry or {}) or urls.get("preferred") or urls.get("github") or urls.get("curseforge")
         if url and messagebox.askyesno("需要手动下载", f"打开下载页面？\n{url}"):
             webbrowser.open(url)
+
+    @staticmethod
+    def _manual_download_links(entries):
+        items, seen = [], set()
+        for entry in entries:
+            urls = entry.get('urls') or {}
+            url = (updater.current_source_url(entry) or urls.get('preferred')
+                   or urls.get('github') or urls.get('curseforge'))
+            if url and url not in seen:
+                seen.add(url)
+                items.append((entry.get('name_en') or entry.get('id') or '下载页面', url))
+        return items
 
     def _on_update_done(self, results):
         self._set_busy(False)
@@ -2180,8 +2294,6 @@ class GuiApp:
                 self._log(f"{label} {name}: {r.get('note') or '已是最新'}")
             elif r["action"] in ("manual", "manual_downgrade"):
                 self._log(f"{label} {name}: {r.get('note') or '需手动下载'}")
-                if not self.busy:
-                    self._offer_open_download_page(r.get("entry"))
             elif r["action"] == "skipped_incompatible":
                 self._log(f"[跳过] {label} {name}: {r.get('note')}")
             else:
@@ -2191,7 +2303,7 @@ class GuiApp:
             if r.get("leftover"):
                 self._log(f"[提示] {label} 旧版本文件被占用未能移除: {'、'.join(r['leftover'])}"
                           "（请关闭游戏/服务端后右键「清理重复jar」）")
-        self._log(f"完成：成功更新 {n_ok} 个")
+        self._log(f"完成：成功更新 {n_ok} 个端别操作")
         self.refresh_all()
         if results:
             self._update_summary_dialog(results)
@@ -2244,6 +2356,11 @@ class GuiApp:
         btns = ttk.Frame(top)
         btns.pack(fill="x", padx=8, pady=(0, 8))
         ttk.Button(btns, text="关闭", command=top.destroy).pack(side="right")
+        manual_entries = self._manual_download_links(
+            [r.get('entry') for _name, r in groups['manual'] if r.get('entry')])
+        if manual_entries:
+            ttk.Button(btns, text="打开手动处理下载页",
+                       command=lambda: self._open_link_items(manual_entries)).pack(side="left")
 
     def _check_not_busy(self) -> bool:
         """操作前检查；busy 时给出反馈而不是静默吞掉。"""
@@ -2447,6 +2564,7 @@ class GuiApp:
         """右键：只检查这一个mod的更新。"""
         if self.busy:
             return
+        self._checked_updates = None
         self._set_busy(True)
         self._log(f"检查更新: {m['name_en']}...")
         self._run_async(
@@ -2528,19 +2646,12 @@ class GuiApp:
 
     def _backup_overview_dialog(self):
         """全局备份总览：跨mod列出全部备份，支持定位与删除。"""
-        by_side = updater.list_backups(self.cfg)
-        rows = [(side, mod, p) for side in ("client", "server")
-                for mod, files in by_side.get(side, {}).items() for p in files]
         top = self._dialog("备份管理（全部）", "880x480")
-        total_kb = 0
-        for _, _, p in rows:
-            try:
-                total_kb += p.stat().st_size // 1024
-            except OSError:
-                pass
-        ttk.Label(top, text=f"共 {len(rows)} 个备份，合计约 {total_kb // 1024} MB"
-                            "（超出保留数的会在启动时自动清理）",
+        summary = tk.StringVar()
+        ttk.Label(top, textvariable=summary,
                   font=FONT).pack(anchor="w", padx=8, pady=(8, 2))
+        ttk.Label(top, text="选中一行后定位备份，或双击直接定位；删除仅处理选中的文件。",
+                  font=FONT).pack(anchor="w", padx=8, pady=(0, 4))
         cols = ("side", "mod", "file", "time", "size")
         frame = ttk.Frame(top)
         frame.pack(fill="both", expand=True, padx=8, pady=4)
@@ -2553,20 +2664,29 @@ class GuiApp:
         self._attach_scrollbar(tree, frame)
 
         def reload_rows():
+            keep = set(tree.selection())
             tree.delete(*tree.get_children())
             data = updater.list_backups(self.cfg)
-            n = 0
+            n, total_bytes = 0, 0
             for side in ("client", "server"):
                 for mod, files in data.get(side, {}).items():
                     for p in files:
                         try:
-                            ts = self._fmt_time(p.stat().st_mtime)
-                            kb = p.stat().st_size // 1024
+                            stat = p.stat()
+                            stamp = re.match(r"^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})_", p.name)
+                            ts = (f"{stamp[1]}-{stamp[2]}-{stamp[3]} {stamp[4]}:{stamp[5]}:{stamp[6]}"
+                                  if stamp else self._fmt_time(stat.st_ctime))
+                            kb = stat.st_size // 1024
+                            total_bytes += stat.st_size
                         except OSError:
                             ts, kb = "?", "?"
+                        entry = self.db.get(mod) or {}
+                        label = entry.get("name_cn") or entry.get("name_en") or mod
                         tree.insert("", "end", iid=f"{side}|{mod}|{p}",
-                                    values=(SIDE_LABELS[side], mod, p.name, ts, kb))
+                                    values=(SIDE_LABELS[side], label, p.name, ts, kb))
                         n += 1
+            tree.selection_set([iid for iid in keep if tree.exists(iid)])
+            summary.set(f"共 {n} 个备份，合计 {total_bytes / (1024 * 1024):.1f} MB")
             return n
 
         reload_rows()
@@ -2579,8 +2699,20 @@ class GuiApp:
             return got
 
         def do_reveal():
-            for side, mod, p in selected():
-                self._reveal(p)
+            got = selected()
+            if len(got) != 1:
+                messagebox.showinfo("选择备份", "请先选择一个备份文件，再点击定位；也可以双击一行。", parent=top)
+                return
+            self._reveal(got[0][2])
+
+        def double_click(event):
+            iid = tree.identify_row(event.y)
+            if iid:
+                tree.selection_set(iid)
+                do_reveal()
+
+        tree.bind("<Double-Button-1>", double_click)
+        tree.bind("<Return>", lambda _event: do_reveal())
 
         def do_delete():
             if self.busy:
@@ -2588,6 +2720,7 @@ class GuiApp:
                 return
             got = selected()
             if not got:
+                messagebox.showinfo("选择备份", "请先选择要删除的备份文件。", parent=top)
                 return
             if not messagebox.askyesno("删除备份",
                                        f"删除选中的 {len(got)} 个备份文件？（不可恢复）"):
@@ -2601,19 +2734,15 @@ class GuiApp:
                 except OSError as e:
                     messagebox.showerror("删除失败", f"{p.name}: {e}")
             if n:
-                # 只 prune 被删文件所属的目录（不越权清理其他 mod 的备份）
-                from gtnhmod import downloader as _dl
-                touched = {(side, mod) for side, mod, _ in got}
-                for side, mod in touched:
-                    _dl.prune_backups(self.cfg.backup_dir / side / mod,
-                                      self.cfg.backup_keep)
                 reload_rows()
                 self._log(f"已删除 {n} 个备份文件")
 
         btns = ttk.Frame(top)
         btns.pack(fill="x", padx=8, pady=(0, 8))
-        ttk.Button(btns, text="在资源管理器中打开", command=do_reveal).pack(side="left")
+        ttk.Button(btns, text="定位选中备份", command=do_reveal).pack(side="left")
+        ttk.Button(btns, text="打开备份目录", command=lambda: self._reveal(self.cfg.backup_dir)).pack(side="left", padx=6)
         ttk.Button(btns, text="删除选中", command=do_delete).pack(side="left", padx=6)
+        ttk.Button(btns, text="刷新", command=reload_rows).pack(side="left", padx=6)
         ttk.Button(btns, text="关闭", command=top.destroy).pack(side="right")
 
     def _show_inst_detail(self, m):
@@ -3248,7 +3377,7 @@ class GuiApp:
             return
         if not options:
             # manual/curseforge 源无版本列表 → 直接原流程
-            self._run_install(e, sides, None, note)
+            self._run_install(e, sides, None, note, prefetched=result)
             return
         ver = self._version_picker(options, current=None,
                                    title=f"选择要安装的版本 - {e['name_en']}")
@@ -3288,7 +3417,6 @@ class GuiApp:
                 self._log(f"已跳过 {r['name']}: {r.get('note')}")
             elif r["action"] == "manual":
                 self._log(f"{label} {r['name']}: {r.get('note') or '需手动下载'}")
-                self._offer_open_download_page(r.get("entry"))
             elif r["action"] == "skipped_incompatible":
                 self._log(f"[跳过] {label} {r['name']}: {r.get('note')}")
             else:
@@ -3300,6 +3428,28 @@ class GuiApp:
                           "（请关闭游戏/服务端后右键「清理重复jar」）")
         self._log(f"批量安装完成：成功 {n_ok} 个端别操作")
         self.refresh_all()
+        if any(r.get('action') in ('manual', 'error') or r.get('leftover') for r in rs or []):
+            self._install_summary_dialog(rs)
+
+    def _install_summary_dialog(self, results):
+        top = self._dialog('安装结果', '760x420', modal=False)
+        text = tk.Text(top, wrap='word', font=FONT)
+        text.pack(fill='both', expand=True, padx=10, pady=10)
+        labels = {'installed': '安装成功', 'manual': '需手动处理', 'error': '失败', 'skip': '已跳过'}
+        for result in results:
+            text.insert('end', f"{SIDE_LABELS.get(result.get('side'), '')} {result.get('name', '?')}: "
+                        f"{labels.get(result['action'], result['action'])} "
+                        f"{result.get('error') or result.get('note') or result.get('version') or ''}\n")
+            if result.get('leftover'):
+                text.insert('end', '旧文件未移除：' + '、'.join(result['leftover']) + '\n')
+        text.configure(state='disabled')
+        manual = self._manual_download_links(
+            [r.get('entry') for r in results if r.get('action') == 'manual' and r.get('entry')])
+        bar = ttk.Frame(top)
+        bar.pack(fill='x', padx=10, pady=(0, 10))
+        if manual:
+            ttk.Button(bar, text='打开手动处理下载页', command=lambda: self._open_link_items(manual)).pack(side='left')
+        ttk.Button(bar, text='关闭', command=top.destroy).pack(side='right')
 
     def _version_picker(self, options, current=None, title="选择版本", prefer_latest=False):
         """模态版本选择对话框：更新时可优先预选最新版，否则预选已装/推荐版。"""
@@ -3412,6 +3562,12 @@ class GuiApp:
                 messagebox.showinfo("游戏平台需确认", selected.get("target_reason") or
                                     "请在列表右键菜单中核实并确认下载源，再重新获取版本。", parent=top)
                 return
+            if selected.get('asset_ambiguous'):
+                candidate = self._mod_asset_picker(selected.get('candidates') or [])
+                if candidate is None:
+                    return
+                selected['candidates'] = [candidate]
+                selected['asset_ambiguous'] = False
             result["version"] = selected["version"]
             top.destroy()
 
@@ -3432,6 +3588,30 @@ class GuiApp:
         top.grab_set()
         top.wait_window()
         return result["version"]
+
+    def _mod_asset_picker(self, candidates):
+        top = self._dialog('选择下载资产', '640x300')
+        ttk.Label(top, text='同一发布包含多个 jar，请根据用途选择具体文件。').pack(anchor='w', padx=10, pady=10)
+        lb = tk.Listbox(top, exportselection=False)
+        lb.pack(fill='both', expand=True, padx=10)
+        for candidate in candidates:
+            lb.insert('end', candidate.file_name)
+        result = [None]
+        def choose():
+            selection = lb.curselection()
+            if not selection:
+                messagebox.showinfo('请选择文件', '请先选中一个 jar。', parent=top)
+                return
+            result[0] = candidates[selection[0]]
+            top.destroy()
+        bar = ttk.Frame(top)
+        bar.pack(fill='x', padx=10, pady=10)
+        ttk.Button(bar, text='使用选中文件', command=choose).pack(side='left')
+        ttk.Button(bar, text='取消', command=top.destroy).pack(side='right')
+        lb.bind('<Double-Button-1>', lambda event: choose())
+        top.bind('<Return>', lambda event: choose())
+        top.wait_window()
+        return result[0]
 
     def open_link_addable(self):
         sel = self._selected_addable()
@@ -3799,8 +3979,13 @@ class GuiApp:
                                       "manual": "（手动维护，无源）"}.get(k, "源:"))
             if is_local:
                 browse_btn.grid()
-                regex_label.grid()
+                regex_label.grid(row=5, column=0, sticky='w', pady=4)
                 regex_entry.grid(row=5, column=1, sticky="w")
+            elif k == 'github':
+                browse_btn.grid_remove()
+                regex_label.configure(text='下载资产文件名正则（可选）:')
+                regex_label.grid(row=5, column=0, sticky='w', pady=4)
+                regex_entry.grid(row=5, column=1, sticky='w')
             else:
                 browse_btn.grid_remove()
                 regex_label.grid_remove()
@@ -3810,6 +3995,7 @@ class GuiApp:
         kind.trace_add("write", lambda *a: on_kind())
         if initial_type == "github":
             src.insert(0, f"{old_src.get('owner', '')}/{old_src.get('repo', '')}")
+            regex_entry.insert(0, old_src.get('asset_regex') or '')
         elif initial_type == "curseforge":
             src.insert(0, old_urls.get("curseforge") or "")
         elif initial_type == "local_folder":
@@ -3829,13 +4015,19 @@ class GuiApp:
                           "bilibili": None, "other": [], "links": []},
                       "source_override": True}
             if k == "github":
-                parts = src.get().strip().replace("https://github.com/", "").split("/")
-                if len(parts) < 2 or not parts[0] or not parts[1]:
+                raw_source = src.get().strip()
+                url = raw_source if '://' in raw_source else 'https://github.com/' + raw_source
+                repo = wikimod.github_repo_from_url(url)
+                if not repo:
                     messagebox.showwarning("提示", "GitHub源需填 owner/repo", parent=top)
                     return
-                url = f"https://github.com/{parts[0]}/{parts[1]}"
-                fields["source"] = {"owner": parts[0], "repo": parts[1],
-                                     "asset_regex": "", "exclude_regex": wikimod.DEFAULT_EXCLUDE_REGEX}
+                url = f"https://github.com/{repo[0]}/{repo[1]}"
+                fields["source"] = {"owner": repo[0], "repo": repo[1],
+                                     "asset_regex": regex_entry.get().strip(), "exclude_regex": wikimod.DEFAULT_EXCLUDE_REGEX}
+                if initial_type == 'github' and repo == (old_src.get('owner'), old_src.get('repo')):
+                    for key in ('target_profile', 'tag_regex', 'exclude_regex'):
+                        if key in old_src:
+                            fields['source'][key] = old_src[key]
                 fields["urls"].update(github=url, links=[{"url": url, "label": "github"}])
             elif k == "curseforge":
                 url = src.get().strip()
@@ -3849,6 +4041,15 @@ class GuiApp:
                     messagebox.showwarning("提示", "请填写本地目录路径", parent=top)
                     return
                 fields["source"] = {"path": p, "name_regex": regex_entry.get().strip()}
+                if initial_type == 'local_folder' and p == old_src.get('path'):
+                    if 'target_profile' in old_src:
+                        fields['source']['target_profile'] = old_src['target_profile']
+            if k in ('github', 'local_folder'):
+                try:
+                    re.compile(regex_entry.get().strip())
+                except re.error as error:
+                    messagebox.showwarning('正则无效', str(error), parent=top)
+                    return
             if editing:
                 self.db.update_custom(existing["id"], fields)
                 self._log(f"已编辑自定义源: {existing['id']}")
@@ -3863,8 +4064,8 @@ class GuiApp:
             top.destroy()
             self.refresh_all()
 
-        ttk.Button(f, text="保存" if editing else "添加", command=ok).grid(row=5, column=1, sticky="w", pady=10)
-        ttk.Button(f, text="取消", command=top.destroy).grid(row=5, column=1, sticky="e", pady=10)
+        ttk.Button(f, text="保存" if editing else "添加", command=ok).grid(row=6, column=1, sticky="w", pady=10)
+        ttk.Button(f, text="取消", command=top.destroy).grid(row=6, column=1, sticky="e", pady=10)
         top.transient(self.root)
         top.grab_set()
 
@@ -4039,16 +4240,47 @@ class GuiApp:
         def done(core):
             self._set_busy(False)
             if core:
-                messagebox.showinfo(
-                    "连接成功",
-                    "GitHub API 连接正常。" + chr(10)
+                unsaved = token != self.cfg.github_token or proxy != self.cfg.proxy
+                exhausted = core.get('remaining') == 0
+                show = messagebox.showwarning if exhausted else messagebox.showinfo
+                show(
+                    "配额已耗尽" if exhausted else "连接成功",
+                    ("GitHub API 配额已耗尽，请等待配额恢复。" if exhausted else "GitHub API 连接正常。") + chr(10)
                     + f"剩余配额: {core.get('remaining')}/{core.get('limit')}" + chr(10)
-                    + ("已配置 Token" if token else "匿名访问（建议配置 Token 提高限额）"))
-            else:
+                    + ("本次测试使用输入框中的 Token" if token else "匿名访问（建议配置 Token 提高限额）")
+                    + ("\nToken 或代理尚未保存，请点「保存设置」后再安装/更新。" if unsaved else "\n当前网络设置已保存。"))
+            elif core is not None:
                 messagebox.showwarning("响应异常", "连接成功但响应格式不符")
         self._run_async(job, on_done=done)
 
+    def save_and_test_network_settings(self):
+        """独立提交 Token/代理，再测试已生效的配置；无需保存无关目录设置。"""
+        if self.busy or getattr(self, '_active_jobs', 0):
+            messagebox.showinfo('任务尚未完成', '请等后台任务完成后再保存网络设置。')
+            return
+        try:
+            proxy = self._current_proxy_from_ui()
+        except ValueError as error:
+            messagebox.showerror('代理设置错误', str(error))
+            return
+        previous = self.cfg.data
+        updated = dict(previous)
+        updated['github_token'] = self.token_entry.get().strip()
+        updated['proxy'] = proxy
+        self.cfg.data = updated
+        try:
+            self.cfg.save()
+        except OSError as error:
+            self.cfg.data = previous
+            messagebox.showerror('保存失败', f'网络设置未生效：{error}')
+            return
+        self._log('网络设置已保存，正在测试 GitHub API。')
+        self.test_network_settings()
+
     def save_settings(self):
+        if getattr(self, 'busy', False) or getattr(self, '_active_jobs', 0):
+            messagebox.showinfo("任务尚未完成", "请等后台任务完成后再保存设置，避免操作途中更换目录或网络配置。")
+            return
         client_path = self.client_entry.get().strip()
         server_path = self.server_entry.get().strip()
         for side, raw_path in (("客户端", client_path), ("服务端", server_path)):
@@ -4064,8 +4296,8 @@ class GuiApp:
         except ValueError:
             messagebox.showerror("错误", "请检查代理地址、缓存时长和备份数格式")
             return
-        if interval < 0 or backup_keep < 0:
-            messagebox.showerror("错误", "缓存时长和备份数不能小于 0")
+        if not math.isfinite(interval) or interval < 0 or backup_keep < 1:
+            messagebox.showerror("错误", "缓存时长必须是有限的非负数，备份数至少为 1")
             return
 
         # 所有输入都通过校验后才一次性替换配置，避免旧实现把目录提前写入。
@@ -4082,8 +4314,14 @@ class GuiApp:
         updated["gtnh_version"] = self.gtnh_entry.get().strip()
         updated["wiki_cookie"] = self.wiki_cookie_entry.get().strip()
         updated["wiki_ua"] = self.wiki_ua_entry.get().strip()
+        previous = self.cfg.data
         self.cfg.data = updated
-        self.cfg.save()
+        try:
+            self.cfg.save()
+        except OSError as error:
+            self.cfg.data = previous
+            messagebox.showerror('保存失败', f'设置未生效：{error}')
+            return
         self._log("设置已保存")
         messagebox.showinfo("已保存", "设置已保存，列表即将刷新")
         self.refresh_all()
