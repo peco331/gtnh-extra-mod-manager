@@ -790,12 +790,14 @@ class CliApp:
         except Exception as e:
             self.ui.error(f"抓取失败: {e}")
             return
+        if fetched.source != 'online':
+            self.ui.warn('本次未在线同步，已保留资源包与光影目录及上次在线成功时间')
+            return
         self.ui.info(f"Wiki 读取证据：发起 {fetched.request_count} 个网络请求；"
                      f"通道={fetched.channel}；响应={fetched.response_bytes} 字节；"
                      f"内容指纹={fetched.text_hash[:12]}")
         try:
-            entries, warnings = packwiki.parse_packs_wikitext(fetched.text)
-            changes = self.packs.merge_wiki(entries)
+            entries, warnings, changes = packmod.apply_wiki_result(self.packs, fetched)
         except Exception as e:
             self.ui.error(f"合并失败: {e}")
             return

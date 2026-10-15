@@ -204,7 +204,7 @@ class TestScanPacks(unittest.TestCase):
         (folder / "SomePackFolder" / "pack.mcmeta").write_text("{}", encoding="utf-8")
         (folder / "notes.txt").write_text("x", encoding="utf-8")
         (folder / ".hidden.zip").write_bytes(b"")
-        (folder / "old.zip.disabled").write_bytes(b"")
+        make_zip(folder / "old.zip.disabled", ['pack.mcmeta'])
         return folder
 
     def test_scans_zips_and_folders_only(self):
@@ -214,7 +214,8 @@ class TestScanPacks(unittest.TestCase):
             names = {f.file_name for f in files}
             self.assertEqual(names, {"Shadow.UI.v5.45.zip",
                                      "GTNH-Faithful-x32.v2.2.0.zip",
-                                     "SomePackFolder"})
+                                     "SomePackFolder", "old.zip.disabled"})
+            self.assertFalse(next(f for f in files if f.file_name == 'old.zip.disabled').enabled)
 
     def test_version_extracted_from_name(self):
         with tempfile.TemporaryDirectory() as tmp:

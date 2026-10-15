@@ -4,7 +4,7 @@
 数据来源：https://gtnh.huijiwiki.com/wiki/可添加MOD
 """
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 # 端别常量
 SIDES = ("client", "server")

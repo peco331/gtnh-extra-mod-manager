@@ -34,6 +34,9 @@ jobs:
       - name: 验证成品 Wiki 联网同步
         run: python scripts/verify_packaged_wiki.py dist/gtnh-cli.exe
 
+      - name: 验证成品资源包与光影同步
+        run: python scripts/verify_packaged_packs.py dist/gtnh-cli.exe
+
       - name: 打包 zip
         shell: pwsh
         run: |

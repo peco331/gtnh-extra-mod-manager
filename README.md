@@ -102,6 +102,17 @@ CurseForge 来源的 MOD 需手动下载：工具会提供页面入口，下载�
 
 入口为 GUI「资源包与光影」页或 CLI 菜单 11。资源包安装到 `resourcepacks/`，光影包安装到 `shaderpacks/`；下载的 `.zip` 保持压缩状态。整合包自带资源包仅作只读清单展示，在游戏内启用。
 
+GUI 按 MOD 管理的方式分成四页，类型可筛选全部、资源包或光影包：
+
+- **已安装**：显示本地版本、更新时间、来源和检查结果；支持检查更新、更新选中、全部更新、文件启用/禁用、锁定、卸载及备份恢复。
+- **可添加**：默认嵌入 Wiki 原网页，保留分类、作者和说明；条目显示安装状态、禁用和锁定标识，并连接原有安装及详情流程。网页不可用时可切换离线目录。
+- **未受管**：扫描 ZIP 和解压目录；可关联已有条目、登记自定义包或忽略文件，忽略只影响列表。
+- **自定义源**：添加、绑定来源、查看详情和移除管理条目；移除条目保留已安装文件，Wiki 刷新保留自定义条目及来源绑定。
+
+四个列表使用 Wiki 图片或包内的 `pack.png` 小图标，后台加载并保留离线缓存。文件禁用采用 `.disabled` 重命名；**安装状态表示文件已落盘，游戏内是否选用资源包或光影仍由游戏设置决定**，工具不修改游戏的选择配置。
+
+「更新选中」「全部更新」仅使用本次检查得到的资产，5 分钟后或文件、目录、锁定和下载源发生变化时需重新检查。禁用、锁定、多个本地副本及解压目录保留手动处理路径；版本无法比较、查询失败和需手动选择分别显示。需要指定其他版本时，在详情的版本/资产列表中明确选择并确认安装。
+
 **自动下载支持 GitHub Releases 和 Modrinth**。CurseForge、Discord、web.archive.org、GitLab 等来源提供手动下载提示与目标目录；下载完成后重新扫描。
 
 - **修正来源**：在详情或右键菜单中「设置下载源」，填写 GitHub 仓库或 Modrinth 项目页；可「恢复wiki链接」取消绑定。
@@ -109,6 +120,7 @@ CurseForge 来源的 MOD 需手动下载：工具会提供页面入口，下载�
 - **登记自定义包**：对目录中的未识别文件使用「登记自定义包」，补充名称与来源后跟踪更新；自定义条目随 Wiki 刷新保留。
 - **版本判断**：扫描主要依据文件名识别版本，已记录的同一文件也可保留上游版本。缺少版本号或 `Stable`、`weekly-…` 等不可比较标签需要人工判断；本地版本更高时不自动降级。
 - **备份与替换**：旧文件备份到 `data/backup/{resourcepacks|shaderpacks}/{条目id}/`。新包通过校验并完成备份后再安全写入；文件名变化时，只处理该条目记录的旧 zip。
+- **卸载与恢复**：卸载前完整备份已匹配文件或解压目录；恢复旧 ZIP 时先备份并移除当前版本，避免新旧 ZIP 同时保留。当前为解压目录时，先卸载再恢复备份。
 
 结构校验检查资源包是否含 `pack.mcmeta` 或 `assets/`，光影包是否含 `shaders/`。光影 zip 内多包一层目录时会提示游戏可能无法读取配置，需自行调整。静态检查通过不代表游戏效果或兼容性已验证。
 
@@ -189,6 +201,6 @@ py -3.10 -m pip install pyinstaller curl_cffi websocket-client Pillow
 .\scripts\build_exe.bat
 ```
 
-输出为 `dist/GTNHModManager.exe` 和 `dist/gtnh-cli.exe`。成品 Wiki 验证入口为 `scripts/verify_packaged_wiki.py`。版本号需同时更新 `pyproject.toml` 与 `gtnhmod/__init__.py`。
+输出为 `dist/GTNHModManager.exe` 和 `dist/gtnh-cli.exe`。成品 Wiki 验证入口为 `scripts/verify_packaged_wiki.py`，资源包与光影使用 `scripts/verify_packaged_packs.py`。版本号需同时更新 `pyproject.toml` 与 `gtnhmod/__init__.py`。
 
 推送 `v*` tag 会触发 [Release 工作流](.github/workflows/release.yml)：运行测试、构建、成品 Wiki 验证、打包并发布。普通分支推送不创建 Release；[Secret scan 工作流](.github/workflows/secret-scan.yml)检查提交历史中的凭据。贡献前请阅读 [AGENTS.md](AGENTS.md)，保持本地数据、会话、成品和恢复记录不入库。

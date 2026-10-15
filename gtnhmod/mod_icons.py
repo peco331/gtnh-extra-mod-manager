@@ -56,6 +56,13 @@ def thumbnail_png(data):
 def jar_icon(path, names=()):
     """只读归档成员，不解压到游戏目录；多 MOD 的 JAR 先按名称匹配。"""
     try:
+        path = Path(path)
+        if path.is_dir():
+            icon = path / 'pack.png'
+            if (not icon.is_symlink() and icon.resolve().parent == path.resolve()
+                    and icon.is_file() and icon.stat().st_size <= MAX_IMAGE_BYTES):
+                return thumbnail_png(icon.read_bytes())
+            return None
         with zipfile.ZipFile(path) as archive:
             records = []
             try:
@@ -177,7 +184,15 @@ class ModIconCache:
         for path in dict.fromkeys(Path(p) for p in jars):
             try:
                 stat = path.stat()
-                files.append((str(path), stat.st_mtime_ns, stat.st_size))
+                extra = None
+                if path.is_dir():
+                    try:
+                        icon_stat = (path / 'pack.png').stat()
+                        extra = (icon_stat.st_mtime_ns, icon_stat.st_size)
+                    except OSError:
+                        pass
+                stamp = (str(path), stat.st_mtime_ns, stat.st_size)
+                files.append(stamp + (extra,) if path.is_dir() else stamp)
             except OSError:
                 continue
         names = tuple(filter(None, (normalize_name((entry or {}).get(k))

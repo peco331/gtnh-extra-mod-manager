@@ -38,10 +38,14 @@ def _new_app(data_dir):
     # 默认冒烟测试不启动真实浏览器或访问上游；网页桥接单独隔离验证。
     app.add_view_mode.set('offline')
     app._show_addable_view()
+    app.pack_nb.select(1)
+    app.pack_view_mode.set('offline')
+    app._show_pack_view()
     return app
 
 
 def _clear_app(app):
+    app._close_pack_view()
     app.mod_icons.close()
     for callback in app.root.tk.call("after", "info"):
         app.root.after_cancel(callback)
@@ -418,6 +422,9 @@ class TestPacksTabSmoke(unittest.TestCase):
         cls.rp_dir = Path(cls.tmp) / "resourcepacks"
         cls.rp_dir.mkdir(exist_ok=True)
         cls.app.cfg.set_pack_dir("resourcepack", cls.rp_dir)
+        cls.sp_dir = Path(cls.tmp) / 'shaderpacks'
+        cls.sp_dir.mkdir(exist_ok=True)
+        cls.app.cfg.set_pack_dir('shader', cls.sp_dir)
 
     @classmethod
     def tearDownClass(cls):
@@ -456,8 +463,17 @@ class TestPacksTabSmoke(unittest.TestCase):
         self.app.pack_cat.set("")
         self.app.pack_search.set("")
         self.app.pack_only_installed.set(False)
+        self.app.pack_only_uninstalled.set(False)
+        self.app.pack_nb.select(1)
+        self.app._invalidate_pack_checks()
+        self.app.packs.packs = []
+        self.app.packs.meta = {}
+        self.app.cfg.data['ignored_pack_files'] = {}
         self.app._pack_updates = {}
         for f in self.rp_dir.iterdir():
+            if f.is_file():
+                f.unlink()
+        for f in self.sp_dir.iterdir():
             if f.is_file():
                 f.unlink()
         from gtnhmod import packs_wiki as packwiki
@@ -503,6 +519,195 @@ class TestPacksTabSmoke(unittest.TestCase):
         self.assertEqual(len(self.app.pack_tree.get_children()), 1)
         self.app.pack_kind.set("resourcepack")
 
+    def test_four_pages_split_installed_catalog_unmanaged_and_custom(self):
+        import zipfile
+        self._make_zip('Demo.Pack.v1.0.zip')
+        with zipfile.ZipFile(self.sp_dir / 'Demo.Shader.v1.0.zip', 'w') as archive:
+            archive.writestr('shaders/main.fsh', 'fixture')
+        self.app.pack_kind.set('all')
+        self.app.refresh_packs()
+        self.assertEqual([self.app.pack_nb.tab(i, 'text') for i in range(4)],
+                         ['已安装', '可添加', '未受管', '自定义源'])
+        self.assertEqual(set(self.app.pack_inst_tree.get_children()), {'pack-demo', 'shader-demo'})
+        self.app.pack_only_uninstalled.set(True)
+        self.app.refresh_packs()
+        self.assertEqual(self.app.pack_tree.get_children(), ('pack-manual',))
+
+    def test_disable_lock_and_uninstall_keep_the_selected_pack_and_backup(self):
+        self._make_zip('Demo.Pack.v1.0.zip')
+        self.app.pack_nb.select(0)
+        self.app.refresh_packs()
+        self.app.pack_inst_tree.selection_set('pack-demo')
+        self.app._change_pack_enabled(False)
+        self.assertTrue((self.rp_dir / 'Demo.Pack.v1.0.zip.disabled').exists())
+        self.assertEqual(self.app.pack_inst_tree.selection(), ('pack-demo',))
+        self.app._toggle_pack_lock()
+        self.assertTrue(self.app.packs.installed('resourcepack')['pack-demo']['locked'])
+        self.app._change_pack_enabled(True)
+        with mock.patch.object(gui.messagebox, 'askyesno', return_value=True), \
+             mock.patch.object(gui.messagebox, 'showwarning') as warning:
+            self.app.uninstall_selected_packs()
+        warning.assert_not_called()
+        self.assertFalse((self.rp_dir / 'Demo.Pack.v1.0.zip').exists())
+        self.assertFalse(self.app.pack_inst_tree.exists('pack-demo'))
+        self.assertTrue(packs.list_backups(self.app.cfg, 'resourcepack'))
+
+    def _checked_snapshot(self):
+        self._make_zip('Demo.Pack.v1.0.zip')
+        self.app.refresh_packs()
+        asset = packs.PackAsset('https://example.invalid/Demo.Pack.v2.0.zip',
+                                 'Demo.Pack.v2.0.zip', version='2.0', source='github')
+        result = packs.PackSourceResult('github', 'ok', [asset])
+        with mock.patch.object(packs, 'list_assets', return_value=result):
+            snapshot = packs.check_update_plan(self.app.cfg, self.app.packs)
+        self.app._pack_checked_updates = snapshot
+        self.app.pack_nb.select(0)
+        self.app.refresh_packs()
+        self.app.pack_inst_tree.selection_set('pack-demo')
+        return snapshot
+
+    def test_update_selected_consumes_checked_asset_without_a_second_query(self):
+        snapshot = self._checked_snapshot()
+        with mock.patch.object(gui.messagebox, 'askyesno', return_value=True), \
+             mock.patch.object(packs, 'list_assets', side_effect=AssertionError('unexpected query')), \
+             mock.patch.object(self.app, '_run_pack_installs') as execute:
+            self.app.update_selected_packs()
+        plans = execute.call_args.args[0]
+        self.assertEqual([p.pack_id for p in plans], ['pack-demo'])
+        self.assertEqual(plans[0].asset.url, snapshot['plan'][0].asset.url)
+        self.assertIs(execute.call_args.kwargs['snapshot'], snapshot)
+        self.assertIsNone(self.app._pack_checked_updates)
+
+    def test_update_rechecks_local_state_after_confirmation(self):
+        self._checked_snapshot()
+        def changed(*_args):
+            self.app.packs.update_entry('pack-demo', {'bound_source': 'https://github.com/changed/source'})
+            return True
+        with mock.patch.object(gui.messagebox, 'askyesno', side_effect=changed), \
+             mock.patch.object(gui.messagebox, 'showinfo') as info, \
+             mock.patch.object(self.app, '_run_pack_installs') as execute:
+            self.app.update_selected_packs()
+        execute.assert_not_called()
+        self.assertIn('重新检查', info.call_args.args[1])
+
+    def test_update_all_requires_a_current_check(self):
+        with mock.patch.object(gui.messagebox, 'showinfo') as info, \
+             mock.patch.object(packs, 'list_assets') as query, \
+             mock.patch.object(self.app, '_run_pack_installs') as execute:
+            self.app.update_all_packs()
+        query.assert_not_called()
+        execute.assert_not_called()
+        self.assertIn('检查更新', info.call_args.args[1])
+
+    def test_unmanaged_ignore_and_restore_never_delete_the_file(self):
+        self._make_zip('Unknown.Pack.v1.0.zip')
+        self.app.pack_nb.select(2)
+        self.app.refresh_packs()
+        iid = self.app.pack_um_tree.get_children()[0]
+        self.app.pack_um_tree.selection_set(iid)
+        self.app.ignore_selected_packs()
+        self.assertEqual(self.app.pack_um_tree.get_children(), ())
+        self.assertTrue((self.rp_dir / 'Unknown.Pack.v1.0.zip').exists())
+        self.app.restore_ignored_packs()
+        self.assertEqual(len(self.app.pack_um_tree.get_children()), 1)
+
+    def test_association_never_claims_an_unrelated_same_version_file(self):
+        self._make_zip('Short.v1.0.zip')
+        self._make_zip('Other.v1.0.zip')
+        self.app.pack_nb.select(2)
+        self.app.refresh_packs()
+        self.app.pack_um_tree.selection_set('resourcepack:Short.v1.0.zip')
+        with self._non_modal():
+            self.app.associate_selected_pack()
+            top = self._first_toplevel()
+            combo = next(w for w in _walk(top) if isinstance(w, ttk.Combobox))
+            combo.current(0)
+            next(w for w in _walk(top) if isinstance(w, ttk.Button) and w.cget('text') == '关联').invoke()
+        self.assertEqual(self.app.packs.installed('resourcepack')['pack-demo']['file_name'], 'Short.v1.0.zip')
+        self.assertEqual(self.app.pack_um_tree.get_children(), ('resourcepack:Other.v1.0.zip',))
+
+    def test_checked_update_downloads_over_http_once_and_keeps_old_backup(self):
+        import io
+        import threading
+        import zipfile
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        body = io.BytesIO()
+        with zipfile.ZipFile(body, 'w') as archive:
+            archive.writestr('pack.mcmeta', '{}')
+            archive.writestr('assets/version.txt', '2.0')
+        data, requested = body.getvalue(), []
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                requested.append(self.path)
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            def log_message(self, *_):
+                pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self._make_zip('Demo.Pack.v1.0.zip')
+        self._make_zip('Unrelated.zip')
+        old = (self.rp_dir / 'Demo.Pack.v1.0.zip').read_bytes()
+        asset = packs.PackAsset(f'http://127.0.0.1:{server.server_port}/Demo.Pack.v2.0.zip',
+            'Demo.Pack.v2.0.zip', version='2.0', size=len(data), source='github')
+        result = packs.PackSourceResult('github', 'ok', [asset])
+        proxy = self.app.cfg.data['proxy']
+        self.app.cfg.data['proxy'] = {'host': ''}
+        try:
+            with mock.patch.object(packs, 'list_assets', return_value=result):
+                self.app._pack_checked_updates = packs.check_update_plan(self.app.cfg, self.app.packs)
+            self.app.pack_nb.select(0)
+            self.app.refresh_packs()
+            self.app.pack_inst_tree.selection_set('pack-demo')
+            with mock.patch.object(gui.messagebox, 'askyesno', return_value=True), \
+                 mock.patch.object(gui.messagebox, 'showwarning') as warning, \
+                 mock.patch.object(packs, 'list_assets', side_effect=AssertionError('must reuse checked asset')), \
+                 mock.patch.object(self.app, '_run_async', side_effect=lambda job, done: done(job())):
+                self.app.update_selected_packs()
+            warning.assert_not_called()
+        finally:
+            self.app.cfg.data['proxy'] = proxy
+        self.assertEqual(requested, ['/Demo.Pack.v2.0.zip'])
+        self.assertFalse((self.rp_dir / 'Demo.Pack.v1.0.zip').exists())
+        self.assertTrue((self.rp_dir / 'Unrelated.zip').exists())
+        self.assertEqual((self.rp_dir / 'Demo.Pack.v2.0.zip').read_bytes(), data)
+        self.assertTrue(any(b['path'].read_bytes() == old for b in packs.list_backups(self.app.cfg, 'resourcepack') if b['path'].is_file()))
+
+    def test_custom_entries_have_their_own_page_and_survive_wiki_refresh(self):
+        pack_id = self.app.packs.add_custom({'kind': 'resourcepack', 'name_en': 'Local Demo',
+                                            'source_url': 'https://github.com/custom/pack'})
+        self.app.refresh_packs()
+        self.assertTrue(self.app.pack_custom_tree.exists(pack_id))
+        self.assertFalse(self.app.pack_tree.exists(pack_id))
+        fresh = [dict(e) for e in self.app.packs.by_kind() if not e.get('custom')]
+        self.app.packs.merge_wiki(fresh)
+        self.app.refresh_packs()
+        self.assertEqual(self.app.packs.get(pack_id)['bound_source'], 'https://github.com/custom/pack')
+        self.assertTrue(self.app.pack_custom_tree.exists(pack_id))
+
+    def test_wiki_auto_sync_resumes_if_page_loaded_during_another_task(self):
+        view = mock.Mock(ready=True)
+        previous = self.app._pack_view
+        self.app._pack_view = view
+        self.app._pack_auto_sync = False
+        try:
+            with mock.patch.object(self.app.pack_wiki_frame, 'winfo_ismapped', return_value=True), \
+                 mock.patch.object(self.app, 'refresh_packs_wiki') as sync:
+                self.app.busy = True
+                self.app._sync_pack_wiki_view()
+                sync.assert_not_called()
+                self.app.busy = False
+                self.app._sync_pack_wiki_view()
+                self.assertTrue(_pump(self.app.root, lambda: sync.called))
+                sync.assert_called_once()
+        finally:
+            self.app.busy = False
+            self.app._pack_view = previous
+            self.app._pack_auto_sync = False
     def test_category_filter_and_search(self):
         self.app.refresh_packs()
         self.app.pack_cat.set("深色模式")
@@ -653,7 +858,7 @@ class TestPacksTabSmoke(unittest.TestCase):
         labels = [menu.entrycget(i, "label")
                   for i in range(menu.index("end") + 1)
                   if menu.type(i) != "separator"]
-        for expected in ("详情", "安装/更新", "选择下载资产...", "打开下载页面", "检查更新"):
+        for expected in ("详情", "安装", "选择下载资产...", "打开下载页面", "检查更新"):
             self.assertIn(expected, labels)
 
     def test_refresh_without_wiki_data_is_safe(self):

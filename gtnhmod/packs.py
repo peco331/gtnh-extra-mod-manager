@@ -15,10 +15,13 @@
 数据文件：``packs_db.json``（wiki 解析结果 + 用户别名/绑定源）。
 """
 import functools
+import copy
+import json
 import os
 import re
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -138,10 +141,12 @@ class PackFile:
     note: str = ""
     mtime: float = 0.0
     size: int = 0
+    enabled: bool = True
 
     @property
     def ext(self) -> str:
-        return "folder" if self.is_dir else self.path.suffix.lower()
+        logical = self.file_name[:-9] if self.file_name.lower().endswith('.disabled') else self.file_name
+        return "folder" if self.is_dir else Path(logical).suffix.lower()
 
 
 def _zip_has(zip_path: Path, probes: tuple, *, top_only: bool = True) -> bool:
@@ -419,6 +424,10 @@ def match_score(cand_tokens: list, file_tokens: list,
         return True, 120.0 + 5.0 * covered + len(cand_norm), exact
     if cand_norm and len(cand_norm) >= 6 and cand_norm in file_norm:
         return True, 95.0 + len(cand_norm), True
+    identity = [t for t in cand_tokens if re.search('[a-z]', t)
+                and not re.fullmatch(r'[vbr]\d+[a-z]*', t)]
+    if not any(t in vocab for t in identity):
+        return False, 0.0, False  # 版本数字相同不能建立包的身份。
     hits = sum(1 for t in cand_tokens if t in vocab)
     frac = hits / len(cand_tokens)
     if hits >= 2 and frac >= 0.6:
@@ -442,7 +451,8 @@ def _bare_name(stem: str) -> str:
 def _candidate_tokens(entry: dict) -> list:
     """参与匹配的候选名（英文名 + 用户关联过的别名）。"""
     out = []
-    for s in [entry.get("name_en") or ""] + list(entry.get("aliases") or []):
+    names = [entry.get('name_en') or ''] + [suggest_pack_name(s) for s in (entry.get('aliases') or []) if isinstance(s, str)]
+    for s in names:
         toks = _pack_tokens(s)
         if toks:
             out.append(toks)
@@ -452,7 +462,7 @@ def _candidate_tokens(entry: dict) -> list:
 def scan_pack_dir(folder: Path, kind: str, *, with_size: bool = True, strict: bool = False) -> list:
     """扫描 resourcepacks/shaderpacks 目录 → PackFile 列表（zip 与文件夹）。
 
-    跳过隐藏项、``.disabled`` 与下载中断的 ``.part``；文件夹形态也计入
+    跳过隐藏项与下载中断的 ``.part``；保留 ``.disabled`` 文件的禁用状态。文件夹形态也计入
     （光影包与部分资源包常以解压后的文件夹存在）。
 
     ``with_size=False`` 时不算文件夹体积：列表/匹配只需要文件名，而真实
@@ -469,15 +479,17 @@ def scan_pack_dir(folder: Path, kind: str, *, with_size: bool = True, strict: bo
         return out
     for p in items:
         name = p.name
-        if name.startswith(".") or name.endswith(".disabled") or name.endswith(".part"):
+        if name.startswith(".") or name.endswith(".part"):
             continue
+        enabled = not name.lower().endswith('.disabled')
+        logical_name = name if enabled else name[:-9]
         try:
             if p.is_dir():
                 rec = PackFile(path=p, file_name=name, is_dir=True)
                 st = p.stat()
                 rec.size = (sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
                             if with_size else 0)
-            elif p.suffix.lower() in PACK_SUFFIXES:
+            elif Path(logical_name).suffix.lower() in PACK_SUFFIXES:
                 rec = PackFile(path=p, file_name=name, is_dir=False)
                 st = p.stat()
                 rec.size = st.st_size if with_size else 0
@@ -488,7 +500,8 @@ def scan_pack_dir(folder: Path, kind: str, *, with_size: bool = True, strict: bo
                 raise
             continue
         rec.mtime = st.st_mtime
-        stem = name[:-4] if name.lower().endswith(".zip") else name
+        rec.enabled = enabled
+        stem = logical_name[:-4] if logical_name.lower().endswith(".zip") else logical_name
         rec.version = extract_pack_version(stem)
         out.append(rec)
     return out
@@ -507,7 +520,8 @@ def match_pack(f: PackFile, entries: list) -> tuple[str | None, str]:
     打分而不是「首个命中」，否则 ``Modernity-GTNH-UI-2.9.X.zip`` 会被
     ``Modernity-GTNH`` 抢走，``Modernity-f1-3.10.2.zip`` 也会误配到它。
     """
-    stem = f.file_name[:-4] if f.file_name.lower().endswith(".zip") else f.file_name
+    logical_name = f.file_name[:-9] if f.file_name.lower().endswith('.disabled') else f.file_name
+    stem = logical_name[:-4] if logical_name.lower().endswith(".zip") else logical_name
     file_tokens = _pack_tokens(stem)
     if not file_tokens:
         return None, "none"
@@ -558,8 +572,11 @@ def unmatched_packs(cfg, db: "PacksDB", kind: str | None = None) -> list:
         folder = resolve_pack_dir(cfg, k)
         if not folder:
             continue
-        entries = db.by_kind(k)
+        entries = db.by_kind(k, include_removed=True)
+        ignored = (cfg.data.get('ignored_pack_files') or {}).get(k, [])
         for f in scan_pack_dir(folder, k, with_size=False):
+            if f.file_name in ignored:
+                continue
             pid, _q = match_pack(f, entries)
             if not pid:
                 out.append((k, f))
@@ -569,7 +586,7 @@ def unmatched_packs(cfg, db: "PacksDB", kind: str | None = None) -> list:
 def suggest_pack_name(file_name: str) -> str:
     """从未匹配文件名里给一个可编辑的建议名（去掉版本段）。"""
     stem = file_name
-    for suffix in (".zip", ".disabled"):
+    for suffix in (".disabled", ".zip"):
         if stem.lower().endswith(suffix):
             stem = stem[: -len(suffix)]
     bare = _bare_name(stem)
@@ -756,7 +773,7 @@ class PacksDB:
                 self.save()
 
     # ---- wiki 合并 ----
-    def merge_wiki(self, fresh: list, *, update_fetched_at: bool = True) -> list:
+    def merge_wiki(self, fresh: list, *, update_fetched_at: bool = True, preserve_missing=False) -> list:
         """合并新解析的 wiki 条目；保留用户别名/绑定源。返回变更说明列表。"""
         if not fresh:
             raise ValueError("资源包/光影解析结果为空，已取消合并（本地数据未改动）。"
@@ -768,6 +785,8 @@ class PacksDB:
         for fp in fresh:
             old = old_by_id.get(fp["id"])
             if old:
+                if old.get('icon_url') and old.get('icon') == fp.get('icon'):
+                    fp['icon_url'] = old['icon_url']
                 fp["aliases"] = list(dict.fromkeys(
                     (old.get("aliases") or []) + (fp.get("aliases") or [])))
                 if old.get("source_override"):
@@ -794,7 +813,7 @@ class PacksDB:
             if p["id"] not in fresh_ids:
                 # 自定义条目不是从 wiki 来的，wiki 里「没有」是常态，
                 # 不能打 wiki_removed（否则会被 by_kind 过滤掉、从界面消失）
-                if not p.get("custom") and not p.get("wiki_removed"):
+                if not preserve_missing and not p.get("custom") and not p.get("wiki_removed"):
                     p["wiki_removed"] = True
                     changes.append(f'移除: {p.get("name_en") or p["id"]}（wiki 已删除，本地保留记录）')
                 new_packs.append(p)
@@ -805,6 +824,23 @@ class PacksDB:
             self.meta["wiki_imported_at"] = utils.now_str()
         self.save(backup=True)
         return changes
+
+
+def apply_wiki_result(db, fetched):
+    """CLI/GUI 共用在线合并边界：拒绝缓存、空正文及异常缩减导致的批量移除。"""
+    from . import packs_wiki
+    if fetched.source != 'online':
+        raise PacksError('本次未在线同步，已保留目录和上次在线成功时间')
+    packs_wiki.validate_packs_wikitext(fetched.text)
+    entries, warnings = packs_wiki.parse_packs_wikitext(fetched.text)
+    if not entries:
+        raise PacksError('资源包与光影解析结果为空，已保留本地目录')
+    previous = [e for e in db.by_kind() if not e.get('custom')]
+    preserve = len(previous) >= 4 and len(entries) * 2 < len(previous)
+    if preserve:
+        warnings.append(f'本次仅解析到 {len(entries)} 个条目，目录明显减少；缺失条目暂时保留，请核对 Wiki 页面')
+    changes = db.merge_wiki(entries, preserve_missing=preserve)
+    return entries, warnings, changes
 
 
 # ---------- 下载源解析 ----------
@@ -1203,7 +1239,7 @@ def backup_dir(cfg, kind: str, pack_id: str) -> Path:
     return cfg.backup_dir / DIR_NAMES[kind] / pack_id
 
 
-def backup_existing(cfg, kind: str, pack_id: str, source: Path) -> Path | None:
+def backup_existing(cfg, kind: str, pack_id: str, source: Path, *, prune=True) -> Path | None:
     """安装/更新前把已存在的同名包移入备份目录（保持文件名）。
 
     备份按 ``backup/<resourcepacks|shaderpacks>/<条目id>/`` 存放，同名文件
@@ -1216,8 +1252,10 @@ def backup_existing(cfg, kind: str, pack_id: str, source: Path) -> Path | None:
     target = dest / source.name
     if target.exists():
         stamp = utils.timestamp_str()
-        base = f"{source.stem}.{stamp}" if not source.is_dir() else f"{source.name}.{stamp}"
-        suffix = source.suffix if not source.is_dir() else ""
+        compound = not source.is_dir() and source.name.lower().endswith('.zip.disabled')
+        stem = source.name[:-13] if compound else source.stem
+        base = f"{stem}.{stamp}" if not source.is_dir() else f"{source.name}.{stamp}"
+        suffix = '.zip.disabled' if compound else source.suffix if not source.is_dir() else ""
         target = dest / f"{base}{suffix}"
         n = 2
         while target.exists():
@@ -1229,7 +1267,8 @@ def backup_existing(cfg, kind: str, pack_id: str, source: Path) -> Path | None:
         shutil.copy2(source, target)
     # copy2 保留源文件的旧 mtime；轮换应按备份创建时间，而非包的发布时间。
     os.utime(target, None)
-    _prune_backups(dest, cfg.backup_keep)
+    if prune:
+        _prune_backups(dest, cfg.backup_keep)
     return target
 
 
@@ -1287,7 +1326,7 @@ def restore_backup(cfg, record: dict, target_dir: Path) -> Path:
     if not src.exists():
         raise PacksError(f"备份不存在: {src}")
     name = record.get("original_name") or re.sub(
-        r'\.\d{8}_\d{6}(?:\.\d+)?(?=\.zip$|$)', '', record["file_name"])
+        r'\.\d{8}_\d{6}(?:\.\d+)?(?=\.zip(?:\.disabled)?$|\.disabled$|$)', '', record["file_name"])
     if not _safe_component(name):
         raise PacksError("备份文件名不安全，已拒绝恢复")
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -1414,6 +1453,20 @@ def plan_install(cfg, db: PacksDB, entries: list, *, results: dict | None = None
             plans.append(InstallPlanItem(entry["id"], name, kind, "skip",
                                          detail="整合包自带，无需下载"))
             continue
+        rec = db.installed(kind).get(entry['id']) or {}
+        if rec.get('locked') or not rec.get('enabled', True):
+            plans.append(InstallPlanItem(entry['id'], name, kind, 'skip',
+                                         detail='已锁定' if rec.get('locked') else '文件已禁用'))
+            continue
+        if rec.get('duplicates'):
+            plans.append(InstallPlanItem(entry['id'], name, kind, 'manual',
+                                         detail='存在多个本地副本，请先核对文件后再更新'))
+            continue
+        folder = resolve_pack_dir(cfg, kind)
+        if rec.get('file_name') and folder and (folder / rec['file_name']).is_dir():
+            plans.append(InstallPlanItem(entry['id'], name, kind, 'manual',
+                                         detail='解压目录需手动更新，可先备份并卸载后安装 ZIP'))
+            continue
         res = (results or {}).get(entry["id"])
         if res is None:
             if progress_cb:
@@ -1488,8 +1541,12 @@ def apply_install(cfg, db: PacksDB, entry: dict, asset, *, progress_cb=None,
     """执行一个条目的安装/更新，并写回安装记录。返回 (成功, 说明)。"""
     kind = entry.get("kind")
     rec = db.installed(kind).get(entry["id"]) or {}
+    if rec and not rec.get('enabled', True):
+        return False, '文件已禁用，请先启用文件后再安装或更新'
     old_name = rec.get("file_name") or ""
     folder = (Path(target_dir) if target_dir else resolve_pack_dir(cfg, kind)) if kind in DIR_NAMES else None
+    if folder and old_name and _safe_component(old_name) and (folder / old_name).is_dir():
+        return False, '当前是解压目录，请先备份并卸载后再安装 ZIP'
     old = folder / old_name if folder and _safe_component(old_name) else None
     new_name = getattr(asset, "file_name", None)
     if not (old is not None and old.name != new_name and old.is_file() and not old.is_symlink()
@@ -1517,7 +1574,7 @@ def apply_install(cfg, db: PacksDB, entry: dict, asset, *, progress_cb=None,
         "note": '；'.join(s for s in (info.get("note"), leftover) if s),
         "source_url": getattr(asset, "url", ""),
     })
-    db.add_alias(entry["id"], dest.stem if not dest.is_dir() else dest.name)
+    db.add_alias(entry["id"], suggest_pack_name(dest.name))
     note = '；'.join(s for s in (info.get("note"), leftover) if s)
     return True, (f"已安装到 {dest}" + (f"（提示: {note}）" if note else ""))
 
@@ -1544,16 +1601,23 @@ def reconcile_installed(cfg, db: PacksDB, *, kinds=None) -> dict:
         except OSError:
             live[kind] = {}
             continue  # 读取失败不等于空目录，保留该类型全部安装记录。
-        entries = db.by_kind(kind)
+        entries = db.by_kind(kind, include_removed=True)
         for f in files:
             f.pack_id, f.match_quality = match_pack(f, entries)
         side_live: dict = {}
-        for f in files:
+        # 有多个同名版本时，优先保留启用文件；不让禁用副本覆盖正在管理的文件。
+        for f in sorted(files, key=lambda f: (not f.enabled, f.file_name.lower())):
             if not f.pack_id:
+                continue
+            if f.pack_id in side_live:
+                current = db.installed(kind)[f.pack_id]
+                current.setdefault('duplicates', []).append(f.file_name)
+                db.set_installed(kind, f.pack_id, current, save=False)
                 continue
             side_live[f.pack_id] = f
             rec = db.installed(kind).get(f.pack_id) or {}
-            fields = {"file_name": f.file_name, "path": str(f.path)}
+            fields = {"file_name": f.file_name, "path": str(f.path), 'enabled': f.enabled,
+                      'duplicates': []}
             if rec.get("file_name") != f.file_name or not rec.get("version"):
                 fields["version"] = f.version
             for key in ("installed_at", "source_url", "valid", "note"):
@@ -1575,6 +1639,165 @@ def installed_index(db: PacksDB) -> dict:
         for pack_id, rec in db.installed(kind).items():
             out[(kind, pack_id)] = rec
     return out
+
+
+def _entry_paths(cfg, db, kind, pack_id):
+    entry, folder = db.get(pack_id), resolve_pack_dir(cfg, kind)
+    rec = db.installed(kind).get(pack_id) or {}
+    if not entry or entry.get('kind') != kind or not folder or not folder.is_dir():
+        raise PacksError('条目或安装目录不可用，已保留安装记录')
+    if entry.get('local'):
+        raise PacksError('整合包自带条目由游戏管理，不能修改其文件')
+    names = [rec.get('file_name'), *(rec.get('duplicates') or [])]
+    paths = []
+    for name in dict.fromkeys(names):
+        if not name or not _safe_component(name):
+            raise PacksError('没有可安全管理的已安装文件，请重新扫描')
+        path = folder / name
+        if (path.is_symlink() or path.resolve().parent != folder.resolve()
+                or getattr(path.lstat(), 'st_file_attributes', 0) & 0x400):
+            raise PacksError('文件是链接或超出安装目录，已拒绝操作')
+        logical = name[:-9] if name.lower().endswith('.disabled') else name
+        if not path.is_dir() and Path(logical).suffix.lower() not in PACK_SUFFIXES:
+            raise PacksError('记录指向非资源包文件，已拒绝操作')
+        paths.append(path)
+    return paths
+
+
+def set_enabled(cfg, db, kind, pack_id, enabled):
+    """通过 .disabled 重命名改变文件可用性，不修改游戏内的选择配置。"""
+    paths = _entry_paths(cfg, db, kind, pack_id)
+    if len(paths) != 1:
+        raise PacksError('存在多个本地副本，请先核对文件')
+    path = paths[0]
+    current = not path.name.lower().endswith('.disabled')
+    if current == enabled:
+        return
+    target = path.with_name(path.name[:-9] if enabled else path.name + '.disabled')
+    if target.exists():
+        raise PacksError('目标文件已存在，未覆盖现有包')
+    os.rename(path, target)
+    rec = copy.deepcopy(db.installed(kind)[pack_id])
+    try:
+        db.set_installed(kind, pack_id, {'file_name': target.name, 'path': str(target), 'enabled': enabled})
+    except Exception:
+        os.rename(target, path)
+        db.meta.setdefault('installed', {}).setdefault(kind, {})[pack_id] = rec
+        raise
+    utils.append_log(cfg.data_dir, f"{'启用' if enabled else '禁用'}包文件 {target.name}")
+
+
+def set_locked(db, kind, pack_id, locked):
+    entry = db.get(pack_id)
+    if not entry or entry.get('kind') != kind or entry.get('local'):
+        raise PacksError('该条目不能锁定更新')
+    if pack_id not in db.installed(kind):
+        raise PacksError('条目尚未安装，不能锁定更新')
+    db.set_installed(kind, pack_id, {'locked': bool(locked)})
+
+
+def uninstall_pack(cfg, db, kind, pack_id):
+    """只卸载已登记的准确文件；完整备份成功后再移除文件或解压目录。"""
+    paths = _entry_paths(cfg, db, kind, pack_id)
+    for path in paths:
+        if path.is_dir():
+            for child in path.rglob('*'):
+                if child.is_symlink() or getattr(child.lstat(), 'st_file_attributes', 0) & 0x400:
+                    raise PacksError('解压目录含链接，已拒绝递归卸载')
+    backups = [backup_existing(cfg, kind, pack_id, p, prune=False) for p in paths]
+    if any(p is None or not p.exists() for p in backups):
+        raise PacksError('未能完整备份，已取消卸载')
+    for path in paths:
+        # _entry_paths 已逐项验证解析后的父目录；不遍历或删除相邻的包。
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    db.remove_installed(kind, pack_id)
+    utils.append_log(cfg.data_dir, f'卸载包 {pack_id}，已保留 {len(backups)} 份备份')
+    return backups
+
+
+def restore_installed_backup(cfg, db, record):
+    """恢复旧版本时一并备份并移除当前版本，避免新旧 ZIP 同时留在安装目录。"""
+    kind = next((k for k, name in DIR_NAMES.items() if record.get('kind') in (k, name)), None)
+    if not kind:
+        raise PacksError('未知的备份类型')
+    folder = resolve_pack_dir(cfg, kind)
+    if folder is None:
+        raise PacksError('未设置安装目录')
+    pack_id = record.get('pack_id')
+    if folder.is_dir():
+        reconcile_installed(cfg, db, kinds=[kind])
+    paths = _entry_paths(cfg, db, kind, pack_id) if db.installed(kind).get(pack_id) else []
+    for path in paths:
+        if path.is_dir():
+            raise PacksError('当前是解压目录，请先备份并卸载该目录，再恢复备份')
+    for path in paths:
+        backup_existing(cfg, kind, pack_id, path, prune=False)
+    dest = restore_backup(cfg, record, folder)
+    for path in paths:
+        if path != dest:
+            path.unlink()
+    reconcile_installed(cfg, db, kinds=[kind])
+    if pack_id in db.installed(kind):
+        logical = dest.name[:-9] if dest.name.lower().endswith('.disabled') else dest.name
+        stem = logical[:-4] if logical.lower().endswith('.zip') else logical
+        db.set_installed(kind, pack_id, {'version': extract_pack_version(stem), 'source_url': '',
+                                       'installed_at': utils.now_str(), 'note': '从备份恢复'})
+    return dest
+
+
+UPDATE_CHECK_TTL = 300
+
+
+def _checked_context(cfg, db, kind, pack_id):
+    entry, rec = db.get(pack_id), db.installed(kind).get(pack_id) or {}
+    paths = _entry_paths(cfg, db, kind, pack_id)
+    return {'directory': str(paths[0].parent.resolve()),
+            'files': [(p.name, p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ino) for p in paths],
+            'version': rec.get('version'), 'locked': bool(rec.get('locked')),
+            'enabled': rec.get('enabled', True),
+            'source': json.dumps({k: entry.get(k) for k in (
+                'kind', 'urls', 'bound_source', 'source_override', 'asset_regex', 'wiki_removed', 'local')},
+                sort_keys=True, ensure_ascii=False)}
+
+
+def check_update_plan(cfg, db, *, progress_cb=None):
+    """检查仅处理已安装条目；返回可复用资产与本地状态快照。"""
+    checked_at = time.monotonic()
+    reconcile_installed(cfg, db)
+    context, entries, extra = {}, [], []
+    for kind in DIR_NAMES:
+        installed = db.installed(kind)
+        for entry in db.installable(kind):
+            if entry['id'] not in installed:
+                continue
+            try:
+                context[kind, entry['id']] = _checked_context(cfg, db, kind, entry['id'])
+            except (OSError, PacksError):
+                extra.append(InstallPlanItem(entry['id'], entry.get('name_en') or entry['id'],
+                                             kind, 'error', detail='文件或目录不可用，请重新扫描'))
+                continue
+            entries.append(entry)
+    plans = plan_install(cfg, db, entries, progress_cb=progress_cb) + extra
+    return {'plan': copy.deepcopy(plans), 'checked_at': checked_at, 'context': context}
+
+
+def validate_checked_updates(cfg, db, snapshot, plans):
+    if not snapshot:
+        return '尚未检查更新，请先点击“检查更新”。'
+    if time.monotonic() - snapshot['checked_at'] >= UPDATE_CHECK_TTL:
+        return '检查结果已超过 5 分钟，请重新检查更新。'
+    for plan in plans:
+        old = snapshot['context'].get((plan.kind, plan.pack_id))
+        try:
+            current = _checked_context(cfg, db, plan.kind, plan.pack_id)
+        except (OSError, PacksError, ValueError):
+            current = None
+        if current != old or not current or current['locked'] or not current['enabled']:
+            return f'{plan.name} 的文件、目录、锁定或下载源已变化，请重新检查更新。'
+    return None
 
 
 def folder_hint(cfg, kind: str) -> str:

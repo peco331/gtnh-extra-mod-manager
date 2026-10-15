@@ -104,7 +104,31 @@ BRIDGE_SCRIPT = r"""
         }, true);
     }
     const allowed = payload.allowed;
-    const rows = allowed ? [...document.querySelectorAll('#mw-content-text .extra-mod')] : [];
+    const rowInfo = new Map();
+    let rows = allowed ? [...document.querySelectorAll('#mw-content-text .extra-mod')] : [];
+    if (allowed && payload.layout === 'packs') {
+        rows = [];
+        let kind = '';
+        for (const node of document.querySelectorAll('#mw-content-text h2, #mw-content-text table.wikitable')) {
+            if (node.tagName === 'H2') {
+                const title = (node.querySelector('.mw-headline') || node).textContent;
+                kind = title.includes('资源包') ? 'resourcepack' : title.includes('光影') ? 'shader' : '';
+                continue;
+            }
+            if (!kind) continue;
+            const headers = [...node.querySelectorAll('tr:first-child th')].map(x => x.textContent);
+            const column = (pattern, fallback) => {
+                const i = headers.findIndex(x => pattern.test(x)); return i < 0 ? fallback : i;
+            };
+            for (const row of node.rows) {
+                if (!row.querySelector(':scope > td') || row.cells.length < 3) continue;
+                rows.push(row);
+                rowInfo.set(row, {kind, name:row.cells[column(/名字|名称/, 1)],
+                    body:row.cells[column(/说明|简介/, 4)] || row.cells[row.cells.length - 1],
+                    links:row.cells[column(/链接/, 5)] || row.cells[row.cells.length - 1]});
+            }
+        }
+    }
     const revision = JSON.stringify([payload.entries, payload.busy]);
     const changed = revision !== state.revision;
     state.revision = revision;
@@ -120,6 +144,8 @@ BRIDGE_SCRIPT = r"""
             .gtnh-manager-actions button:first-of-type {background:#10679a;color:#fff}
             .gtnh-manager-actions button:focus-visible {outline:3px solid #f0ad4e;outline-offset:2px}
             .gtnh-manager-actions button:disabled {opacity:.5;cursor:wait}
+            .gtnh-manager-pack-actions {font-size:12px;gap:4px;margin-top:6px;padding-top:6px}
+            .gtnh-manager-pack-actions button {padding:2px 6px}
             .gtnh-manager-badge {padding:2px 6px;white-space:nowrap}
             .gtnh-manager-installed {color:#237241;background:#eef7f0}
             .gtnh-manager-absent {color:#535c65;background:#edf0f3}
@@ -131,17 +157,23 @@ BRIDGE_SCRIPT = r"""
     let matched = 0;
     const icons = [];
     for (const row of rows) {
-        const name = row.querySelector('.extra-mod-aside-name');
-        const names = name ? [...name.children].map(n => key(n.textContent)) : [];
-        const links = [...row.querySelectorAll('.extra-mod-links a[href]')].map(a => linkKey(a.href));
+        const info = rowInfo.get(row);
+        const name = info ? info.name : row.querySelector('.extra-mod-aside-name');
+        const names = name ? [name.textContent, ...[...name.children].map(n => n.textContent),
+            ...[...name.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent)].map(key) : [];
+        const links = [...(info ? info.links : row).querySelectorAll(
+            info ? 'a[href]' : '.extra-mod-links a[href]')].map(a => linkKey(a.href));
         // 优先按条目名；改名时只接受唯一的项目链接匹配，歧义不会变成安装按钮。
-        let candidates = payload.entries.filter(e => names.includes(key(e.name)) && key(e.name));
-        if (!candidates.length) candidates = payload.entries.filter(e =>
+        const eligible = payload.entries.filter(e => !info || e.kind === info.kind);
+        // 换行变体名先按整个名称匹配，避免 Complementary + Euphoria 命中其基础包。
+        let candidates = eligible.filter(e => key(e.name) && name && key(name.textContent) === key(e.name));
+        if (!candidates.length) candidates = eligible.filter(e => names.includes(key(e.name)) && key(e.name));
+        if (!candidates.length) candidates = eligible.filter(e =>
             e.links.some(u => links.includes(linkKey(u)) && linkKey(u)));
         const entry = candidates.length === 1 ? candidates[0] : null;
         if (entry) {
             matched++;
-            const image = row.querySelector('.extra-mod-aside-icon img');
+            const image = row.querySelector(info ? 'td:first-child img' : '.extra-mod-aside-icon img');
             if (image) icons.push({id:entry.id, url:image.currentSrc || image.src});
         }
         const signature = revision + '\n' + (entry ? entry.id : '');
@@ -149,7 +181,7 @@ BRIDGE_SCRIPT = r"""
         const old = row.querySelector('.gtnh-manager-actions');
         if (old) old.remove();
         const bar = document.createElement('div');
-        bar.className = 'gtnh-manager-actions';
+        bar.className = 'gtnh-manager-actions' + (info ? ' gtnh-manager-pack-actions' : '');
         for (const badge of entry ? entry.badges : [{text:'目录未匹配，安装状态待同步', kind:'absent'}]) {
             const label = document.createElement('span');
             label.className = 'gtnh-manager-badge gtnh-manager-' + badge.kind;
@@ -169,12 +201,14 @@ BRIDGE_SCRIPT = r"""
         if (!entry) {
             button('同步管理目录', 'sync');
         } else {
-            if (entry.installed) {
-                button('查看已安装', 'manage');
+            if (entry.local) {
+                // 整合包自带条目只提供说明，不生成下载安装动作。
+            } else if (entry.installed) {
+                button(info ? '管理' : '查看已安装', 'manage');
             } else button('安装', 'install');
-            button('管理详情', 'detail');
+            button(info ? '详情' : '管理详情', 'detail');
         }
-        (row.querySelector('.extra-mod-body') || row).append(bar);
+        (info ? info.body : row.querySelector('.extra-mod-body') || row).append(bar);
         state.blocks.set(row, signature);
     }
     return {url: location.href, rows: rows.length, matched, icons,
@@ -306,10 +340,13 @@ class NativeBrowserHost:
 
 class EmbeddedWikiBrowser:
     """一个专用浏览器进程与串行 CDP 工作线程，不接触用户的浏览器会话。"""
-    def __init__(self, cfg, emit):
+    bridge_layout = 'mods'
+
+    def __init__(self, cfg, emit, *, profile=None):
         self.cfg, self.emit = cfg, emit
         self.proxy = copy.deepcopy(cfg.proxy)
-        self.page_url = wiki._referer(cfg)
+        self.page_name = profile.page if profile else cfg.wiki_page
+        self.page_url = wiki._referer(cfg, profile)
         self.ready = False
         self._stop = threading.Event()
         self._attached = threading.Event()
@@ -350,7 +387,7 @@ class EmbeddedWikiBrowser:
     def fetch_wiki(self):
         future = Future()
         if self._stop.is_set() or not self.ready:
-            raise RuntimeError('Wiki 网页尚未就绪，请返回可添加MOD并等待正文加载')
+            raise RuntimeError(f'Wiki 网页尚未就绪，请返回{self.page_name}并等待正文加载')
         self._commands.put(('fetch', future))
         return future.result(timeout=30)
 
@@ -401,9 +438,9 @@ class EmbeddedWikiBrowser:
     def _fetch(self):
         frame = self._world()
         if not is_catalog_url(frame.get('url'), self.page_url):
-            raise RuntimeError('请先返回可添加MOD页面，再同步管理目录')
+            raise RuntimeError(f'请先返回{self.page_name}页面，再同步管理目录')
         raw_url = self.cfg.wiki_url.rsplit('/api.php', 1)[0] + '/index.php?title=' + (
-            quote(self.cfg.wiki_page)) + '&action=raw'
+            quote(self.page_name)) + '&action=raw'
         raw_url = wiki._refresh_url(raw_url)
         value = self._evaluate("""(async () => {
             const r = await fetch(%s, {cache:'no-store',
@@ -412,11 +449,14 @@ class EmbeddedWikiBrowser:
         })()""" % json.dumps(raw_url), timeout=20)
         if not isinstance(value, dict) or value.get('status') != 200:
             raise RuntimeError('Wiki 在线请求失败，已保留本地目录')
-        result = wiki.wiki_result_from_text(value.get('text', ''), source='online',
+        return self._result_from_text(value.get('text', ''))
+
+    def _result_from_text(self, text):
+        result = wiki.wiki_result_from_text(text, source='online',
                                             channel='embedded_browser', request_count=1)
         if not result.mods:
             raise RuntimeError('Wiki 未解析到条目，已保留本地目录')
-        wiki._write_wiki_cache(self.cfg, value['text'])
+        wiki._write_wiki_cache(self.cfg, text)
         return result
 
     def _worker(self):
@@ -502,6 +542,7 @@ class EmbeddedWikiBrowser:
                     frame = self._world()
                     entries, busy = self._snapshot
                     payload = {'page': self.page_url,
+                               'layout': self.bridge_layout,
                                'allowed': is_catalog_url(frame.get('url'), self.page_url),
                                'entries': entries, 'busy': busy}
                     state = self._evaluate(BRIDGE_SCRIPT + '(' + json.dumps(payload) + ')') or {}
