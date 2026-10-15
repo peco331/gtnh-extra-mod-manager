@@ -184,6 +184,7 @@ class TestWikiGuiBridge(unittest.TestCase):
         self.app._sync_wiki_view = mock.Mock()
         self.app._on_wiki_view_event = mock.Mock()
         self.app._close_wiki_view = mock.Mock()
+        self.app.theme = SimpleNamespace(dark=True)
         with mock.patch.object(browser, 'EmbeddedWikiBrowser') as factory:
             gui.GuiApp._ensure_wiki_view(self.app)
             factory.assert_not_called()
@@ -191,6 +192,7 @@ class TestWikiGuiBridge(unittest.TestCase):
             gui.GuiApp._ensure_wiki_view(self.app)
             self.app._close_wiki_view.assert_called_once()
             factory.return_value.start.assert_called_once()
+            factory.return_value.set_color_scheme.assert_called_once_with(True)
 
     def test_explicit_install_keeps_side_confirmation_and_version_lookup(self):
         self.app.cfg, self.app.db = object(), object()
@@ -332,6 +334,21 @@ class TestBrowserLifecycle(unittest.TestCase):
             self.assertEqual(emitted, [('error', 'Wiki 专用浏览器启动失败')])
             closed.assert_called_once_with(12345)
 
+    def test_color_scheme_is_emulated_through_devtools(self):
+        view = browser.EmbeddedWikiBrowser(SimpleNamespace(proxy=None, wiki_url=PAGE,
+                                                           wiki_page='可添加MOD'), mock.Mock())
+        view._call = mock.Mock()
+        view.set_color_scheme(True)
+        self.assertEqual(view._commands.get_nowait(), ('color_scheme', None))
+        view._emulate_color_scheme()
+        self.assertEqual(view._call.call_args_list, [
+            mock.call('Emulation.setEmulatedMedia', {'features': [
+                {'name': 'prefers-color-scheme', 'value': 'dark'}]}),
+            mock.call('Emulation.setAutoDarkModeOverride', {'enabled': True})])
+        # 浏览器不支持自动暗色时不能让网页线程中断
+        view._call = mock.Mock(side_effect=[{}, RuntimeError("'Emulation.setAutoDarkModeOverride' wasn't found")])
+        view._emulate_color_scheme()
+
     def test_stale_profiles_are_swept_but_fresh_or_locked_ones_survive(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -431,6 +448,28 @@ class TestRealEmbeddedBrowser(unittest.TestCase):
             self.assertIn('embedded_browser', app.log.get('1.0', 'end'))
             self.assertEqual(view._snapshot[0][0]['installed'], 'client')
             self.assertEqual(view._snapshot[0][0]['badges'][1]['text'], '客户端：v0.9')
+
+            def page_prefers_dark():
+                # 另开一个只读 CDP 连接观察页面，不干扰工作线程的连接
+                import websocket
+                target = wiki._select_wiki_cdp_target(wiki._read_local_cdp_json(view._port), view.page_url)
+                ws = websocket.create_connection(target['webSocketDebuggerUrl'], timeout=3,
+                                                 suppress_origin=True, http_no_proxy=['127.0.0.1'])
+                try:
+                    ws.send(json.dumps({'id': 1, 'method': 'Runtime.evaluate', 'params': {
+                        'expression': "matchMedia('(prefers-color-scheme: dark)').matches",
+                        'returnByValue': True}}))
+                    while True:
+                        message = json.loads(ws.recv())
+                        if message.get('id') == 1:
+                            return message['result']['result']['value']
+                finally:
+                    ws.close()
+
+            app.theme.set_mode('dark')
+            self.assertTrue(pump(page_prefers_dark, seconds=5))
+            app.theme.set_mode('light')
+            self.assertTrue(pump(lambda: not page_prefers_dark(), seconds=5))
             existing.unlink()
             app.refresh_all()
             self.assertEqual(view._snapshot[0][0]['badges'][0]['text'], '未安装')

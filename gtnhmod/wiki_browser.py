@@ -151,6 +151,15 @@ BRIDGE_SCRIPT = r"""
             .gtnh-manager-absent {color:#535c65;background:#edf0f3}
             .gtnh-manager-disabled {color:#835000;background:#fff0cc}
             .gtnh-manager-locked {color:#604395;background:#f1eafb}
+            @media (prefers-color-scheme: dark) {
+                .gtnh-manager-actions {border-top-color:#4a4d52}
+                .gtnh-manager-actions button {border-color:#7ab4ff;color:#7ab4ff;background:#2b2d31}
+                .gtnh-manager-actions button:first-of-type {background:#2f5f8f;color:#fff}
+                .gtnh-manager-installed {color:#8fe0a6;background:#1f3d2a}
+                .gtnh-manager-absent {color:#b8bec6;background:#33363b}
+                .gtnh-manager-disabled {color:#f0b45a;background:#3d3420}
+                .gtnh-manager-locked {color:#c8b6ff;background:#332a4d}
+            }
         `;
         (document.head || document.documentElement).append(style);
     }
@@ -428,6 +437,7 @@ class EmbeddedWikiBrowser:
         self._snapshot = ([], False)
         self._ws = self._proc = self._host = None
         self._port = self._browser_pid = None
+        self._dark = False
         self._request_id = 0
         self._context = self._loader = None
 
@@ -449,6 +459,21 @@ class EmbeddedWikiBrowser:
     def enable(self, enabled):
         if self._host:
             self._host.enable(enabled)
+
+    def set_color_scheme(self, dark):
+        """让网页按暗色/浅色偏好渲染（Wiki 的「配色模式：系统」会跟随）。"""
+        self._dark = bool(dark)
+        self._commands.put(('color_scheme', None))
+
+    def _emulate_color_scheme(self):
+        self._call('Emulation.setEmulatedMedia', {'features': [
+            {'name': 'prefers-color-scheme', 'value': 'dark' if self._dark else 'light'}]})
+        # 灰机 Wiki 不跟随 prefers-color-scheme，改用 Chromium 的自动暗色渲染页面；
+        # 旧版浏览器不支持时只保留上面的偏好设置。
+        try:
+            self._call('Emulation.setAutoDarkModeOverride', {'enabled': self._dark})
+        except RuntimeError:
+            pass
 
     def update(self, entries, installed, busy=False):
         self._snapshot = (catalog_payload(entries, installed), busy)
@@ -595,6 +620,7 @@ class EmbeddedWikiBrowser:
                                                    http_no_proxy=['127.0.0.1', 'localhost'])
             self._call('Page.enable')
             self._call('Browser.setDownloadBehavior', {'behavior': 'deny'})
+            self._emulate_color_scheme()
             self.emit('attach', hwnd)
             while not self._attached.wait(.1):
                 if self._stop.is_set():
@@ -614,6 +640,8 @@ class EmbeddedWikiBrowser:
                             future.set_result(self._fetch())
                         elif action == 'home':
                             self._call('Page.navigate', {'url': self.page_url})
+                        elif action == 'color_scheme':
+                            self._emulate_color_scheme()
                         elif action == 'reload':
                             self._call('Page.reload', {'ignoreCache': True})
                         elif action == 'back':

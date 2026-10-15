@@ -40,7 +40,7 @@ class PacksGuiMixin:
         self.pack_search.trace_add('write', lambda *_: self._debounce_pack_search())
         self.pack_search_entry = ttk.Entry(top, textvariable=self.pack_search, width=23)
         self.pack_search_entry.pack(side='left', padx=(2, 8))
-        self.pack_dir_label = ttk.Label(tab, foreground='#666', wraplength=1100)
+        self.pack_dir_label = ttk.Label(tab, style='Muted.TLabel', wraplength=1100)
         self.pack_dir_label.pack(side='bottom', anchor='w', padx=8, pady=(0, 4))
         self.pack_nb = ttk.Notebook(tab)
         self.pack_nb.pack(fill='both', expand=True)
@@ -62,7 +62,7 @@ class PacksGuiMixin:
         self._pack_button(bar, '备份与恢复', self.pack_backup_dialog)
         self._pack_button(bar, '打开目录', self.open_pack_folder)
         ttk.Label(pages[0], text='这里显示已安装文件；资源包和光影是否实际启用，请在游戏设置中选择。',
-                  foreground='#666').pack(anchor='w', padx=9, pady=(0, 4))
+                  style='Muted.TLabel').pack(anchor='w', padx=9, pady=(0, 4))
         self.pack_inst_tree = self._make_pack_tree(pages[0], 'packs-installed',
             ('name', 'kind', 'version', 'time', 'source', 'status', 'file'),
             ('名称', '类型', '本地版本', '本地更新时间', '下载源', '状态', '文件名'),
@@ -80,7 +80,7 @@ class PacksGuiMixin:
         self._pack_button(nav, '在浏览器打开', lambda: webbrowser.open(wiki._referer(self.cfg, packwiki.PACKS_PROFILE)))
         self._pack_button(nav, '同步管理目录', self.refresh_packs_wiki, side='right')
         self.pack_wiki_status = tk.StringVar(value='保留 Wiki 原站分类与说明，安装和更新由工具处理。')
-        ttk.Label(pages[1], textvariable=self.pack_wiki_status, foreground='#555',
+        ttk.Label(pages[1], textvariable=self.pack_wiki_status, style='Muted.TLabel',
                   wraplength=1100).pack(fill='x', padx=8, pady=(0, 4))
         self.pack_content = ttk.Frame(pages[1])
         self.pack_content.pack(fill='both', expand=True)
@@ -108,7 +108,7 @@ class PacksGuiMixin:
             self._pack_button(bar, label, action)
 
         ttk.Label(pages[2], text='以下包尚未关联管理目录，可关联已有条目或登记为自定义包。',
-                  foreground='#666').pack(anchor='w', padx=8, pady=5)
+                  style='Muted.TLabel').pack(anchor='w', padx=8, pady=5)
         self.pack_um_tree = self._make_pack_tree(pages[2], 'packs-unmanaged',
             ('kind', 'file', 'version', 'time', 'status'),
             ('类型', '文件名', '识别版本', '修改时间', '状态'), (85, 470, 130, 160, 120))
@@ -149,10 +149,11 @@ class PacksGuiMixin:
         for col, label, width in zip(cols, heads, widths):
             tree.heading(col, text=label)
             tree.column(col, width=width, anchor='w')
-        for tag, color in (('inst', '#237241'), ('upd', '#b36b00'), ('manual', '#b36b00'),
-                           ('local', '#777777'), ('disabled', '#777777'), ('error', '#b13d3d')):
-            tree.tag_configure(tag, foreground=color)
-        tree.tag_configure('odd', background='#f4f5f7')
+        self.theme.register_tree(tree, {
+            'inst': {'foreground': 'installed'}, 'upd': {'foreground': 'warn'},
+            'manual': {'foreground': 'warn'}, 'local': {'foreground': 'disabled'},
+            'disabled': {'foreground': 'disabled'}, 'error': {'foreground': 'error'},
+            'odd': {'background': 'odd'}})
         tree.pack(side='left', fill='both', expand=True)
         self._attach_scrollbar(tree, frame)
         tree._view_key = view_key
@@ -345,6 +346,7 @@ class PacksGuiMixin:
         self.pack_wiki_status.set('正在加载资源包与光影 Wiki；如出现人机验证，请在页内完成。')
         try:
             self._sync_pack_wiki_view()
+            view.set_color_scheme(self.theme.dark)
             view.start(self.pack_wiki_frame.winfo_id(), self.pack_wiki_frame.winfo_width(),
                        self.pack_wiki_frame.winfo_height())
         except Exception as exc:

@@ -19,6 +19,7 @@ DEFAULTS = {
     "wiki_ua": "",                # 与 cookie 配套的浏览器 User-Agent（cf_clearance 与 UA 绑定）
     # 资源包与光影：空串=由客户端实例目录推断，填写即固定该目录
     "pack_folders": {"resourcepack": "", "shader": ""},
+    "theme": "system",            # 外观：system 跟随系统 / light 浅色 / dark 暗色
 }
 
 

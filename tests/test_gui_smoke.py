@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gtnhmod import gui  # noqa: E402
 from gtnhmod import packs  # noqa: E402
+from gtnhmod.config import Config  # noqa: E402
 
 
 def setUpModule():
@@ -1119,6 +1120,77 @@ class TestBackupOverview(unittest.TestCase):
         finally:
             path.unlink()
             folder.rmdir()
+
+
+class TestThemeSwitching(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="gtnh_theme_"))
+        Config(cls.tmp).save()
+        cls.app = _new_app(cls.tmp)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.app.theme.set_mode("light")  # 共享解释器，恢复浅色免得影响其他测试
+        _clear_app(cls.app)
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+        gc.collect()
+
+    def _choose(self, label):
+        self.app.theme_var.set(label)
+        combo = next(w for w in _walk(self.app.root)
+                     if isinstance(w, ttk.Combobox) and str(w.cget("textvariable")) == str(self.app.theme_var))
+        combo.event_generate("<<ComboboxSelected>>")
+        self.app.root.update_idletasks()
+
+    def test_dark_mode_recolors_existing_and_new_widgets_and_persists(self):
+        from gtnhmod import theme
+        dark = theme.PALETTES["dark"]
+        self._choose("暗色")
+        self.assertEqual(ttk.Style(self.app.root).theme_use(), "clam")
+        self.assertEqual(str(self.app.log.cget("background")), dark["surface"])
+        self.assertEqual(str(self.app.settings_canvas.cget("background")), dark["bg"])
+        self.assertEqual(str(self.app.inst_tree.tag_configure("odd", "background")), dark["odd"])
+        self.assertEqual(str(self.app.pack_tree.tag_configure("error", "foreground")), dark["error"])
+        dialog = tk.Toplevel(self.app.root)
+        try:
+            self.assertEqual(tk.Text(dialog).cget("background"), dark["surface"])
+            self.assertEqual(tk.Listbox(dialog).cget("background"), dark["surface"])
+        finally:
+            dialog.destroy()
+        self.assertEqual(Config(self.tmp).data["theme"], "dark")
+
+        self._choose("浅色")
+        light = theme.PALETTES["light"]
+        self.assertNotEqual(ttk.Style(self.app.root).theme_use(), "clam")
+        self.assertEqual(str(self.app.log.cget("background")), light["surface"])
+        self.assertEqual(str(self.app.inst_tree.tag_configure("odd", "background")), light["odd"])
+        self.assertEqual(Config(self.tmp).data["theme"], "light")
+
+    def test_follow_system_switches_when_windows_mode_changes(self):
+        from gtnhmod import theme
+        with mock.patch.object(theme, "system_prefers_dark", return_value=False):
+            self._choose("跟随系统")
+            self.assertFalse(self.app.theme.dark)
+        with mock.patch.object(theme, "system_prefers_dark", return_value=True):
+            self.app.theme._poll_system()
+            self.assertTrue(self.app.theme.dark)
+            self.assertEqual(str(self.app.log.cget("background")), theme.PALETTES["dark"]["surface"])
+        with mock.patch.object(theme, "system_prefers_dark", return_value=False):
+            self.app.theme._poll_system()
+            self.assertFalse(self.app.theme.dark)
+
+    def test_theme_change_reaches_embedded_wiki_pages(self):
+        view = mock.Mock()
+        old = self.app._wiki_view
+        self.app._wiki_view = view
+        try:
+            self.app.theme.set_mode("dark")
+            view.set_color_scheme.assert_called_with(True)
+            self.app.theme.set_mode("light")
+            view.set_color_scheme.assert_called_with(False)
+        finally:
+            self.app._wiki_view = old
 
 
 if __name__ == "__main__":

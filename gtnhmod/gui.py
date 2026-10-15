@@ -25,7 +25,7 @@ from . import SIDES, SIDE_LABELS, __version__, net, updater, utils, cookies
 from . import packs as packmod
 from . import packs_wiki as packwiki
 from . import wiki as wikimod
-from . import wiki_browser
+from . import theme, wiki_browser
 from .mod_icons import ModIconCache, allowed_icon_url
 from .packs_gui import PacksGuiMixin
 from .config import Config
@@ -39,7 +39,6 @@ STATUS_CN = {"installed": "已安装", "update_avail": "可更新",
              "query_failed": "查询失败", "manual": "需手动处理",
              "unknown_version": "无法比较版本", "local_newer": "本地版本较新",
              "disabled": "已禁用"}
-STATUS_COLORS = {"update_avail": "#1a7f37", "disabled": "#999999", "installed": "#000000"}
 INSTALL_SIDE_CN = {"both": "双端", "client": "仅客户端", "server": "仅服务端"}
 FONT = ("Microsoft YaHei UI", 9)
 
@@ -86,6 +85,8 @@ class GuiApp(PacksGuiMixin):
         self.root = tk.Tk()
         self.root.title(f"GTNH 额外MOD管理工具 v{__version__}")
         self._set_app_icon()
+        self.theme = theme.ThemeManager(self.root, FONT, self.cfg.data.get("theme", "system"))
+        self.theme.on_change(self._on_theme_changed)
         self.root.geometry(self._clamp_geometry(
             self.cfg.data.get("window_geometry") or "1120x720"))
         self.root.minsize(980, 640)
@@ -127,6 +128,17 @@ class GuiApp(PacksGuiMixin):
         self.add_tree.bind("<Return>", lambda _e: self.show_addable_detail())
         self.add_tree.bind("<KP_Enter>", lambda _e: self.show_addable_detail())
         self.inst_tree.bind("<Delete>", lambda _e: self.delete_selected())
+
+    def _on_theme_changed(self, name):
+        """主题切换后同步内嵌 Wiki 网页的配色偏好。"""
+        for view in (self._wiki_view, getattr(self, "_pack_view", None)):
+            if view:
+                view.set_color_scheme(name == "dark")
+
+    def change_theme(self, mode):
+        self.cfg.data["theme"] = mode
+        self.cfg.save()
+        self.theme.set_mode(mode)
 
     def _set_app_icon(self):
         """窗口与任务栏图标；文件缺失时保留 Tk 默认图标，不影响启动。"""
@@ -214,17 +226,8 @@ class GuiApp(PacksGuiMixin):
 
     # ---------- UI 构建 ----------
     def _build_ui(self):
-        style = ttk.Style()
-        try:
-            style.theme_use("vista")
-        except tk.TclError:
-            pass
-        style.configure("Treeview", rowheight=24, font=FONT)
-        style.configure("Treeview.Heading", font=FONT)
-        style.configure('ModIcon.Treeview', rowheight=24, indent=0)
-        style.layout('ModIcon.Treeview.Item', [('Treeitem.padding', {'sticky': 'nswe', 'children': [
-            ('Treeitem.image', {'side': 'left', 'sticky': ''}),
-            ('Treeitem.text', {'side': 'left', 'sticky': ''})]})])
+        # 先设好主题与选项数据库，之后新建的经典控件直接取当前配色
+        self.theme.apply(force=True)
 
         # 上下可拖拽分栏：主界面 + 底部日志区（经典 PanedWindow，分割条明显可抓）
         main_pane = tk.PanedWindow(self.root, orient="vertical",
@@ -572,13 +575,13 @@ class GuiApp(PacksGuiMixin):
         for c, h, w in zip(cols, heads, widths):
             self.inst_tree.heading(c, text=h)
             self.inst_tree.column(c, width=w, anchor="w")
-        self.inst_tree.tag_configure("upd", background="#c9ecd8",
-                                     foreground="#0a6b2d")
-        self.inst_tree.tag_configure("incompat", background="#fdf3d1")
-        self.inst_tree.tag_configure("locked", background="#e4e8fb",
-                                     foreground="#3d4bb8")
-        self.inst_tree.tag_configure("dis", foreground=STATUS_COLORS["disabled"])
-        self.inst_tree.tag_configure("odd", background="#f4f5f7")
+        self.theme.register_tree(self.inst_tree, {
+            "upd": {"background": "ok_bg", "foreground": "ok_fg"},
+            "incompat": {"background": "warn_bg"},
+            "locked": {"background": "locked_bg", "foreground": "locked_fg"},
+            "dis": {"foreground": "disabled"},
+            "odd": {"background": "odd"},
+        })
         self.inst_tree.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.inst_tree, tree_frame)
         self.inst_tree._view_key = "installed"
@@ -605,7 +608,7 @@ class GuiApp(PacksGuiMixin):
         self.btn_refresh_wiki.pack(side='right')
         self.wiki_view_status = tk.StringVar(value='直接浏览 Wiki 原网页；安装、更新和备份由管理工具处理。')
         ttk.Label(tab, textvariable=self.wiki_view_status, wraplength=920,
-                  foreground='#555555').pack(fill='x', padx=8, pady=(0, 4))
+                  style='Muted.TLabel').pack(fill='x', padx=8, pady=(0, 4))
         self.add_content = ttk.Frame(tab)
         self.add_content.pack(fill='both', expand=True)
         self.wiki_frame = ttk.Frame(self.add_content)
@@ -639,9 +642,11 @@ class GuiApp(PacksGuiMixin):
         for c, h, w in zip(cols, heads, (250, 110, 70, 90, 80, 115, 265)):
             self.add_tree.heading(c, text=h)
             self.add_tree.column(c, width=w, anchor="w")
-        self.add_tree.tag_configure("inst", foreground=STATUS_COLORS["update_avail"])
-        self.add_tree.tag_configure("new", background="#fff3bf")
-        self.add_tree.tag_configure("odd", background="#f4f5f7")
+        self.theme.register_tree(self.add_tree, {
+            "inst": {"foreground": "ok"},
+            "new": {"background": "new_bg"},
+            "odd": {"background": "odd"},
+        })
         self.add_tree.pack(side="left", fill="both", expand=True)
         self._attach_scrollbar(self.add_tree, tree_frame)
         self.add_tree._view_key = "addable"
@@ -686,6 +691,7 @@ class GuiApp(PacksGuiMixin):
         self.wiki_view_status.set('正在加载 Wiki 原网页；若出现人机验证，请在页内完成。')
         try:
             self._sync_wiki_view()
+            view.set_color_scheme(self.theme.dark)
             view.start(self.wiki_frame.winfo_id(), self.wiki_frame.winfo_width(),
                        self.wiki_frame.winfo_height())
         except Exception as exc:
@@ -917,7 +923,7 @@ class GuiApp(PacksGuiMixin):
         auto_bar.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
         ttk.Button(auto_bar, text="智能识别实例目录...", command=auto_detect_instance).pack(side="left")
         ttk.Label(auto_bar, text="（直接选取 Prism/MultiMC/HMCL 实例根目录，自动探测 mods 路径与版本）",
-                  foreground="#666").pack(side="left", padx=6)
+                  style="Muted.TLabel").pack(side="left", padx=6)
 
         path_row(1, "客户端 mods 目录", "client_entry")
         path_row(2, "服务端 mods 目录", "server_entry")
@@ -966,7 +972,7 @@ class GuiApp(PacksGuiMixin):
         pf.columnconfigure(1, weight=1)
         ttk.Label(pf, text="说明：资源包放入 resourcepacks（保留 .zip 不解压），光影包放入 shaderpacks；"
                            "光影包压缩包内必须直接含 shaders 文件夹，多包一层时游戏读不到配置。",
-                  wraplength=780, foreground="#666", justify="left").grid(
+                  wraplength=780, style="Muted.TLabel", justify="left").grid(
             row=2, column=0, columnspan=4, sticky="we", padx=6, pady=(0, 6))
 
         # ---- 网络（GitHub / 代理模式）----
@@ -1004,7 +1010,7 @@ class GuiApp(PacksGuiMixin):
         ttk.Button(tbtns, text="测试下载连通性", command=self.test_download_connectivity).pack(fill="x", pady=2)
 
         ttk.Label(nf, text="Token: github.com/settings/tokens；保存并测试后即可用于安装/更新。",
-                  foreground="#666").grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 4))
+                  style="Muted.TLabel").grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 4))
         nf.columnconfigure(1, weight=1)
 
         # ---- 常规 ----
@@ -1019,8 +1025,16 @@ class GuiApp(PacksGuiMixin):
         ttk.Label(gf, text="GTNH整合包版本（仅供说明提示）").grid(row=2, column=0, sticky="w", pady=6)
         self.gtnh_entry = ttk.Entry(gf, width=10)
         self.gtnh_entry.grid(row=2, column=1, sticky="w", padx=6)
+        ttk.Label(gf, text="外观").grid(row=3, column=0, sticky="w", pady=6)
+        self.theme_var = tk.StringVar(value=theme.MODE_LABELS[self.theme.mode])
+        theme_combo = ttk.Combobox(gf, textvariable=self.theme_var, state="readonly", width=12,
+                                   values=[theme.MODE_LABELS[m] for m in theme.MODES])
+        theme_combo.grid(row=3, column=1, sticky="w", padx=6)
+        # 外观即时生效并单独保存，不必点「保存全部设置」
+        theme_combo.bind("<<ComboboxSelected>>", lambda _e: self.change_theme(next(
+            m for m in theme.MODES if theme.MODE_LABELS[m] == self.theme_var.get())))
         act = ttk.Frame(gf)
-        act.grid(row=3, column=0, columnspan=2, sticky="w", pady=8)
+        act.grid(row=4, column=0, columnspan=2, sticky="w", pady=8)
         ttk.Button(act, text="打开操作日志", command=self._open_log_file).pack(side="left", padx=8)
 
         # ---- Wiki 反爬 Cookie（站点开启 Cloudflare 人机验证后使用）----
@@ -1061,7 +1075,7 @@ class GuiApp(PacksGuiMixin):
                            "点第一个文档请求 → 右键 Copy → Copy as cURL → 点「从剪贴板导入 cURL」。"
                            "cf_clearance 与浏览器 UA/出口 IP 绑定：若上面配了代理，浏览器需走同一出口；"
                            "Cookie 过期后重新导入即可。",
-                  wraplength=780, foreground="#666", justify="left").grid(
+                  wraplength=780, style="Muted.TLabel", justify="left").grid(
             row=3, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 6))
         wf.columnconfigure(1, weight=1)
         self.wiki_cookie_entry.insert(0, self.cfg.wiki_cookie)
@@ -1294,13 +1308,13 @@ class GuiApp(PacksGuiMixin):
             meta.append(f"加载器：{entry['loader'].replace(chr(10), '/')}")
         if entry.get("local"):
             meta.append("整合包自带（无需下载，游戏内直接启用）")
-        ttk.Label(head, text="　|　".join(meta), foreground="#555",
+        ttk.Label(head, text="　|　".join(meta), style="Muted.TLabel",
                   wraplength=680, justify="left").pack(anchor="w", pady=(2, 0))
         if entry.get("version_requirements"):
             reqs = "、".join(
                 f"{r['version']}" + {"below": " 以下", "above": " 以上"}.get(r["relation"], "")
                 for r in entry["version_requirements"])
-            ttk.Label(head, text=f"版本提示：{reqs}", foreground="#b36b00").pack(anchor="w")
+            ttk.Label(head, text=f"版本提示：{reqs}", style="Warn.TLabel").pack(anchor="w")
 
         body = tk.Text(top, wrap="word", height=14, font=FONT)
         body.pack(fill="both", expand=True, padx=10, pady=6)
@@ -1332,14 +1346,14 @@ class GuiApp(PacksGuiMixin):
         auto_url = packmod.entry_auto_url(entry)
         if entry.get("local"):
             ttk.Label(src_row, text="整合包自带资源包，无需下载安装。",
-                      foreground="#777").pack(anchor="w")
+                      style="Muted.TLabel").pack(anchor="w")
         elif not auto_url:
             primary = (entry.get("urls") or {}).get("primary") or ""
             ttk.Label(src_row, text=f"此条目需手动下载：{packmod.host_note(primary)}",
-                      foreground="#b36b00", wraplength=680,
+                      style="Warn.TLabel", wraplength=680,
                       justify="left").pack(anchor="w")
             ttk.Label(src_row, text=f"下载后放入：{packmod.folder_hint(self.cfg, kind)}",
-                      foreground="#555", wraplength=680,
+                      style="Muted.TLabel", wraplength=680,
                       justify="left").pack(anchor="w")
 
         btns = ttk.Frame(top)
@@ -1388,17 +1402,17 @@ class GuiApp(PacksGuiMixin):
                   font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w", padx=10, pady=(10, 2))
         ttk.Label(top, text="wiki 上的链接可能已过时（组织页 / 旧仓库 / 非仓库地址）。\n"
                             "填 GitHub 仓库或 Modrinth 项目页即可一键下载；留空并确定＝恢复用 wiki 链接。",
-                  foreground="#666", justify="left").pack(anchor="w", padx=10)
+                  style="Muted.TLabel", justify="left").pack(anchor="w", padx=10)
         if wiki_url:
             ttk.Label(top, text=f"wiki 当前链接：{wiki_url}",
-                      foreground="#8a6d00", wraplength=600,
+                      style="Warn.TLabel", wraplength=600,
                       justify="left").pack(anchor="w", padx=10, pady=(4, 0))
         ttk.Label(top, text="新的下载源：").pack(anchor="w", padx=10, pady=(8, 0))
         var = tk.StringVar(value=current)
         ttk.Entry(top, textvariable=var, width=78).pack(fill="x", padx=10)
         ttk.Label(top, text="可填 https://github.com/作者/仓库（或 owner/repo）、"
                             "https://modrinth.com/shader/项目名",
-                  foreground="#666").pack(anchor="w", padx=10, pady=(2, 0))
+                  style="Muted.TLabel").pack(anchor="w", padx=10, pady=(2, 0))
 
         def confirm():
             try:
@@ -1845,7 +1859,7 @@ class GuiApp(PacksGuiMixin):
         ttk.Label(top, text="下载源可填 GitHub 仓库（或 owner/repo）或 Modrinth 项目页，"
                             "例如 https://modrinth.com/resourcepack/modernity/versions\n"
                             "留空则只登记、不检查更新（仍可手动「设置下载源」补上）。",
-                  foreground="#666", justify="left").pack(anchor="w", padx=10)
+                  style="Muted.TLabel", justify="left").pack(anchor="w", padx=10)
 
         def confirm():
             name = name_var.get().strip()
@@ -3397,7 +3411,7 @@ class GuiApp(PacksGuiMixin):
                 if link_url:
                     start = offset + line.rindex(link_url)
                     tag = f"lnk{offset}{start}"
-                    t.tag_configure(tag, foreground="#0a58ca", underline=True)
+                    t.tag_configure(tag, foreground=self.theme.color("link"), underline=True)
                     t.tag_add(tag, f"1.0+{start}c", f"1.0+{end_c(start, link_url)}c")
                     t.tag_bind(tag, "<Double-Button-1>",
                                lambda _e, u=link_url: webbrowser.open(u))
