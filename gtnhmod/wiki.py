@@ -741,6 +741,7 @@ def _entry_from_params(params: dict, group: str, category: str) -> dict:
         "id": entry_id,
         "name_en": name_en,
         "name_cn": name_cn,
+        "icon": (params.get('图标') or '').strip(),
         "group": group,
         "category": category,
         "side": side,

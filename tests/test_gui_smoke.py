@@ -34,10 +34,15 @@ def tearDownModule():
 
 def _new_app(data_dir):
     with mock.patch.object(gui.tk, "Tk", return_value=_test_root):
-        return gui.GuiApp(data_dir)
+        app = gui.GuiApp(data_dir)
+    # 默认冒烟测试不启动真实浏览器或访问上游；网页桥接单独隔离验证。
+    app.add_view_mode.set('offline')
+    app._show_addable_view()
+    return app
 
 
 def _clear_app(app):
+    app.mod_icons.close()
     for callback in app.root.tk.call("after", "info"):
         app.root.after_cancel(callback)
     for child in app.root.winfo_children():
@@ -99,6 +104,37 @@ class TestGuiSmoke(unittest.TestCase):
 
     def test_app_builds(self):
         self.assertTrue(self.app.inst_tree["columns"])
+
+    def test_jar_icon_loads_in_background_and_is_reused_after_restart(self):
+        import zipfile
+        from tests.test_mod_icons import picture
+        from gtnhmod.mod_icons import ModIconCache
+        folder = self.tmp / 'icon-fixture'
+        folder.mkdir(exist_ok=True)
+        jar = folder / 'IconDemo-1.0.jar'
+        with zipfile.ZipFile(jar, 'w') as archive:
+            archive.writestr('logo.png', picture('blue'))
+        key, initial = self.app.mod_icons.request({'id': 'icon-demo'}, [jar])
+        self.assertIs(initial, self.app.mod_icons.fallback)
+        self.assertTrue(_pump(self.app.root, lambda: key in self.app.mod_icons.images))
+        self.assertEqual(self.app.mod_icons.images[key].width(), 16)
+        cache = self.app.cfg.data_dir / 'cache/mod_icons' / (key + '.png')
+        self.assertTrue(cache.is_file())
+        other = ModIconCache(self.app.root, self.app.cfg, mock.Mock())
+        try:
+            with mock.patch('gtnhmod.mod_icons.jar_icon') as read_jar, \
+                 mock.patch('gtnhmod.mod_icons.download_icon') as fetch:
+                other._load(key, '', (str(jar),), ('icondemo',), self.app.cfg.wiki_url, None)
+            read_jar.assert_not_called()
+            fetch.assert_not_called()
+            self.assertTrue(other.emit.call_args.args[1])
+        finally:
+            other.close()
+        with zipfile.ZipFile(jar, 'w') as archive:
+            archive.writestr('logo.png', picture('red', size=(64, 64)))
+        updated, _ = self.app.mod_icons.request({'id': 'icon-demo'}, [jar])
+        self.assertNotEqual(updated, key)
+        self.assertTrue(_pump(self.app.root, lambda: updated in self.app.mod_icons.images))
 
     def test_mod_asset_picker_requires_and_returns_explicit_choice(self):
         from gtnhmod.sources import DownloadCandidate
@@ -694,6 +730,31 @@ class TestCatalogInstallationMarks(unittest.TestCase):
                 self.assertTrue(self.app.add_tree.set(mid, "name").startswith("✓ "))
                 self.assertNotIn("[[", self.app.add_tree.set(mid, "name"))
                 self.assertIn("inst", self.app.add_tree.item(mid, "tags"))
+
+    def test_all_mod_tables_use_small_icons_without_changing_data_columns(self):
+        for tree in (self.app.inst_tree, self.app.add_tree, self.app.um_tree, self.app.cust_tree):
+            self.assertIn('tree', tuple(str(x) for x in tree['show']))
+            self.assertEqual(tree.column('#0', 'width'), 28)
+            for iid in tree.get_children(''):
+                self.assertTrue(tree.item(iid, 'image'))
+        self.assertEqual(self.app.inst_tree['columns'],
+                         ('name', 'side', 'version', 'inst_time', 'latest', 'status'))
+
+    def test_async_icon_completion_keeps_selection_values_tags_and_busy_state(self):
+        from tests.test_mod_icons import picture
+        tree = self.app.inst_tree
+        iid = next(iter(self.expected))
+        tree.selection_set(iid)
+        before = tree.item(iid)
+        self.app.busy = True
+        try:
+            self.app._on_mod_icon(self.app._icon_targets[tree, iid], picture())
+            self.assertTrue(self.app.busy)
+            self.assertEqual(tree.selection(), (iid,))
+            self.assertEqual(tree.item(iid, 'values'), tuple(before['values']))
+            self.assertEqual(tuple(tree.item(iid, 'tags')), tuple(before['tags']))
+        finally:
+            self.app.busy = False
 
     def test_freshly_installed_aliases_do_not_appear_as_unmanaged(self):
         unmanaged = {f.file_name for files in gui.updater.unmatched_files(

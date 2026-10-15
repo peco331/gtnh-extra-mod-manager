@@ -59,6 +59,9 @@ def _same_identity(left, right):
 
 
 def _retain_user_fields(old, fresh):
+    # 图标地址是页面解析后的公开图片缓存；原文件名未变时可离线复用。
+    if old.get('icon_url') and old.get('icon') == fresh.get('icon'):
+        fresh['icon_url'] = old['icon_url']
     fresh["aliases"] = list(dict.fromkeys((old.get("aliases") or []) + (fresh.get("aliases") or [])))
     fresh["legacy_ids"] = list(dict.fromkeys(
         (old.get("legacy_ids") or []) + (fresh.get("legacy_ids") or [])

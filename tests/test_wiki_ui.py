@@ -7,6 +7,9 @@ from unittest import mock
 from gtnhmod import gui
 from gtnhmod.wiki import WikiSyncResult
 from gtnhmod.db import ModsDB
+from gtnhmod.config import Config
+from gtnhmod.installed import InstalledDB
+from gtnhmod import wiki
 
 
 class TestWikiRefreshUiContract(unittest.TestCase):
@@ -76,6 +79,31 @@ class TestWikiRefreshUiContract(unittest.TestCase):
         self.assertTrue(any("未在线同步" in msg for msg in stub.logs))
         self.assertFalse(any("Wiki 在线完成" in msg for msg in stub.logs))
         stub._run_async.assert_not_called()
+
+    def test_new_wiki_entry_immediately_recognizes_an_existing_jar(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cfg = Config(root)
+            mods = root / 'mods'
+            mods.mkdir()
+            (mods / 'Demo-1.2.3.jar').write_bytes(b'isolated scan fixture')
+            cfg.data['mods_folders']['client'] = str(mods)
+            db = ModsDB(root / 'mods_db.json')
+            _, stub = self._stub(db)
+            stub.cfg, stub.installed = cfg, InstalledDB(root / 'installed.json')
+            stub._merged_cache = None
+            self.assertEqual(gui.GuiApp._merged_registry(stub), [])
+            seen = []
+            stub.refresh_addable.side_effect = lambda: seen.extend(gui.GuiApp._merged_registry(stub))
+            result = wiki.wiki_result_from_text(
+                '== 星门规则模组 ==\n=== 功能增强 ===\n{{可添加MOD表格行\n|模组英文名=Demo\n}}',
+                source='online', channel='embedded_browser', request_count=1)
+            with mock.patch.object(gui.messagebox, 'showerror') as error:
+                gui.GuiApp._on_wiki_done(stub, result)
+            self.assertFalse(error.called, stub.logs)
+            self.assertEqual([m['mod_id'] for m in seen], ['demo'])
+            self.assertEqual(seen[0]['install_side'], 'client')
+            self.assertEqual(seen[0]['sides']['client']['version'], '1.2.3')
 
     def test_release_dates_done_applies_results_without_releasing_another_task(self):
         _, stub = self._stub(object())

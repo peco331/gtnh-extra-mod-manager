@@ -1,6 +1,6 @@
 @echo off
 rem 本地打包：生成 dist\GTNHModManager.exe（GUI）与 dist\gtnh-cli.exe（命令行）
-rem 依赖：py -3.10 -m pip install pyinstaller curl_cffi websocket-client
+rem 依赖：py -3.10 -m pip install pyinstaller curl_cffi websocket-client Pillow
 cd /d "%~dp0.."
 set "PYTHON_EXE=py"
 set "PYTHON_VERSION=-3.10"

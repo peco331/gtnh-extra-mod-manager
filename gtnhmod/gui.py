@@ -24,6 +24,8 @@ from . import SIDES, SIDE_LABELS, __version__, net, updater, utils, cookies
 from . import packs as packmod
 from . import packs_wiki as packwiki
 from . import wiki as wikimod
+from . import wiki_browser
+from .mod_icons import ModIconCache, allowed_icon_url
 from .config import Config
 from .db import ModsDB
 from .installed import InstalledDB
@@ -70,11 +72,18 @@ class GuiApp:
         self.root.minsize(980, 640)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.report_callback_exception = self._report_cb_exc
+        self.mod_icons = ModIconCache(self.root, self.cfg,
+                                      lambda key, data: self.queue.put(('mod_icon', key, data)))
+        self._icon_targets = {}
         self._merged_cache = None      # build_merged_registry 结果缓存（一次刷新内复用）
         self._checked_updates = None   # 本次检查的资产与安装状态；更新按钮只消费它
         self._new_ids: set = set()     # 本次刷新wiki新增的mod（查看详情后清除高亮）
         self._pack_updates: dict = {}  # (kind, pack_id) → 可更新到的版本（检查更新后填充）
+        self._wiki_view = None
+        self._wiki_auto_sync = False
         self._build_ui()
+        self.root.bind('<Destroy>', lambda e: (self._close_wiki_view(), self.mod_icons.close())
+                       if e.widget is self.root else None, add='+')
         self._sync_update_button()
         self.root.after(100, self._poll_queue)
         # 启动时刷新全部页签（否则自定义源/未受管页首次是空的）
@@ -130,6 +139,11 @@ class GuiApp:
             self.cfg.save()
         except OSError:
             pass
+        view = self._wiki_view
+        self._close_wiki_view()
+        if view:
+            view.wait_closed(timeout=5)
+        self.mod_icons.close()
         self.root.destroy()
 
     def _report_cb_exc(self, exc, val, tb):
@@ -172,6 +186,10 @@ class GuiApp:
             pass
         style.configure("Treeview", rowheight=24, font=FONT)
         style.configure("Treeview.Heading", font=FONT)
+        style.configure('ModIcon.Treeview', rowheight=24, indent=0)
+        style.layout('ModIcon.Treeview.Item', [('Treeitem.padding', {'sticky': 'nswe', 'children': [
+            ('Treeitem.image', {'side': 'left', 'sticky': ''}),
+            ('Treeitem.text', {'side': 'left', 'sticky': ''})]})])
 
         # 上下可拖拽分栏：主界面 + 底部日志区（经典 PanedWindow，分割条明显可抓）
         main_pane = tk.PanedWindow(self.root, orient="vertical",
@@ -257,6 +275,60 @@ class GuiApp:
         sb.pack(side="right", fill="y")
         widget.configure(yscrollcommand=sb.set)
         return sb
+
+    def _enable_mod_icons(self, tree):
+        tree.configure(show='tree headings', style='ModIcon.Treeview')
+        tree.column('#0', width=28, minwidth=28, stretch=False, anchor='center')
+        tree.heading('#0', text='')
+
+    def _clear_mod_icon_targets(self, tree):
+        self._icon_targets = {target: key for target, key in self._icon_targets.items()
+                              if target[0] is not tree}
+
+    def _mod_icon_jars(self, entry):
+        if not entry:
+            return ()
+        installed = next((m for m in self._merged_registry() if m['mod_id'] == entry['id']), {})
+        return [folder / state['file_name'] for side, state in installed.get('sides', {}).items()
+                if (folder := self.cfg.mods_dir(side)) and state.get('file_name')]
+
+    def _set_mod_icon(self, tree, iid, entry, jars=None):
+        key, image = self.mod_icons.request(entry, self._mod_icon_jars(entry) if jars is None else jars)
+        self._icon_targets[tree, iid] = key
+        tree.item(iid, image=image)
+
+    def _on_mod_icon(self, key, data):
+        self.mod_icons.receive(key, data)
+        image = self.mod_icons.images.get(key, self.mod_icons.fallback)
+        for (tree, iid), current in list(self._icon_targets.items()):
+            if current == key:
+                try:
+                    if tree.winfo_exists() and tree.exists(iid):
+                        tree.item(iid, image=image)
+                except tk.TclError:
+                    pass
+
+    def _refresh_mod_icons(self):
+        for tree, rows in ((self.inst_tree, self.inst_rows), (self.add_tree, self.add_rows)):
+            for iid in rows:
+                self._set_mod_icon(tree, iid, self.db.get(iid))
+        for entry in self.cust_rows:
+            self._set_mod_icon(self.cust_tree, entry['id'], entry)
+
+    def _apply_wiki_icons(self, icons):
+        if self.busy:
+            self._pending_wiki_icons = icons
+            return
+        changed = False
+        entries = {e['id']: e for e in self.db.wiki_mods()}
+        for icon in icons:
+            entry, url = entries.get(icon.get('id')), icon.get('url', '')
+            if entry is not None and allowed_icon_url(url, self.cfg.wiki_url) and entry.get('icon_url') != url:
+                entry['icon_url'] = url
+                changed = True
+        if changed:
+            self.db.save()
+            self._refresh_mod_icons()
 
     # ---- 视图持久化（排序/列宽，存 config.tree_views） ----
     def _view_cfg(self):
@@ -457,6 +529,7 @@ class GuiApp:
         self.inst_tree_frame = tree_frame  # guide 卡片 pack(before=) 用
         self.inst_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                       selectmode="extended")
+        self._enable_mod_icons(self.inst_tree)
         for c, h, w in zip(cols, heads, widths):
             self.inst_tree.heading(c, text=h)
             self.inst_tree.column(c, width=w, anchor="w")
@@ -478,6 +551,32 @@ class GuiApp:
                              self.btn_dirs)
 
     def _build_addable_tab(self, tab):
+        navigation = ttk.Frame(tab)
+        navigation.pack(fill='x', padx=6, pady=4)
+        self.add_view_mode = tk.StringVar(value='wiki')
+        for value, text in (('wiki', 'Wiki 原网页'), ('offline', '离线目录')):
+            ttk.Radiobutton(navigation, text=text, value=value, variable=self.add_view_mode,
+                            command=self._show_addable_view).pack(side='left', padx=(0, 8))
+        for text, action in (('后退', 'back'), ('返回可添加MOD', 'home'), ('刷新网页', 'reload')):
+            ttk.Button(navigation, text=text,
+                       command=lambda a=action: self._navigate_wiki(a)).pack(side='left', padx=2)
+        ttk.Button(navigation, text='在浏览器打开',
+                   command=lambda: webbrowser.open(wikimod._referer(self.cfg))).pack(side='left', padx=2)
+        self.btn_refresh_wiki = ttk.Button(navigation, text='同步管理目录', command=self.refresh_wiki)
+        self.btn_refresh_wiki.pack(side='right')
+        self.wiki_view_status = tk.StringVar(value='直接浏览 Wiki 原网页；安装、更新和备份由管理工具处理。')
+        ttk.Label(tab, textvariable=self.wiki_view_status, wraplength=920,
+                  foreground='#555555').pack(fill='x', padx=8, pady=(0, 4))
+        self.add_content = ttk.Frame(tab)
+        self.add_content.pack(fill='both', expand=True)
+        self.wiki_frame = ttk.Frame(self.add_content)
+        self.wiki_frame.pack(fill='both', expand=True)
+        ttk.Label(self.wiki_frame, text='正在加载 Wiki 网页…\n网络不可用时可切换上方的「离线目录」。',
+                  anchor='center', justify='center').pack(fill='both', expand=True)
+        self.wiki_frame.bind('<Map>', lambda _e: self._ensure_wiki_view())
+        self.wiki_frame.bind('<Configure>', self._resize_wiki_view)
+        self.add_offline_frame = ttk.Frame(self.add_content)
+        tab = self.add_offline_frame
         bar = ttk.Frame(tab)
         bar.pack(fill="x", padx=6, pady=4)
         ttk.Label(bar, text="分类:").pack(side="left")
@@ -490,8 +589,6 @@ class GuiApp:
         self.add_search.trace_add("write", lambda *a: self._debounce_add_search())
         self.add_search_entry = ttk.Entry(bar, textvariable=self.add_search, width=22)
         self.add_search_entry.pack(side="left", padx=(2, 8))
-        self.btn_refresh_wiki = ttk.Button(bar, text="刷新Wiki数据", command=self.refresh_wiki)
-        self.btn_refresh_wiki.pack(side="right")
 
         cols = ("name", "cn", "side", "cat", "installed", "updated", "desc")
         heads = ("名称", "中文名", "端别", "分类", "已安装", "更新时间", "简介")
@@ -499,6 +596,7 @@ class GuiApp:
         tree_frame.pack(fill="both", expand=True, padx=6)
         self.add_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                      selectmode="extended")
+        self._enable_mod_icons(self.add_tree)
         for c, h, w in zip(cols, heads, (250, 110, 70, 90, 80, 115, 265)):
             self.add_tree.heading(c, text=h)
             self.add_tree.column(c, width=w, anchor="w")
@@ -525,6 +623,126 @@ class GuiApp:
         ttk.Button(btns, text="安装（自动选择端别）", command=self.install_addable).pack(side="left", padx=2)
         ttk.Button(btns, text="打开下载页面", command=self.open_link_addable).pack(side="left", padx=2)
 
+    def _show_addable_view(self):
+        online = self.add_view_mode.get() == 'wiki'
+        self.add_offline_frame.pack_forget()
+        self.wiki_frame.pack_forget()
+        (self.wiki_frame if online else self.add_offline_frame).pack(fill='both', expand=True)
+        if online:
+            self._ensure_wiki_view()
+        else:
+            self.refresh_addable()
+
+    def _ensure_wiki_view(self):
+        if self.add_view_mode.get() != 'wiki' or not self.wiki_frame.winfo_ismapped():
+            return
+        if self._wiki_view is not None:
+            if self._wiki_view.proxy == self.cfg.proxy:
+                return
+            self._close_wiki_view()  # 保存代理后再次进入页面，使用新的网络模式。
+        view = wiki_browser.EmbeddedWikiBrowser(
+            self.cfg, lambda kind, value: self.queue.put(('wiki_view', view, kind, value)))
+        self._wiki_view = view
+        self._wiki_auto_sync = False
+        self.wiki_view_status.set('正在加载 Wiki 原网页；若出现人机验证，请在页内完成。')
+        try:
+            self._sync_wiki_view()
+            view.start(self.wiki_frame.winfo_id(), self.wiki_frame.winfo_width(),
+                       self.wiki_frame.winfo_height())
+        except Exception as exc:
+            self._on_wiki_view_event(view, 'error', str(exc))
+
+    def _resize_wiki_view(self, event):
+        if self._wiki_view:
+            try:
+                self._wiki_view.resize(event.width, event.height)
+            except OSError:
+                self._on_wiki_view_event(self._wiki_view, 'error', 'Wiki 网页调整大小失败，可重新打开网页')
+
+    def _close_wiki_view(self):
+        if self._wiki_view:
+            view = self._wiki_view
+            view.close()
+            self._wiki_view = None
+
+    def _navigate_wiki(self, action):
+        self.add_view_mode.set('wiki')
+        self._show_addable_view()
+        if self._wiki_view:
+            self._wiki_view.navigate(action)
+
+    def _sync_wiki_view(self):
+        view = getattr(self, '_wiki_view', None)
+        if view:
+            installed = {m['mod_id']: m for m in self._merged_registry()}
+            view.update(self.db.wiki_mods(), installed, self.busy)
+
+    def _on_wiki_view_event(self, view, kind, value):
+        if view is not self._wiki_view:
+            return  # 关闭或重试前的浏览器不能再向新窗口投递动作。
+        if kind == 'attach':
+            try:
+                view.attach(value, self.wiki_frame.winfo_width(), self.wiki_frame.winfo_height())
+            except OSError:
+                self._on_wiki_view_event(view, 'error', 'Wiki 网页无法嵌入窗口，可重试或使用离线目录')
+        elif kind == 'error':
+            self._close_wiki_view()
+            self.wiki_view_status.set(f'网页未能打开：{value}。已保留离线目录；点「Wiki 原网页」可重试。')
+            self.add_view_mode.set('offline')
+            self._show_addable_view()
+        elif kind == 'page':
+            view.resize(self.wiki_frame.winfo_width(), self.wiki_frame.winfo_height())
+            count, matched = value.get('rows', 0), value.get('matched', 0)
+            if count:
+                self.wiki_view_status.set(f'Wiki 原网页：{count} 个条目，{matched} 个已匹配管理目录。'
+                                          '网页刷新与管理目录同步分别进行。')
+                if not self._wiki_auto_sync and not self.busy:
+                    self._wiki_auto_sync = True
+                    self.refresh_wiki()
+            elif wiki_browser.is_catalog_url(value.get('url'), view.page_url):
+                self.wiki_view_status.set('正在等待 Wiki 正文或人机验证；也可随时切换「离线目录」。')
+            else:
+                self.wiki_view_status.set('正在浏览 Wiki 参考页面；点「返回可添加MOD」回到安装目录。')
+        elif kind == 'action':
+            self._handle_wiki_action(view, value)
+        elif kind == 'icons':
+            if wiki_browser.is_catalog_url(value.get('page'), view.page_url):
+                self._apply_wiki_icons(value.get('icons', []))
+
+    def _handle_wiki_action(self, view, event):
+        # 网页只能提出公开条目的操作意图；端别、源、资产与文件路径仍取自本地数据库。
+        if self.busy or self.root.grab_current() is not None:
+            return
+        action = event.get('action')
+        if action == 'open':
+            from urllib.parse import urlsplit
+            url = event.get('url', '')
+            try:
+                parsed = urlsplit(url)
+                if parsed.scheme in ('https', 'http') and parsed.hostname and not parsed.username:
+                    webbrowser.open(url)
+            except ValueError:
+                pass
+            return
+        if not wiki_browser.is_catalog_url(event.get('page'), view.page_url):
+            return
+        if action == 'sync':
+            self.refresh_wiki()
+            return
+        entry = next((e for e in self.db.wiki_mods() if e['id'] == event.get('id')), None)
+        if entry is None:
+            return
+        if action == 'install':
+            self.install_addable(entries=[entry])
+        elif action == 'detail':
+            self.show_addable_detail(entry=entry)
+        elif action == 'manage':
+            self.nb.select(0)
+            self.refresh_installed()
+            installed = next((m for m in self._merged_registry() if m['mod_id'] == entry['id']), None)
+            if installed:
+                self._show_inst_detail(installed)
+
     def _build_unmanaged_tab(self, tab):
         ttk.Label(tab, text="以下 jar 未被识别（GTNH核心mod等不在可添加列表中的会出现在这里，请勿误删）:",
                   font=FONT).pack(anchor="w", padx=6, pady=(4, 0))
@@ -540,6 +758,7 @@ class GuiApp:
         tree_frame = ttk.Frame(tab)
         tree_frame.pack(fill="both", expand=True, padx=6)
         self.um_tree = ttk.Treeview(tree_frame, columns=cols, show="headings")
+        self._enable_mod_icons(self.um_tree)
         for c, h, w in zip(cols, heads, (70, 380, 90, 130, 80)):
             self.um_tree.heading(c, text=h)
             self.um_tree.column(c, width=w, anchor="w")
@@ -565,6 +784,7 @@ class GuiApp:
         tree_frame = ttk.Frame(tab)
         tree_frame.pack(fill="both", expand=True, padx=6, pady=4)
         self.cust_tree = ttk.Treeview(tree_frame, columns=cols, show="headings")
+        self._enable_mod_icons(self.cust_tree)
         for c, h, w in zip(cols, heads, (200, 120, 70, 110, 360)):
             self.cust_tree.heading(c, text=h)
             self.cust_tree.column(c, width=w, anchor="w")
@@ -869,6 +1089,10 @@ class GuiApp:
             if getattr(self, "_pending_pack_refresh", False):
                 self._pending_pack_refresh = False
                 self.root.after(50, self.refresh_packs)
+        self._sync_wiki_view()
+        if not busy and getattr(self, '_pending_wiki_icons', None):
+            icons, self._pending_wiki_icons = self._pending_wiki_icons, None
+            self._apply_wiki_icons(icons)
 
     def _push_progress(self, done, total, label):
         """后台线程推送进度事件。"""
@@ -929,6 +1153,10 @@ class GuiApp:
                     self._set_busy(payload[0])
                 elif kind == "refresh":
                     self.refresh_all()
+                elif kind == 'wiki_view':
+                    self._on_wiki_view_event(*payload)
+                elif kind == 'mod_icon':
+                    self._on_mod_icon(*payload)
                 elif kind == "_progress":
                     self._on_progress(payload[1])
                 elif kind == "_done":
@@ -956,6 +1184,8 @@ class GuiApp:
                 self._set_busy(False)
         finally:
             try:
+                if self._wiki_view:
+                    self._wiki_view.enable(not self.busy and self.root.grab_current() is None)
                 self.root.after(100, self._poll_queue)
             except tk.TclError:
                 pass  # 窗口已销毁（退出中）
@@ -1897,6 +2127,7 @@ class GuiApp:
         """用（缓存的）注册表重绘已安装列表，尽量恢复选中与滚动位置。"""
         keep_sel = set(self.inst_tree.selection())
         keep_yview = self.inst_tree.yview()
+        self._clear_mod_icon_targets(self.inst_tree)
         self.inst_tree.delete(*self.inst_tree.get_children())
         self.inst_rows = {}
         # 新手引导：两端目录均未配置时显示
@@ -1936,6 +2167,7 @@ class GuiApp:
                         self._fmt_ver(m["latest_version"]),
                         status_txt))
             self.inst_rows[m["mod_id"]] = m
+            self._set_mod_icon(self.inst_tree, m['mod_id'], self.db.get(m['mod_id']))
         # 底部状态栏（路径缩略显示，完整路径见设置页）
         merged = self._merged_registry()
         client = self._short_path(str(self.cfg.client_mods_dir or "未设置"))
@@ -3197,6 +3429,7 @@ class GuiApp:
         self.cat_combo["values"] = cats
         keep_sel = set(self.add_tree.selection())
         keep_yview = self.add_tree.yview()
+        self._clear_mod_icon_targets(self.add_tree)
         self.add_tree.delete(*self.add_tree.get_children())
         cur = self.cat_var.get()
         kw = self.add_search.get().strip().lower()
@@ -3220,6 +3453,7 @@ class GuiApp:
                                           .replace("T", " "))[:16] or "—",
                                          desc[:60] + ("…" if len(desc) > 60 else "")))
             self.add_rows[e["id"]] = e
+            self._set_mod_icon(self.add_tree, e['id'], e)
         n_new = sum(1 for i in self.add_rows if i in self._new_ids)
         self._set_status(f"可添加MOD：分类「{cur}」共 {len(groups.get(cur, []))} 个"
                          f"，显示 {len(self.add_rows)} 个"
@@ -3229,18 +3463,20 @@ class GuiApp:
             self.add_tree.selection_set([i for i in keep_sel if i in self.add_rows])
         if keep_yview[0] > 0:
             self.add_tree.yview_moveto(keep_yview[0])
+        self._sync_wiki_view()
 
     def _selected_addable(self):
         sel = self.add_tree.selection()
         return [self.add_rows[i] for i in sel if i in self.add_rows]
 
-    def show_addable_detail(self):
-        sel = self._selected_addable()
+    def show_addable_detail(self, entry=None):
+        sel = [entry] if entry is not None else self._selected_addable()
         if not sel:
             return
         e = sel[0]
         self._clear_new_mark(e)  # 查看过详情后不再高亮"新增"
-        nav_ids = list(self.add_tree.get_children(""))  # 当前视图顺序（上一个/下一个导航用）
+        nav_ids = ([e['id'] for e in self.db.wiki_mods()] if entry is not None else
+                   list(self.add_tree.get_children("")))
         marks = self._installed_marks()
         top = self._dialog(f"{e['name_en']} {e['name_cn']}", "680x520")
         frame = ttk.Frame(top)
@@ -3334,14 +3570,23 @@ class GuiApp:
         """详情窗的上一个/下一个：先关掉旧窗（否则点一次叠一层），再开新窗。"""
         if old_top is not None:
             old_top.destroy()
+        if self.add_view_mode.get() == 'wiki':
+            entry = self.db.get(mod_id)
+            if entry:
+                self.show_addable_detail(entry=entry)
+            return
         if mod_id in self.add_rows:
             self.add_tree.selection_set(mod_id)
             self.add_tree.see(mod_id)
             self.show_addable_detail()
+        else:
+            entry = self.db.get(mod_id)
+            if entry:
+                self.show_addable_detail(entry=entry)
 
-    def install_addable(self):
+    def install_addable(self, entries=None):
         """安装：按mod端别声明自动选择端别。"""
-        sel = self._selected_addable()
+        sel = list(entries) if entries is not None else self._selected_addable()
         if not sel:
             messagebox.showinfo("提示", "请先在列表中选择mod")
             return
@@ -3629,9 +3874,13 @@ class GuiApp:
             return
         self._set_busy(True)
         self._log("正在抓取 wiki 数据...")
+        view = getattr(self, '_wiki_view', None)
+        use_embedded = view is not None and view.ready
         progress_cb = lambda msg: self.queue.put(("log", msg))
         def job():
             try:
+                if use_embedded:
+                    return view.fetch_wiki()
                 return wikimod.sync_wiki(
                     self.cfg, self.db,
                     interactive=True,
@@ -3679,6 +3928,7 @@ class GuiApp:
             messagebox.showerror("刷新Wiki失败", str(e))
             self._set_busy(False)
             return
+        self._merged_cache = None  # 新目录可能识别出之前未受管的 JAR，立即重算网页安装状态。
         # 本次新增的 mod 高亮显示（查看详情后清除；下次刷新覆盖）
         self._new_ids = {m["id"] for m in self.db.mods} - before
         if self._new_ids:
@@ -3740,6 +3990,7 @@ class GuiApp:
             return
         kw = getattr(self, "um_search", tk.StringVar()).get().strip().lower()
         keep_yview = self.um_tree.yview()
+        self._clear_mod_icon_targets(self.um_tree)
         self.um_tree.delete(*self.um_tree.get_children())
         self.um_rows = []
         for side in SIDES:
@@ -3756,6 +4007,8 @@ class GuiApp:
                                     values=(SIDE_LABELS[side], f.file_name,
                                             f.version or "", mtime, size))
                 self.um_rows.append((iid, side, f))
+                self._set_mod_icon(self.um_tree, iid, {'id': f.name_part or f.file_name,
+                                                      'name_en': f.name_part}, [f.path])
         self._set_status(f"未受管文件：{len(self.um_rows)} 个")
         self._reapply_sort(self.um_tree)
         if keep_yview[0] > 0:
@@ -3903,6 +4156,7 @@ class GuiApp:
     def refresh_custom(self):
         if not hasattr(self, "cust_tree"):
             return
+        self._clear_mod_icon_targets(self.cust_tree)
         self.cust_tree.delete(*self.cust_tree.get_children())
         self.cust_rows = []
         for e in self.db.custom_mods():
@@ -3915,6 +4169,7 @@ class GuiApp:
                                           SIDE_LABELS.get(e["side"], e["side"]),
                                           e["source_type"], src_txt))
             self.cust_rows.append(e)
+            self._set_mod_icon(self.cust_tree, e['id'], e)
         self._set_status(f"自定义源：{len(self.cust_rows)} 个")
         self._reapply_sort(self.cust_tree)
 
