@@ -536,13 +536,16 @@ def _side_warning(entry: dict, side: str) -> str:
 
 # ---------- 检查更新 ----------
 
-def fetch_release_dates(cfg, entries, *, progress_cb=None) -> dict:
+def fetch_release_dates(cfg, entries, *, progress_cb=None, cancel_event=None,
+                        timeout_seconds=90) -> dict:
     """并发获取 GitHub 发布时间，只返回结果，绝不在工作线程写 DB。
 
     调用者在自己的线程调用 ``apply_release_dates``，避免 GUI 后台任务与主线程
     同时读改写数据库。返回 ``{dates, errors, failed, checked}``。
     """
-    import concurrent.futures
+    import queue
+    import threading
+    import time
 
     targets = [entry for entry in entries if entry.get("source_type") == "github"]
     dates, errors = {}, {}
@@ -557,17 +560,48 @@ def fetch_release_dates(cfg, entries, *, progress_cb=None) -> dict:
         except Exception as e:
             return mod_id, None, str(e)
 
-    max_workers = min(4, len(targets))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_fetch, entry) for entry in targets]
-        for future in concurrent.futures.as_completed(futures):
-            mod_id, published_at, error = future.result()
+    pending, completed = queue.Queue(), queue.Queue()
+    stop = threading.Event()
+    deadline = time.monotonic() + timeout_seconds
+    for entry in targets:
+        pending.put(entry)
+
+    def cancelled():
+        return stop.is_set() or (cancel_event is not None and cancel_event.is_set())
+
+    def worker():
+        while not cancelled() and time.monotonic() < deadline:
+            try:
+                entry = pending.get_nowait()
+            except queue.Empty:
+                return
+            completed.put(_fetch(entry))
+
+    # 这些线程只查询源和原子缓存，不修改安装文件或目录数据库。
+    # ThreadPoolExecutor 会在解释器退出时等待请求，无法满足关闭只读查询的要求。
+    for _ in range(min(4, len(targets))):
+        threading.Thread(target=worker, daemon=True).start()
+    remaining = {entry.get('id') for entry in targets}
+    try:
+        while remaining and not cancelled():
+            wait = deadline - time.monotonic()
+            if wait <= 0:
+                break
+            try:
+                mod_id, published_at, error = completed.get(timeout=min(.1, wait))
+            except queue.Empty:
+                continue
+            remaining.discard(mod_id)
             if error:
                 errors[mod_id] = error
             elif published_at:
                 dates[mod_id] = published_at
             if progress_cb:
                 progress_cb(mod_id, published_at if not error else None)
+    finally:
+        stop.set()
+    reason = '发布时间查询已取消' if cancel_event is not None and cancel_event.is_set() else '发布时间查询超时'
+    errors.update({mod_id: reason for mod_id in remaining})
     return {"dates": dates, "errors": errors, "failed": len(errors),
             "checked": len(targets)}
 

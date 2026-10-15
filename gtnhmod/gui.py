@@ -43,6 +43,14 @@ INSTALL_SIDE_CN = {"both": "双端", "client": "仅客户端", "server": "仅服
 FONT = ("Microsoft YaHei UI", 9)
 
 
+def _has_grab(root):
+    """Tcl 创建的下拉框弹层没有 Python 控件对象，但仍持有输入抓取。"""
+    try:
+        return root.grab_current() is not None
+    except (KeyError, tk.TclError):
+        return True
+
+
 def side_state_text(st) -> str:
     """某端别的安装状态简述：v1.0.0 ✓ / v1.0.0 ✗禁用 / v1.0.0 ↑可更新 / —。"""
     if st is None:
@@ -65,6 +73,8 @@ class GuiApp(PacksGuiMixin):
         self.queue: queue.Queue = queue.Queue()
         self.busy = False
         self._active_jobs = 0
+        self._closing = False
+        self._release_dates_cancel = threading.Event()
 
         self.root = tk.Tk()
         self.root.title(f"GTNH 额外MOD管理工具 v{__version__}")
@@ -130,6 +140,8 @@ class GuiApp(PacksGuiMixin):
         if self.busy or getattr(self, '_active_jobs', 0):
             messagebox.showinfo("任务尚未完成", "后台任务仍在执行，请等任务完成或关闭当前操作对话框后退出。")
             return
+        self._closing = True
+        self._release_dates_cancel.set()
         for attr in ("_inst_search_after", "_add_search_after", "_um_search_after",
                      "_pack_search_after"):
             if getattr(self, attr, None):
@@ -429,7 +441,10 @@ class GuiApp(PacksGuiMixin):
     def _dialog(self, title, size="600x400", *, modal=True):
         """统一对话框：Esc 关闭、跟随主窗；modal=False 时不抢占主窗口输入。"""
         top = tk.Toplevel(self.root)
-        previous_grab = self.root.grab_current()
+        try:
+            previous_grab = self.root.grab_current()
+        except (KeyError, tk.TclError):
+            previous_grab = None  # Tcl 内部的下拉框弹层不参与父对话框恢复。
         def restore_grab(event):
             if event.widget is top and previous_grab is not None:
                 try:
@@ -731,7 +746,7 @@ class GuiApp(PacksGuiMixin):
 
     def _handle_wiki_action(self, view, event):
         # 网页只能提出公开条目的操作意图；端别、源、资产与文件路径仍取自本地数据库。
-        if self.busy or self.root.grab_current() is not None:
+        if self.busy or _has_grab(self.root):
             return
         action = event.get('action')
         if action == 'open':
@@ -1147,16 +1162,17 @@ class GuiApp(PacksGuiMixin):
                                     f"{label} {done / 1048576:.1f}/{total / 1048576:.1f} MB")
         return cb
 
-    def _run_async(self, fn, on_done=None):
-        """在后台线程执行 fn()；完成后在主线程回调 on_done(result)。"""
+    def _run_async(self, fn, on_done=None, *, blocking=True):
+        """后台执行；只读补充查询可不占用退出保护，结果仍在主线程处理。"""
 
-        self._active_jobs = getattr(self, '_active_jobs', 0) + 1
+        if blocking:
+            self._active_jobs = getattr(self, '_active_jobs', 0) + 1
         def worker():
             try:
                 result = fn()
-                self.queue.put(("_done", on_done, result))
+                self.queue.put(("_done" if blocking else "_background_done", on_done, result))
             except Exception as e:
-                self.queue.put(("_error", on_done, str(e)))
+                self.queue.put(("_error" if blocking else "_background_error", on_done, str(e)))
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_tab_changed(self, event):
@@ -1170,6 +1186,8 @@ class GuiApp(PacksGuiMixin):
          self.refresh_packs, lambda: None)[idx]()
 
     def _poll_queue(self):
+        if self._closing:
+            return
         try:
             while True:
                 item = self.queue.get_nowait()
@@ -1188,20 +1206,23 @@ class GuiApp(PacksGuiMixin):
                     self._on_pack_view_event(*payload)
                 elif kind == "_progress":
                     self._on_progress(payload[1])
-                elif kind == "_done":
-                    self._active_jobs = max(0, getattr(self, '_active_jobs', 0) - 1)
+                elif kind in ("_done", "_background_done"):
+                    if kind == "_done":
+                        self._active_jobs = max(0, getattr(self, '_active_jobs', 0) - 1)
                     if payload[0]:
                         payload[0](payload[1])
-                elif kind == "_error":
-                    self._active_jobs = max(0, getattr(self, '_active_jobs', 0) - 1)
+                elif kind in ("_error", "_background_error"):
+                    if kind == "_error":
+                        self._active_jobs = max(0, getattr(self, '_active_jobs', 0) - 1)
                     msg = payload[1]
                     self._log(f"[错误] {msg}")
-                    self._set_status(f"操作失败：{msg}")
+                    if kind == "_error":
+                        self._set_status(f"操作失败：{msg}")
                     if payload[0]:
                         # 有回调的（批量流程逐项跳过等）由回调决定呈现方式，
                         # 避免网络断开时 N 个失败连弹 N 个模态框
                         payload[0](None)
-                    else:
+                    elif kind == "_error":
                         self._set_busy(False)
                         messagebox.showerror("操作失败", msg)
         except queue.Empty:
@@ -1213,13 +1234,20 @@ class GuiApp(PacksGuiMixin):
                 self._set_busy(False)
         finally:
             try:
-                if self._wiki_view:
-                    self._wiki_view.enable(not self.busy and self.root.grab_current() is None)
-                if self._pack_view:
-                    self._pack_view.enable(not self.busy and self.root.grab_current() is None)
-                self.root.after(100, self._poll_queue)
-            except tk.TclError:
-                pass  # 窗口已销毁（退出中）
+                if not self._closing:
+                    enabled = not self.busy and not _has_grab(self.root)
+                    for view in (self._wiki_view, self._pack_view):
+                        if view:
+                            view.enable(enabled)
+            except Exception:
+                self._report_cb_exc(*sys.exc_info())
+            finally:
+                # 浏览器状态同步或异常报告失败也不能中断完成通知的轮询。
+                if not self._closing:
+                    try:
+                        self.root.after(100, self._poll_queue)
+                    except tk.TclError:
+                        pass  # 窗口已销毁（退出中）
 
     def refresh_all(self):
         self.refresh_installed()
@@ -3801,9 +3829,13 @@ class GuiApp(PacksGuiMixin):
         import copy
         entries = copy.deepcopy(self.db.all())
         self._log("Wiki 刷新完成；正在后台获取下载页发布时间...")
+        self._release_dates_cancel.set()
+        cancel = self._release_dates_cancel = threading.Event()
         self._run_async(
-            lambda: updater.fetch_release_dates(self.cfg, entries),
-            on_done=lambda result: self._on_release_dates_done(result, entries=entries))
+            lambda: updater.fetch_release_dates(self.cfg, entries, cancel_event=cancel),
+            on_done=lambda result: self._on_release_dates_done(result, entries=entries)
+            if not cancel.is_set() else None,
+            blocking=False)
 
     def _on_release_dates_done(self, result, *, entries=None):
         # 日期查询不占用 busy，不能在完成时解除其他安装/更新任务的锁。

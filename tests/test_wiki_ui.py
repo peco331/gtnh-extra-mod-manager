@@ -1,5 +1,6 @@
 import unittest
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -25,6 +26,7 @@ class TestWikiRefreshUiContract(unittest.TestCase):
             _set_busy=lambda value: stub.busy_states.append(value),
             refresh_addable=mock.Mock(),
             _run_async=mock.Mock(),
+            _release_dates_cancel=threading.Event(),
             _on_release_dates_done=mock.Mock(),
         )
         return entry, stub
@@ -52,12 +54,13 @@ class TestWikiRefreshUiContract(unittest.TestCase):
         self.assertTrue(any("Wiki 在线完成" in msg for msg in stub.logs))
         self.assertTrue(any("curl_cffi" in msg and "123" in msg for msg in stub.logs))
         stub._run_async.assert_called_once()
+        self.assertFalse(stub._run_async.call_args.kwargs['blocking'])
         job = stub._run_async.call_args.args[0]
         with mock.patch.object(gui.updater, "fetch_release_dates",
                                return_value={"dates": {}, "errors": {}, "failed": 0,
                                              "checked": 0}) as fetch:
             job()
-        fetch.assert_called_once_with(stub.cfg, [entry])
+        fetch.assert_called_once_with(stub.cfg, [entry], cancel_event=stub._release_dates_cancel)
 
     def test_cache_result_is_never_merged_and_never_reported_as_online(self):
         db = SimpleNamespace(

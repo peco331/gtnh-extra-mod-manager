@@ -164,6 +164,36 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertIs(self.app.root.grab_current(), parent)
         parent.destroy()
 
+    def test_native_combobox_popdown_does_not_stop_background_completion(self):
+        app = self.app
+        combo = ttk.Combobox(app.root, values=('first', 'second'), state='readonly')
+        combo.pack()
+        view = mock.Mock(ready=False)
+        done = mock.Mock()
+        original_view = app._wiki_view
+        try:
+            app.root.update()
+            app.root.tk.call('ttk::combobox::Post', str(combo))
+            app.root.update()
+            # 复现用户日志：弹层由 Tcl 创建，Tkinter 无法映射成 Python 控件。
+            with self.assertRaises(KeyError):
+                app.root.grab_current()
+            self.assertTrue(gui._has_grab(app.root))
+            app._wiki_view = view
+            with mock.patch.object(app, '_report_cb_exc') as error:
+                app._run_async(lambda: 'finished', on_done=done)
+                self.assertTrue(_pump(app.root, lambda: done.called))
+                self.assertEqual(app._active_jobs, 0)
+                error.assert_not_called()
+            done.assert_called_once_with('finished')
+            view.enable.assert_called_with(False)
+            dialog = app._dialog('下拉框期间打开对话框')
+            dialog.destroy()
+        finally:
+            app.root.tk.call('ttk::combobox::Unpost', str(combo))
+            app._wiki_view = original_view
+            combo.destroy()
+
     def test_settings_scrolls_at_minimum_window_size_and_save_stays_visible(self):
         old_geometry = self.app.root.geometry()
         old_tab = self.app.nb.index('current')

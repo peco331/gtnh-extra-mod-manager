@@ -420,7 +420,8 @@ class PacksGuiMixin:
             self._refresh_pack_icons()
 
     def _handle_pack_wiki_action(self, view, event):
-        if self.busy or self.root.grab_current() is not None:
+        from .gui import _has_grab
+        if self.busy or _has_grab(self.root):
             return
         if event.get('action') == 'open':
             # 共用 MOD 桥接的 HTTP(S) 链接校验；不接受文件或命令协议。

@@ -353,6 +353,36 @@ class TestEmptyFreshGuard(unittest.TestCase):
 
 
 class TestRefreshReleaseDates(unittest.TestCase):
+    def test_slow_date_query_has_batch_deadline_and_does_not_hold_process_open(self):
+        import subprocess
+        code = '''
+import threading
+from types import SimpleNamespace
+from gtnhmod import updater
+updater.Source.from_entry = lambda *args: SimpleNamespace(check=lambda *a, **k: threading.Event().wait())
+result = updater.fetch_release_dates(None, [{'id': 'slow', 'source_type': 'github'}], timeout_seconds=.05)
+assert result['failed'] == 1 and result['dates'] == {}
+assert '超时' in result['errors']['slow']
+print('bounded')
+'''
+        result = subprocess.run([sys.executable, '-c', code], capture_output=True,
+                                text=True, timeout=5, encoding='utf-8')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('bounded', result.stdout)
+
+    def test_cancelled_date_query_starts_no_requests_and_retains_existing_dates(self):
+        import threading
+        from unittest.mock import patch
+        cancel = threading.Event()
+        cancel.set()
+        entry = {'id': 'demo', 'source_type': 'github', 'release_date': 'KEEP'}
+        with patch('gtnhmod.updater.Source.from_entry') as factory:
+            result = updater.fetch_release_dates(None, [entry], cancel_event=cancel)
+        factory.assert_not_called()
+        self.assertEqual(entry['release_date'], 'KEEP')
+        self.assertEqual(result['dates'], {})
+        self.assertIn('取消', result['errors']['demo'])
+
     def test_fetch_release_dates_is_concurrent_and_does_not_mutate_entries(self):
         """后台抓取只返回结果；DB 写入必须留在调用线程。"""
         from types import SimpleNamespace
