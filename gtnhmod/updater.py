@@ -41,17 +41,22 @@ def _update_target_context(cfg, db, installed, side, mod_id, names):
     }
 
 
-def check_update_plan(cfg, db, installed, *, progress_cb=None):
-    """一次检查产生展示结果、可执行资产和本地状态快照。"""
+def check_update_plan(cfg, db, installed, *, progress_cb=None, target_mod_ids=None):
+    """一次检查产生展示结果、可执行资产和本地状态快照。
+
+    target_mod_ids 给定时只检查这些 MOD（全部更新/更新选中按需获取下载信息）。"""
     checked_at = time.monotonic()
     registry = build_registry(cfg, db, installed)
     context = {}
     for side, rows in registry.items():
         for mid, state in rows.items():
+            if target_mod_ids is not None and mid not in target_mod_ids:
+                continue
             if state["enabled"] and not state["locked"]:
                 names = [state["file_name"], *(state.get("duplicates") or [])]
                 context[(side, mid)] = _update_target_context(cfg, db, installed, side, mid, names)
-    plan = build_update_plan(cfg, db, installed, registry=registry, progress_cb=progress_cb)
+    plan = build_update_plan(cfg, db, installed, registry=registry, progress_cb=progress_cb,
+                             target_mod_ids=target_mod_ids)
     dirty = False
     for item in plan:
         if item.get("target_version") and item["action"] != "error":

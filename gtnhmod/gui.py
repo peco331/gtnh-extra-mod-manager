@@ -1994,6 +1994,7 @@ class GuiApp(PacksGuiMixin):
             return
         self._merged_cache = None  # 磁盘/数据库可能已变化
         self._render_installed()
+        self._sync_update_button()  # 按钮数量跟随列表里的「可更新」
 
     @staticmethod
     def _name_cell(m) -> str:
@@ -2122,11 +2123,12 @@ class GuiApp(PacksGuiMixin):
             on_done=self._on_update_check_done)
 
     def _sync_update_button(self):
-        snapshot = getattr(self, "_checked_updates", None)
-        count = len({p["mod_id"] for p in snapshot["plan"] if p["action"] == "update"}) if snapshot else 0
-        if hasattr(self, "btn_update_all"):
-            self.btn_update_all.configure(text=f"全部更新 ({count})" if snapshot else "全部更新",
-                                          state="normal" if count and not self.busy else "disabled")
+        """按列表中「可更新」的数量启用全部更新，与是否点过「检查更新」无关。"""
+        if not hasattr(self, "btn_update_all"):
+            return
+        count = len(self._updatable_ids())
+        self.btn_update_all.configure(text=f"全部更新 ({count})" if count else "全部更新",
+                                      state="normal" if count and not self.busy else "disabled")
 
     def _on_update_check_done(self, snapshot):
         self._checked_updates = snapshot
@@ -2334,33 +2336,70 @@ class GuiApp(PacksGuiMixin):
             return
         self._use_checked_updates()
 
-    def _use_checked_updates(self, target_ids=None):
+    def _updatable_ids(self) -> set:
+        """列表中标为「可更新」的 MOD（未锁定、已启用）；全部更新按钮以此为准。"""
+        return {m["mod_id"] for m in map(self._checked_status, self._merged_registry())
+                if m["status"] == "update_avail" and not m.get("locked")}
+
+    def _use_checked_updates(self, target_ids=None, *, allow_fetch=True):
+        """全部更新 / 更新选中。
+
+        列表里有「可更新」就能用，不要求先点「检查更新」：本次会话已有下载信息且
+        本地状态未变的条目直接使用；缺少或已过时的条目先只针对它们获取下载信息，
+        再统一展示确认表。"""
+        wanted = set(target_ids) if target_ids is not None else self._updatable_ids()
+        if not wanted:
+            messagebox.showinfo("没有可更新的 MOD", "列表中没有标记为「可更新」的 MOD。")
+            return
         snapshot = getattr(self, "_checked_updates", None)
-        if not snapshot:
-            messagebox.showinfo("请先检查更新", "请先点击“检查更新”，全部更新只执行本次检查出的可更新项目。")
-            return
+        covered = {p["mod_id"] for p in snapshot["plan"]} if snapshot else set()
         plan = deepcopy([p for p in snapshot["plan"] if p["action"] == "update"
-                         and (target_ids is None or p["mod_id"] in target_ids)])
-        plan, changed = updater.split_checked_updates(self.cfg, self.db, self.installed, snapshot, plan)
-        if changed:
-            # 只移除检查后发生变化的条目，其余检查结果照常可用
-            stale = {p["mod_id"] for p in changed}
-            self._checked_updates = {**snapshot, "plan": [p for p in snapshot["plan"]
-                                                          if p["mod_id"] not in stale]}
-            self._sync_update_button()
-            names = "、".join(dict.fromkeys(p["name"] for p in changed))
-            self._log(f"检查后文件、锁定或下载源已变化，已移出本次更新：{names}（需重新检查）")
-            if not plan:
-                messagebox.showinfo("需要重新检查", f"{names} 在检查后发生了变化，请重新点击“检查更新”。")
-                return
-            messagebox.showinfo("部分项目需重新检查",
-                                f"{names} 在检查后发生了变化，已跳过；其余项目继续使用本次检查结果。")
-        if not plan:
-            messagebox.showinfo("没有可自动更新的项目", "本次检查没有符合条件的更新项目，请查看列表和检查日志。")
+                         and p["mod_id"] in wanted]) if snapshot else []
+        plan, changed = (updater.split_checked_updates(self.cfg, self.db, self.installed, snapshot, plan)
+                         if snapshot else ([], []))
+        need = (wanted - covered) | {p["mod_id"] for p in changed}
+        if need and allow_fetch:
+            self._fetch_then_update(need, target_ids)
             return
-        self._log(f'使用本次检查结果，准备更新 {len({p["mod_id"] for p in plan})} 个 MOD。')
+        if not plan:
+            messagebox.showinfo("没有可自动更新的项目",
+                                "这些 MOD 当前没有可自动安装的更新（可能已是最新、需手动处理或查询失败），"
+                                "请查看列表状态和操作日志。")
+            return
+        self._log(f'准备更新 {len({p["mod_id"] for p in plan})} 个 MOD。')
         self._show_update_plan_dialog(plan, self._execute_update_plan,
                                       checked_at=snapshot["checked_at"], snapshot=snapshot)
+
+    def _fetch_then_update(self, mod_ids, target_ids):
+        """只为需要的 MOD 获取最新下载信息，完成后进入确认表。"""
+        self._set_busy(True)
+        self._log(f"正在获取 {len(mod_ids)} 个 MOD 的最新下载信息...")
+        progress_cb = lambda done, total, name: self._push_progress(
+            done, total, f"获取下载信息 {done}/{total}: {name}")
+
+        def done(fresh):
+            self._set_busy(False)
+            if fresh is None:
+                return
+            self._merge_checked_updates(fresh, mod_ids)
+            self.refresh_installed()
+            self._use_checked_updates(target_ids, allow_fetch=False)
+
+        self._run_async(lambda: updater.check_update_plan(
+            self.cfg, self.db, self.installed, progress_cb=progress_cb,
+            target_mod_ids=set(mod_ids)), on_done=done)
+
+    def _merge_checked_updates(self, fresh, mod_ids):
+        """用新获取的结果替换这些 MOD 的旧条目，其余条目保留。"""
+        old = getattr(self, "_checked_updates", None)
+        if not old:
+            self._checked_updates = fresh
+            return
+        keep = [p for p in old["plan"] if p["mod_id"] not in mod_ids]
+        context = {k: v for k, v in old["context"].items() if k[1] not in mod_ids}
+        context.update(fresh["context"])
+        self._checked_updates = {"plan": keep + fresh["plan"], "checked_at": fresh["checked_at"],
+                                 "context": context}
 
     def _execute_update_plan(self, plan: list, *, checked_at=None, snapshot=None):
         """一次确认后执行计划中的所有更新项，消除二次联网与多余弹窗。"""

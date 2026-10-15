@@ -54,6 +54,8 @@ class TestCheckedUpdates(unittest.TestCase):
         app = gui.GuiApp.__new__(gui.GuiApp)
         app.cfg, app.db, app.installed = self.cfg, self.db, self.inst
         app._checked_updates, app.busy = snapshot, False
+        app._merged_cache = None
+        app.refresh_installed = lambda: setattr(app, "_merged_cache", None)
         app._log = Mock()
         app._sync_update_button = Mock()
         app._show_update_plan_dialog = Mock()
@@ -67,6 +69,7 @@ class TestCheckedUpdates(unittest.TestCase):
     def test_all_update_uses_only_checked_updates_without_scan_or_query(self):
         snapshot = self.check()
         app = self.app(snapshot)
+        app._merged_registry()  # 真实窗口里列表已渲染，按钮数量复用这份结果
         with patch.object(scanner, "scan_folder", side_effect=AssertionError("unexpected rescan")), \
                 patch.object(updater, "list_install_options", side_effect=AssertionError("unexpected query")):
             app.update_all()
@@ -85,7 +88,7 @@ class TestCheckedUpdates(unittest.TestCase):
         self.assertEqual(app._on_update_done.call_args.args[0][0]["action"], "updated")
         self.assertFalse([p for p in app._checked_updates["plan"] if p["action"] == "update"])
 
-    def test_no_check_does_not_start_work(self):
+    def test_nothing_marked_updatable_does_not_start_work(self):
         app = self.app(None)
         with patch.object(gui.messagebox, "showinfo") as info, \
                 patch.object(updater, "build_update_plan") as query:
@@ -93,6 +96,28 @@ class TestCheckedUpdates(unittest.TestCase):
         info.assert_called_once()
         query.assert_not_called()
         app._show_update_plan_dialog.assert_not_called()
+
+    def test_update_all_works_without_a_check_this_session(self):
+        """列表里有「可更新」（上次记录的远端版本）就能全部更新，只为这些 MOD 获取下载信息。"""
+        self.inst.touch_checked("client", self.mid, "2.0")
+        app = self.app(None)
+        with patch.object(updater, "list_install_options", side_effect=self.lookup) as query:
+            app.update_all()
+        self.assertEqual({c.args[0]["id"] for c in query.call_args_list}, {self.mid})
+        plan = app._show_update_plan_dialog.call_args.args[0]
+        self.assertEqual([(p["mod_id"], p["sides"]) for p in plan], [(self.mid, ["client"])])
+
+    def test_update_button_follows_updatable_marks(self):
+        app = self.app(None)
+        app.btn_update_all = Mock()
+        app._sync_update_button = gui.GuiApp._sync_update_button.__get__(app)
+        app._sync_update_button()
+        self.assertEqual(app.btn_update_all.configure.call_args.kwargs["state"], "disabled")
+        self.inst.touch_checked("client", self.mid, "2.0")
+        app._merged_cache = None
+        app._sync_update_button()
+        self.assertEqual(app.btn_update_all.configure.call_args.kwargs,
+                         {"text": "全部更新 (1)", "state": "normal"})
 
     def test_result_does_not_expire_with_time(self):
         snapshot = self.check()
@@ -145,22 +170,37 @@ class TestCheckedUpdates(unittest.TestCase):
         with patch.object(updater, "check_updates", return_value=[]):
             app._check_single({"mod_id": self.mid, "name_en": "PlanMod"})
         app.busy = False
-        app.update_all()
+        with patch.object(updater, "list_install_options", side_effect=self.lookup) as query:
+            app.update_all()
+        # 其余结果直接复用，只重新获取刚单独检查过的那个
+        self.assertEqual({c.args[0]["id"] for c in query.call_args_list}, {self.mid})
         plan = app._show_update_plan_dialog.call_args.args[0]
-        self.assertEqual([p["mod_id"] for p in plan], [other])
+        self.assertEqual({p["mod_id"] for p in plan}, {other, self.mid})
 
-    def test_changed_item_is_skipped_but_others_still_update(self):
+    def test_item_locked_after_check_is_left_out_quietly(self):
         other = self.add_second_update()
         with patch.object(updater, "list_install_options", side_effect=self.lookup):
             snapshot = updater.check_update_plan(self.cfg, self.db, self.inst)
-        self.inst.set("client", self.mid, locked=True)  # 检查后锁定其中一个
+        self.inst.set("client", self.mid, locked=True)  # 锁定后不再算「可更新」
         app = self.app(snapshot)
-        with patch.object(gui.messagebox, "showinfo") as info:
+        with patch.object(gui.messagebox, "showinfo") as info, \
+                patch.object(updater, "list_install_options", side_effect=AssertionError("unexpected query")):
             app.update_all()
-        self.assertIn("PlanMod", info.call_args.args[1])
+        info.assert_not_called()
         plan = app._show_update_plan_dialog.call_args.args[0]
         self.assertEqual([p["mod_id"] for p in plan], [other])
-        self.assertNotIn(self.mid, {p["mod_id"] for p in app._checked_updates["plan"]})
+
+    def test_file_changed_after_check_is_fetched_again_not_dropped(self):
+        other = self.add_second_update()
+        with patch.object(updater, "list_install_options", side_effect=self.lookup):
+            snapshot = updater.check_update_plan(self.cfg, self.db, self.inst)
+        self.jar(self.cfg.mods_dir("client") / "PlanMod-1.0.jar")  # 检查后文件被替换
+        app = self.app(snapshot)
+        with patch.object(updater, "list_install_options", side_effect=self.lookup) as query:
+            app.update_all()
+        self.assertEqual({c.args[0]["id"] for c in query.call_args_list}, {self.mid})
+        plan = app._show_update_plan_dialog.call_args.args[0]
+        self.assertEqual({p["mod_id"] for p in plan}, {other, self.mid})
 
     def test_changed_file_source_lock_and_directory_require_recheck(self):
         for change in ("file", "source", "lock", "directory", "disable"):
