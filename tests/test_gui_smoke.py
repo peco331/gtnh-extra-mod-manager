@@ -109,6 +109,11 @@ class TestGuiSmoke(unittest.TestCase):
     def test_app_builds(self):
         self.assertTrue(self.app.inst_tree["columns"])
 
+    def test_window_uses_bundled_app_icon(self):
+        assets = Path(gui.__file__).resolve().parent / "assets"
+        self.assertTrue((assets / "icon.ico").is_file())
+        self.assertEqual((self.app._app_icon.width(), self.app._app_icon.height()), (256, 256))
+
     def test_jar_icon_loads_in_background_and_is_reused_after_restart(self):
         import zipfile
         from tests.test_mod_icons import picture

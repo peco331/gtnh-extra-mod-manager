@@ -5,6 +5,7 @@
 
 已安装页：一个 mod 一行，安装端别分三类（双端/仅客户端/仅服务端）。
 """
+import ctypes
 import json
 import math
 import os
@@ -76,8 +77,15 @@ class GuiApp(PacksGuiMixin):
         self._closing = False
         self._release_dates_cancel = threading.Event()
 
+        if os.name == "nt":
+            # 源码运行时任务栏不再归到 python.exe 的图标下
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GTNH.ExtraModManager")
+            except (AttributeError, OSError):
+                pass
         self.root = tk.Tk()
         self.root.title(f"GTNH 额外MOD管理工具 v{__version__}")
+        self._set_app_icon()
         self.root.geometry(self._clamp_geometry(
             self.cfg.data.get("window_geometry") or "1120x720"))
         self.root.minsize(980, 640)
@@ -119,6 +127,14 @@ class GuiApp(PacksGuiMixin):
         self.add_tree.bind("<Return>", lambda _e: self.show_addable_detail())
         self.add_tree.bind("<KP_Enter>", lambda _e: self.show_addable_detail())
         self.inst_tree.bind("<Delete>", lambda _e: self.delete_selected())
+
+    def _set_app_icon(self):
+        """窗口与任务栏图标；文件缺失时保留 Tk 默认图标，不影响启动。"""
+        try:
+            self._app_icon = tk.PhotoImage(file=str(Path(__file__).resolve().parent / "assets" / "icon.png"))
+            self.root.iconphoto(True, self._app_icon)  # True：之后的对话框一并使用
+        except tk.TclError:
+            pass
 
     def _clamp_geometry(self, geo):
         """恢复记忆的窗口位置时 clamp 到当前屏幕内（换小屏后窗口跑到屏外）。"""
