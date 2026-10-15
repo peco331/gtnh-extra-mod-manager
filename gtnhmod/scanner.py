@@ -90,6 +90,21 @@ def scan_folder(folder: Path, *, strict: bool = False) -> list:
 MIN_FUZZY_LEN = 4  # 前缀/缩写匹配的最短名字长度（防中文名残片如"nei"误配）
 
 
+def _is_leading_words(norm: str, raw_name: str) -> bool:
+    """文件名恰好等于条目名的前几个完整词：journeymap → journeymap-quick-teleport。
+
+    这是主模组与附属模组的关系，不是缩写；缩写只截断词内（NEC → NeverEnoughCharacters）。"""
+    joined = ""
+    words = re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+", raw_name or "")
+    for word in words:
+        joined += word.lower()
+        if joined == norm:
+            return True
+        if len(joined) >= len(norm):
+            return False
+    return False
+
+
 def match_db(f: InstalledFile, entries: list) -> tuple[str | None, str]:
     """把扫描到的文件匹配到 db 条目。返回 (mod_id|None, quality)。
 
@@ -107,17 +122,18 @@ def match_db(f: InstalledFile, entries: list) -> tuple[str | None, str]:
     for e in entries:
         # 只用英文名与别名参与匹配：中文名混有拉丁残片（如"NEI 拼音搜索"→"nei"），
         # 会与整合包自带 NEI* mod 全等/前缀误配
-        en = normalize_name(e.get("name_en") or "")
-        aliases = [normalize_name(a) for a in (e.get("aliases") or [])]
-        if norm in ([en] if en else []) + aliases:
+        raw_names = [n for n in [e.get("name_en") or "", *(e.get("aliases") or [])] if n]
+        names = [normalize_name(n) for n in raw_names]
+        if norm in names:
             exact.append(e["id"])
             continue
-        for nc in ([en] if en else []) + aliases:
+        for raw, nc in zip(raw_names, names):
             if not nc or len(nc) < MIN_FUZZY_LEN:
                 continue
             if norm.startswith(nc):
                 prefix.append((len(nc), e["id"]))
-            elif len(norm) >= MIN_FUZZY_LEN and nc.startswith(norm):
+            elif (len(norm) >= MIN_FUZZY_LEN and nc.startswith(norm)
+                  and not _is_leading_words(norm, raw)):
                 abbrev.append((len(nc), e["id"]))
     if exact:
         return (exact[0], "exact") if len(set(exact)) == 1 else (None, "ambiguous")

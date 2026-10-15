@@ -299,7 +299,11 @@ def build_registry(cfg, db, installed) -> dict:
             by_mod.setdefault(f.mod_id, []).append(f)
         side_reg = {}
         for mod_id, fs in by_mod.items():
-            ordered = _sort_files_by_version(fs)
+            # 名称匹配更可靠的文件优先，其次才比版本：避免模糊命中的
+            # 他人 jar 因版本号更高被当成当前使用的文件。
+            rank = {"exact": 0, "prefix": 1, "abbrev": 2}
+            ordered = sorted(_sort_files_by_version(fs),
+                             key=lambda x: rank.get(x.match_quality, 3))
             f = ordered[0]
             entry = db.get(f.mod_id) or {}
             inst = installed.merged_record(side, db.entry_ids(f.mod_id))

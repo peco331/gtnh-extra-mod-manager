@@ -217,6 +217,78 @@ BRIDGE_SCRIPT = r"""
 """
 
 
+def _cdp_browser_call(port, method):
+    """在本次专用调试端口上执行一条浏览器级 CDP 命令。"""
+    import urllib.request
+    import websocket
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(f'http://127.0.0.1:{port}/json/version', timeout=2) as response:
+        url = json.loads(response.read().decode('utf-8'))['webSocketDebuggerUrl']
+    ws = websocket.create_connection(url, timeout=3, suppress_origin=True,
+                                     http_no_proxy=['127.0.0.1', 'localhost'])
+    try:
+        ws.send(json.dumps({'id': 1, 'method': method}))
+        if method == 'Browser.close':
+            return None
+        while True:
+            message = json.loads(ws.recv())
+            if message.get('id') == 1:
+                return message.get('result', {})
+    finally:
+        ws.close()
+
+
+def _cdp_browser_pid(port):
+    """专用浏览器主进程 PID；启动器转交进程后仍能定位真正的窗口。"""
+    try:
+        info = _cdp_browser_call(port, 'SystemInfo.getProcessInfo')
+    except Exception as exc:
+        raise OSError(str(exc)) from exc
+    return next((p.get('id') for p in info.get('processInfo', [])
+                 if p.get('type') == 'browser'), None)
+
+
+def _cdp_browser_close(port):
+    try:
+        _cdp_browser_call(port, 'Browser.close')
+    except Exception:
+        pass
+
+
+def _terminate_pid(pid):
+    """仅结束仍为 Edge/Chrome 的专用浏览器进程，防止 PID 复用误伤。"""
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.restype = w.HANDLE
+    handle = kernel.OpenProcess(0x1000 | 0x0001, False, pid)
+    if not handle:
+        return
+    try:
+        buffer, size = ctypes.create_unicode_buffer(1024), w.DWORD(1024)
+        if not kernel.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return
+        if os.path.basename(buffer.value).lower() in ('msedge.exe', 'chrome.exe'):
+            kernel.TerminateProcess(handle, 1)
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _sweep_stale_profiles(root):
+    """清理已退出会话留下的配置目录；运行中的 Chromium 独占 lockfile，删不掉即跳过。"""
+    import shutil
+    for folder in root.glob('session-*'):
+        lock = folder / 'lockfile'
+        try:
+            # 另一个页签刚建好目录、浏览器还没加锁时不能动它。
+            if time.time() - folder.stat().st_mtime < 300:
+                continue
+            if lock.exists():
+                lock.unlink()
+        except OSError:
+            continue
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 class NativeBrowserHost:
     """仅操作指定进程的浏览器窗口；所有 HWND 操作在 Tk 主线程执行。"""
     def __init__(self, parent):
@@ -355,6 +427,7 @@ class EmbeddedWikiBrowser:
         self._commands = queue.Queue()
         self._snapshot = ([], False)
         self._ws = self._proc = self._host = None
+        self._port = self._browser_pid = None
         self._request_id = 0
         self._context = self._loader = None
 
@@ -468,6 +541,7 @@ class EmbeddedWikiBrowser:
                 raise RuntimeError('未找到 Edge 或 Chrome；可使用离线目录')
             profile_root = self.cfg.data_dir / 'cache' / 'wiki_view'
             profile_root.mkdir(parents=True, exist_ok=True)
+            _sweep_stale_profiles(profile_root)
             # 每个窗口独立目录，避免并开程序时转交到已有浏览器进程。
             profile = tempfile.TemporaryDirectory(dir=profile_root, prefix='session-',
                                                    ignore_cleanup_errors=True)
@@ -484,17 +558,29 @@ class EmbeddedWikiBrowser:
             startup = subprocess.STARTUPINFO()
             startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startup.wShowWindow = 0
+            self._port = port
             self._proc = subprocess.Popen(cmd, startupinfo=startup,
                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            deadline = time.monotonic() + 20
+            # 首次使用新配置目录时 Edge 可能较慢，或由启动器转交给新的浏览器进程；
+            # 以本次专用调试端口报告的浏览器进程为准，不依赖启动器 PID。
+            deadline = time.monotonic() + 45
+            launcher_exit = None
             target = hwnd = None
             while not self._stop.is_set() and time.monotonic() < deadline:
-                if self._proc.poll() is not None:
-                    raise RuntimeError('Wiki 专用浏览器启动失败')
                 try:
                     targets = wiki._read_local_cdp_json(port)
+                except OSError:
+                    if self._proc.poll() is not None:
+                        launcher_exit = launcher_exit or time.monotonic()
+                        if time.monotonic() - launcher_exit > 15:
+                            raise RuntimeError('Wiki 专用浏览器启动失败')
+                    self._stop.wait(.15)
+                    continue
+                try:
                     target = wiki._select_wiki_cdp_target(targets, self.page_url)
-                    hwnd = NativeBrowserHost.find_window(self._proc.pid)
+                    if target and not self._browser_pid:
+                        self._browser_pid = _cdp_browser_pid(port)
+                    hwnd = NativeBrowserHost.find_window(self._browser_pid) if self._browser_pid else None
                     if target and hwnd:
                         break
                 except OSError:
@@ -584,6 +670,9 @@ class EmbeddedWikiBrowser:
                     self._ws.close()
                 except Exception:
                     pass
+            elif self._port:
+                # 嵌入前失败时页面连接尚未建立，经浏览器级连接关闭，避免留下孤立窗口。
+                _cdp_browser_close(self._port)
             try:
                 if self._proc:
                     try:
@@ -594,6 +683,8 @@ class EmbeddedWikiBrowser:
                             self._proc.wait(timeout=2)
                         except subprocess.TimeoutExpired:
                             pass
+                if self._browser_pid and self._browser_pid != getattr(self._proc, 'pid', None):
+                    _terminate_pid(self._browser_pid)
                 if profile:
                     # Chromium 子进程可能稍晚才释放 profile 文件句柄。
                     for _ in range(15):

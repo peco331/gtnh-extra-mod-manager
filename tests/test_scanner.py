@@ -89,6 +89,35 @@ class TestMatch(unittest.TestCase):
         f = InstalledFile(Path("x.jar"), "x.jar", True, "Totally-Unknown", None, "1.0.0")
         self.assertEqual(match_db(f, ENTRIES), (None, "none"))
 
+    def test_base_mod_is_not_an_abbreviation_of_its_addon(self):
+        from gtnhmod.scanner import InstalledFile
+        addon = [{"id": "jmqt", "name_en": "journeymap-quick-teleport", "aliases": ["journeymap-quick-teleport"]},
+                 {"id": "camel", "name_en": "JourneyMapQuickTeleport", "aliases": []}]
+        base = InstalledFile(Path("x.jar"), "journeymap-1.7.10-5.2.23-unlimited.jar", True,
+                             "journeymap", "1.7.10", "5.2.23-unlimited")
+        self.assertEqual(match_db(base, addon), (None, "none"))
+        own = InstalledFile(Path("y.jar"), "journeymap-quick-teleport-1.2.0.jar", True,
+                            "journeymap-quick-teleport", None, "1.2.0")
+        self.assertEqual(match_db(own, addon[:1]), ("jmqt", "exact"))
+
+    def test_better_named_jar_is_current_even_with_lower_version(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from gtnhmod import updater
+        from gtnhmod.scanner import InstalledFile
+        weak = InstalledFile(Path("a.jar"), "journeymap-5.2.23.jar", True, "journeymap", None, "5.2.23")
+        weak.mod_id, weak.match_quality = "m", "abbrev"
+        own = InstalledFile(Path("b.jar"), "m-1.2.0.jar", True, "m", None, "1.2.0")
+        own.mod_id, own.match_quality = "m", "exact"
+        db = SimpleNamespace(get=lambda mid: {"name_en": "m"}, entry_ids=lambda mid: [mid])
+        installed = SimpleNamespace(merged_record=lambda side, ids: {})
+        cfg = SimpleNamespace(data={})
+        with mock.patch.object(updater, "scan_sides", return_value={"client": [weak, own], "server": []}), \
+             mock.patch.object(updater, "_local_update_str", return_value=""):
+            state = updater.build_registry(cfg, db, installed)["client"]["m"]
+        self.assertEqual(state["file_name"], "m-1.2.0.jar")
+        self.assertEqual(state["duplicates"], ["journeymap-5.2.23.jar"])
+
 
 class TestReconcile(unittest.TestCase):
     def test_reconcile_cleanup(self):

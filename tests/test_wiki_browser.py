@@ -287,6 +287,63 @@ class TestBrowserLifecycle(unittest.TestCase):
                     self.assertNotIn('PRIVATE_', ' '.join(command))
                     self.assertTrue(view.wait_closed(timeout=0))
 
+    def test_launcher_handoff_embeds_the_browser_reported_by_its_debug_port(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = Config(Path(folder))
+            emitted = []
+            view = browser.EmbeddedWikiBrowser(cfg, lambda kind, data: emitted.append((kind, data)))
+            launcher = mock.Mock(pid=111)
+            launcher.poll.return_value = 0  # 启动器已转交并退出
+            target = {'type': 'page', 'url': view.page_url, 'webSocketDebuggerUrl': 'ws://x'}
+            def stop_after_attach(kind, data):
+                emitted.append((kind, data))
+                view.close()
+            view.emit = stop_after_attach
+            with mock.patch.object(wiki, '_find_system_browser', return_value=Path('browser.exe')), \
+                 mock.patch.object(wiki, '_get_free_port', return_value=12345), \
+                 mock.patch.object(wiki, '_read_local_cdp_json', return_value=[target]), \
+                 mock.patch.object(browser, '_cdp_browser_pid', return_value=222), \
+                 mock.patch.object(browser.NativeBrowserHost, 'find_window',
+                                   side_effect=lambda pid: 999 if pid == 222 else None) as found, \
+                 mock.patch.object(browser, '_terminate_pid') as terminated, \
+                 mock.patch.object(browser.subprocess, 'Popen', return_value=launcher), \
+                 mock.patch('websocket.create_connection') as connect:
+                connect.return_value.recv.side_effect = lambda: json.dumps({'id': view._request_id, 'result': {}})
+                view._worker()
+            self.assertIn(('attach', 999), emitted)
+            self.assertNotIn('error', [kind for kind, _ in emitted])
+            found.assert_called_with(222)
+            terminated.assert_called_once_with(222)
+
+    def test_failure_before_embedding_closes_the_dedicated_browser(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = Config(Path(folder))
+            emitted = []
+            view = browser.EmbeddedWikiBrowser(cfg, lambda kind, data: emitted.append((kind, data)))
+            launcher = mock.Mock(pid=111)
+            launcher.poll.return_value = 0
+            with mock.patch.object(wiki, '_find_system_browser', return_value=Path('browser.exe')), \
+                 mock.patch.object(wiki, '_get_free_port', return_value=12345), \
+                 mock.patch.object(wiki, '_read_local_cdp_json', side_effect=OSError('refused')), \
+                 mock.patch.object(browser.time, 'monotonic', side_effect=__import__('itertools').count(0, 5)), \
+                 mock.patch.object(browser, '_cdp_browser_close') as closed, \
+                 mock.patch.object(browser.subprocess, 'Popen', return_value=launcher):
+                view._worker()
+            self.assertEqual(emitted, [('error', 'Wiki 专用浏览器启动失败')])
+            closed.assert_called_once_with(12345)
+
+    def test_stale_profiles_are_swept_but_fresh_or_locked_ones_survive(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            stale, fresh = root / 'session-old', root / 'session-new'
+            for path in (stale, fresh):
+                (path / 'Default').mkdir(parents=True)
+            old = time.time() - 3600
+            os.utime(stale, (old, old))
+            browser._sweep_stale_profiles(root)
+            self.assertFalse(stale.exists())
+            self.assertTrue(fresh.exists())
+
     def test_close_wakes_a_pending_cdp_receive(self):
         view = browser.EmbeddedWikiBrowser(SimpleNamespace(proxy=None, wiki_url=PAGE,
                                                            wiki_page='可添加MOD'), mock.Mock())
