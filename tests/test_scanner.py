@@ -74,9 +74,19 @@ class TestMatch(unittest.TestCase):
         from gtnhmod.scanner import InstalledFile
         f = InstalledFile(Path("x.jar"), "x.jar", True, "FoamFix-Animations", "1.7.10", "0.4.1")
         self.assertEqual(match_db(f, ENTRIES), ("foamfix-animations", "exact"))
-        # 名字段更长时仍应最长前缀命中 foamfix-animations 而非 foamfix
-        f2 = InstalledFile(Path("x.jar"), "x.jar", True, "FoamFix-Animations-Extra", None, None)
+        # 名字段只多出修饰词时仍应最长前缀命中 foamfix-animations 而非 foamfix
+        f2 = InstalledFile(Path("x.jar"), "x.jar", True, "FoamFix-Animations-GTNH", None, None)
         self.assertEqual(match_db(f2, ENTRIES), ("foamfix-animations", "prefix"))
+
+    def test_addon_jar_is_not_its_base_mod(self):
+        """ae2thing-bauble 是 AE2 Thing 的附属模组：文件名多出实义词时不能认作主模组。"""
+        from gtnhmod.scanner import InstalledFile
+        entries = [{"id": "ae2thing", "name_en": "AE2 Thing", "aliases": []}, *ENTRIES]
+        for stem in ("ae2thing-bauble", "FoamFix-Animations-Extra", "FoamFixer"):
+            f = InstalledFile(Path("x.jar"), "x.jar", True, stem, None, "1.1.0")
+            self.assertEqual(match_db(f, entries), (None, "none"), stem)
+        own = InstalledFile(Path("y.jar"), "y.jar", True, "AE2Thing-GTNH", None, "1.2.15")
+        self.assertEqual(match_db(own, entries), ("ae2thing", "prefix"))
 
     def test_abbrev(self):
         from gtnhmod.scanner import InstalledFile

@@ -122,6 +122,40 @@ class TestGuiSmoke(unittest.TestCase):
     def test_app_builds(self):
         self.assertTrue(self.app.inst_tree["columns"])
 
+    def test_narrow_window_keeps_scrollbars_and_toolbar_visible(self):
+        """窄窗口：列表保留横竖滚动条，工具栏换行而不是把按钮挤出窗外。"""
+        root = self.app.root
+        old = root.geometry()
+        try:
+            self.app.nb.select(0)
+            root.geometry("660x560")
+            for _ in range(3):
+                root.update()
+            frame = self.app.inst_tree.master
+            bars = [w for w in frame.pack_slaves() if isinstance(w, ttk.Scrollbar)]
+            self.assertEqual({str(b.cget("orient")) for b in bars}, {"vertical", "horizontal"})
+            for b in bars:
+                self.assertTrue(b.winfo_ismapped())
+                self.assertGreater(b.winfo_width() * b.winfo_height(), 0)
+            right_edge = root.winfo_rootx() + root.winfo_width()
+            for btn in (self.app.btn_check, self.app.btn_update_all, self.app.btn_dirs):
+                self.assertTrue(btn.winfo_ismapped())
+                self.assertLessEqual(btn.winfo_rootx() + btn.winfo_width(), right_edge + 1)
+            self.assertGreater(self.app.btn_dirs.winfo_rooty(), self.app.inst_search_entry.winfo_rooty())
+            bar = self.app.inst_search_entry.master.master
+            one_row = sum(w.winfo_reqwidth() for row in bar.pack_slaves()
+                          for w in row.pack_slaves()) + 120
+            if one_row <= root.winfo_screenwidth():
+                root.geometry(f"{one_row}x600")
+                for _ in range(3):
+                    root.update()
+                # 宽窗口回到单行
+                self.assertLess(abs(self.app.btn_dirs.winfo_rooty()
+                                    - self.app.inst_search_entry.winfo_rooty()), 10)
+        finally:
+            root.geometry(old)
+            root.update()
+
     def test_window_uses_bundled_app_icon(self):
         assets = Path(gui.__file__).resolve().parent / "assets"
         self.assertTrue((assets / "icon.ico").is_file())

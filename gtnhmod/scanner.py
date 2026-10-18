@@ -2,7 +2,8 @@
 
 匹配规则（normalize 后三档）：
   1. exact：文件名名字段 == 条目 name_en/name_cn/aliases
-  2. prefix：文件名名字段以条目 name_en 开头（取最长前缀，更具体者胜）
+  2. prefix：文件名名字段以条目 name_en 的完整词开头、多出的只是 GTNH/forge 等修饰词
+     （取最长前缀，更具体者胜；多出实义词的是附属模组，不认）
   3. abbrev：条目 name_en 以文件名名字段开头（缩写，如 NEC → NeverEnoughCharacters，取最短条目名）
 歧义/零命中返回 None，由 UI 弹候选让用户选择，选择结果写入条目 aliases 持久化。
 """
@@ -90,12 +91,37 @@ def scan_folder(folder: Path, *, strict: bool = False) -> list:
 MIN_FUZZY_LEN = 4  # 前缀/缩写匹配的最短名字长度（防中文名残片如"nei"误配）
 
 
+def _split_words(raw_name: str) -> list:
+    return re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+", raw_name or "")
+
+
+# 文件名在条目名之后可以多出的修饰词：平台、加载器、端别标记，不代表另一个 MOD
+PREFIX_NOISE_WORDS = {"gtnh", "forge", "universal", "client", "server", "mc", "mod",
+                      "release", "final"}
+
+
+def _is_noise_suffix(nc: str, raw_file_name: str) -> bool:
+    """条目名是文件名的前几个完整词，且多出的词都只是修饰词：
+    WildcardPattern-GTNH → WildcardPattern。多出实义词（ae2thing-bauble → AE2 Thing）
+    是附属模组；条目名止于词中间（FoamFixer → FoamFix）是另一个名字，均不算匹配。"""
+    joined = ""
+    words = [w.lower() for w in _split_words(raw_file_name)]
+    for i, word in enumerate(words):
+        joined += word
+        if joined == nc:
+            rest = words[i + 1:]
+            return all(w in PREFIX_NOISE_WORDS for w in rest)
+        if len(joined) >= len(nc):
+            return False
+    return False
+
+
 def _is_leading_words(norm: str, raw_name: str) -> bool:
     """文件名恰好等于条目名的前几个完整词：journeymap → journeymap-quick-teleport。
 
     这是主模组与附属模组的关系，不是缩写；缩写只截断词内（NEC → NeverEnoughCharacters）。"""
     joined = ""
-    words = re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+", raw_name or "")
+    words = _split_words(raw_name)
     for word in words:
         joined += word.lower()
         if joined == norm:
@@ -131,7 +157,8 @@ def match_db(f: InstalledFile, entries: list) -> tuple[str | None, str]:
             if not nc or len(nc) < MIN_FUZZY_LEN:
                 continue
             if norm.startswith(nc):
-                prefix.append((len(nc), e["id"]))
+                if _is_noise_suffix(nc, f.name_part):
+                    prefix.append((len(nc), e["id"]))
             elif (len(norm) >= MIN_FUZZY_LEN and nc.startswith(norm)
                   and not _is_leading_words(norm, raw)):
                 abbrev.append((len(nc), e["id"]))

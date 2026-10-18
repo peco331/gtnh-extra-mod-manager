@@ -40,8 +40,10 @@ class PacksGuiMixin:
         self.pack_search.trace_add('write', lambda *_: self._debounce_pack_search())
         self.pack_search_entry = ttk.Entry(top, textvariable=self.pack_search, width=23)
         self.pack_search_entry.pack(side='left', padx=(2, 8))
+        self._wrap_bar(top)
         self.pack_dir_label = ttk.Label(tab, style='Muted.TLabel', wraplength=1100)
-        self.pack_dir_label.pack(side='bottom', anchor='w', padx=8, pady=(0, 4))
+        self.pack_dir_label.pack(side='bottom', fill='x', padx=8, pady=(0, 4))
+        self._auto_wraplength(self.pack_dir_label)
         self.pack_nb = ttk.Notebook(tab)
         self.pack_nb.pack(fill='both', expand=True)
         pages = [ttk.Frame(self.pack_nb) for _ in range(4)]
@@ -61,6 +63,7 @@ class PacksGuiMixin:
         self._pack_button(bar, '卸载', self.uninstall_selected_packs)
         self._pack_button(bar, '备份与恢复', self.pack_backup_dialog)
         self._pack_button(bar, '打开目录', self.open_pack_folder)
+        self._wrap_bar(bar)
         ttk.Label(pages[0], text='这里显示已安装文件；资源包和光影是否实际启用，请在游戏设置中选择。',
                   style='Muted.TLabel').pack(anchor='w', padx=9, pady=(0, 4))
         self.pack_inst_tree = self._make_pack_tree(pages[0], 'packs-installed',
@@ -79,9 +82,12 @@ class PacksGuiMixin:
             self._pack_button(nav, label, lambda a=action: self._navigate_pack_wiki(a))
         self._pack_button(nav, '在浏览器打开', lambda: webbrowser.open(wiki._referer(self.cfg, packwiki.PACKS_PROFILE)))
         self._pack_button(nav, '同步管理目录', self.refresh_packs_wiki, side='right')
+        self._wrap_bar(nav)
         self.pack_wiki_status = tk.StringVar(value='保留 Wiki 原站分类与说明，安装和更新由工具处理。')
-        ttk.Label(pages[1], textvariable=self.pack_wiki_status, style='Muted.TLabel',
-                  wraplength=1100).pack(fill='x', padx=8, pady=(0, 4))
+        status = ttk.Label(pages[1], textvariable=self.pack_wiki_status, style='Muted.TLabel',
+                           wraplength=1100)
+        status.pack(fill='x', padx=8, pady=(0, 4))
+        self._auto_wraplength(status)
         self.pack_content = ttk.Frame(pages[1])
         self.pack_content.pack(fill='both', expand=True)
         self.pack_wiki_frame = ttk.Frame(self.pack_content)
@@ -106,6 +112,7 @@ class PacksGuiMixin:
         for label, action in (('详情', self.show_pack_detail), ('安装', self.install_selected_packs),
                               ('打开下载页面', self.open_pack_page), ('重新扫描', self.refresh_packs)):
             self._pack_button(bar, label, action)
+        self._wrap_bar(bar)
 
         ttk.Label(pages[2], text='以下包尚未关联管理目录，可关联已有条目或登记为自定义包。',
                   style='Muted.TLabel').pack(anchor='w', padx=8, pady=5)
@@ -121,6 +128,7 @@ class PacksGuiMixin:
                               ('忽略选中', self.ignore_selected_packs),
                               ('恢复忽略', self.restore_ignored_packs), ('重新扫描', self.refresh_packs)):
             self._pack_button(bar, label, action)
+        self._wrap_bar(bar)
         self.pack_custom_tree = self._make_pack_tree(pages[3], 'packs-custom',
             ('name', 'author', 'cat', 'source', 'installed', 'ver', 'status', 'desc'),
             ('名称', '作者/维护者', '分类', '下载源', '已安装', '本地版本', '状态', '说明'),
@@ -132,6 +140,7 @@ class PacksGuiMixin:
                               ('移除自定义条目', self.remove_selected_custom_packs),
                               ('详情', self.show_pack_detail), ('安装', self.install_selected_packs)):
             self._pack_button(bar, label, action)
+        self._wrap_bar(bar)
         self.pack_rows, self.pack_inst_rows, self.pack_custom_rows, self.pack_um_rows = [], [], [], {}
         self._sync_pack_update_buttons()
 

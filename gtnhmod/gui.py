@@ -89,7 +89,7 @@ class GuiApp(PacksGuiMixin):
         self.theme.on_change(self._on_theme_changed)
         self.root.geometry(self._clamp_geometry(
             self.cfg.data.get("window_geometry") or "1120x720"))
-        self.root.minsize(980, 640)
+        self.root.minsize(640, 480)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.report_callback_exception = self._report_cb_exc
         self.mod_icons = ModIconCache(self.root, self.cfg,
@@ -309,10 +309,81 @@ class GuiApp(PacksGuiMixin):
             self.status_var.set(msg)
 
     def _attach_scrollbar(self, widget, parent):
+        """给已 pack 的列表加滚动条。滚动条先占位再放列表：pack 空间不足时
+        最后放入的控件会被挤掉，窄窗口下滚动条就消失了。树表另加横向滚动条。"""
+        info = widget.pack_info()
+        widget.pack_forget()
         sb = ttk.Scrollbar(parent, orient="vertical", command=widget.yview)
         sb.pack(side="right", fill="y")
         widget.configure(yscrollcommand=sb.set)
+        if isinstance(widget, ttk.Treeview):
+            hsb = ttk.Scrollbar(parent, orient="horizontal", command=widget.xview)
+            hsb.pack(side="bottom", fill="x")
+            widget.configure(xscrollcommand=hsb.set)
+            # 窄窗口里列不再被压到看不清，超出部分靠横向滚动
+            for col in widget["columns"]:
+                width = int(widget.column(col, "width"))
+                widget.column(col, minwidth=min(width, max(50, width * 2 // 3)))
+        info.pop("in", None)
+        widget.pack(**info)
         return sb
+
+    def _wrap_bar(self, bar):
+        """工具栏放不下时换行：按 pack 顺序把控件排成多行，左侧控件靠左、右侧控件靠右。"""
+        items = []
+        for w in bar.pack_slaves():
+            info = w.pack_info()
+            items.append((w, info.get("side", "top"), info))
+        if not items:
+            return
+        left = [it for it in items if it[1] != "right"]
+        right = [it for it in items if it[1] == "right"][::-1]  # 右侧控件按显示顺序
+        visual = left + right
+        rows, state = [], {"layout": None}
+
+        def needed(item):
+            w, _side, info = item
+            pad = info.get("padx", 0)
+            pad = sum(int(p) for p in pad) if isinstance(pad, (tuple, list)) else int(pad) * 2
+            return w.winfo_reqwidth() + pad
+
+        def layout(width):
+            groups, current, used = [], [], 0
+            for item in visual:
+                need = needed(item)
+                if current and used + need > width:
+                    groups.append(current)
+                    current, used = [], 0
+                current.append(item)
+                used += need
+            groups.append(current)
+            key = tuple(tuple(id(it[0]) for it in g) for g in groups)
+            if key == state["layout"]:
+                return
+            state["layout"] = key
+            while len(rows) < len(groups):
+                row = ttk.Frame(bar)
+                rows.append(row)
+            for item in visual:
+                item[0].pack_forget()
+            for row in rows:
+                row.pack_forget()
+            for row, group in zip(rows, groups):
+                row.pack(fill="x")
+                for w, side, info in [it for it in group if it[1] != "right"] + \
+                        [it for it in group if it[1] == "right"][::-1]:
+                    opts = {k: v for k, v in info.items() if k not in ("in", "side")}
+                    w.pack(in_=row, side="right" if side == "right" else "left", **opts)
+                    w.lift(row)
+
+        bar.bind("<Configure>", lambda e: layout(max(e.width, 1)), add="+")
+        layout(max(bar.winfo_width(), 1) if bar.winfo_ismapped() else 10 ** 6)
+
+    @staticmethod
+    def _auto_wraplength(label, margin=16):
+        """说明文字随窗口宽度换行，而不是按固定像素截在窗外。"""
+        label.bind("<Configure>", lambda e: label.configure(wraplength=max(e.width - margin, 200)),
+                   add="+")
 
     def _enable_mod_icons(self, tree):
         tree.configure(show='tree headings', style='ModIcon.Treeview')
@@ -550,6 +621,7 @@ class GuiApp(PacksGuiMixin):
         self.btn_check = ttk.Button(bar, text="检查更新", command=self.check_updates)
         self.btn_check.pack(side="right", padx=4)
         ttk.Button(bar, text="刷新", command=self.refresh_installed).pack(side="right", padx=4)
+        self._wrap_bar(bar)
 
         # 新手引导（两端目录都未配置时显示，完成后自动隐藏）
         self.guide = ttk.LabelFrame(tab, text="三步上手")
@@ -606,9 +678,12 @@ class GuiApp(PacksGuiMixin):
                    command=lambda: webbrowser.open(wikimod._referer(self.cfg))).pack(side='left', padx=2)
         self.btn_refresh_wiki = ttk.Button(navigation, text='同步管理目录', command=self.refresh_wiki)
         self.btn_refresh_wiki.pack(side='right')
+        self._wrap_bar(navigation)
         self.wiki_view_status = tk.StringVar(value='直接浏览 Wiki 原网页；安装、更新和备份由管理工具处理。')
-        ttk.Label(tab, textvariable=self.wiki_view_status, wraplength=920,
-                  style='Muted.TLabel').pack(fill='x', padx=8, pady=(0, 4))
+        status = ttk.Label(tab, textvariable=self.wiki_view_status, wraplength=920,
+                           style='Muted.TLabel')
+        status.pack(fill='x', padx=8, pady=(0, 4))
+        self._auto_wraplength(status)
         self.add_content = ttk.Frame(tab)
         self.add_content.pack(fill='both', expand=True)
         self.wiki_frame = ttk.Frame(self.add_content)
@@ -660,12 +735,14 @@ class GuiApp(PacksGuiMixin):
         self.only_uninstalled = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="仅未安装", variable=self.only_uninstalled,
                         command=self.refresh_addable).pack(side="right", padx=(4, 4))
+        self._wrap_bar(bar)
 
         btns = ttk.Frame(tab)
         btns.pack(fill="x", padx=6, pady=4)
         ttk.Button(btns, text="查看详情", command=self.show_addable_detail).pack(side="left", padx=2)
         ttk.Button(btns, text="安装（自动选择端别）", command=self.install_addable).pack(side="left", padx=2)
         ttk.Button(btns, text="打开下载页面", command=self.open_link_addable).pack(side="left", padx=2)
+        self._wrap_bar(btns)
 
     def _show_addable_view(self):
         online = self.add_view_mode.get() == 'wiki'
@@ -801,8 +878,10 @@ class GuiApp(PacksGuiMixin):
                 self._show_inst_detail(installed)
 
     def _build_unmanaged_tab(self, tab):
-        ttk.Label(tab, text="以下 jar 未被识别（GTNH核心mod等不在可添加列表中的会出现在这里，请勿误删）:",
-                  font=FONT).pack(anchor="w", padx=6, pady=(4, 0))
+        hint = ttk.Label(tab, text="以下 jar 未被识别（GTNH核心mod等不在可添加列表中的会出现在这里，请勿误删）:",
+                         font=FONT)
+        hint.pack(fill="x", padx=6, pady=(4, 0))
+        self._auto_wraplength(hint)
         bar = ttk.Frame(tab)
         bar.pack(fill="x", padx=6, pady=2)
         ttk.Label(bar, text="搜索:").pack(side="left")
@@ -810,6 +889,7 @@ class GuiApp(PacksGuiMixin):
         self.um_search.trace_add("write", lambda *a: self._debounce_um_search())
         self.um_search_entry = ttk.Entry(bar, textvariable=self.um_search, width=26)
         self.um_search_entry.pack(side="left", padx=(2, 0))
+        self._wrap_bar(bar)
         cols = ("side", "file", "ver", "mtime", "size")
         heads = ("端别", "文件名", "识别版本", "修改时间", "大小(KB)")
         tree_frame = ttk.Frame(tab)
@@ -834,6 +914,7 @@ class GuiApp(PacksGuiMixin):
         ttk.Button(btns, text="全部忽略", command=self.ignore_all_unmanaged).pack(side="left", padx=2)
         ttk.Button(btns, text="恢复已排除文件", command=self.restore_ignored).pack(side="left", padx=2)
         ttk.Button(btns, text="重新扫描", command=self.refresh_unmanaged).pack(side="left", padx=2)
+        self._wrap_bar(btns)
 
     def _build_custom_tab(self, tab):
         cols = ("name", "cn", "side", "type", "src")
@@ -858,6 +939,7 @@ class GuiApp(PacksGuiMixin):
         ttk.Button(btns, text="删除", command=self.remove_custom).pack(side="left", padx=2)
         ttk.Button(btns, text="批量确认GTNH源",
                    command=self._bulk_confirm_gtnh_sources).pack(side="left", padx=2)
+        self._wrap_bar(btns)
 
     def _build_settings_tab(self, tab):
         footer = ttk.Frame(tab)
