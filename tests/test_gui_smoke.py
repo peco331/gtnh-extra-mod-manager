@@ -156,14 +156,13 @@ class TestGuiSmoke(unittest.TestCase):
             root.geometry(old)
             root.update()
 
-    def test_columns_fit_content_and_double_click_separator_fits_one(self):
-        """一列伸缩填满，其余按内容定宽（只增不减、有上限）；双击分隔线适配左侧列；
-        只记住用户拖过的列，旧版保存的伸缩宽度不再沿用。"""
+    def test_columns_behave_like_explorer_details_view(self):
+        """所有列都不伸缩（最后一列也能拖宽、右侧留空）；按内容定宽（只增不减、有上限）；
+        双击分隔线或右键表头适配内容；只记住用户拖过的列，旧版保存的伸缩宽度不再沿用。"""
         from types import SimpleNamespace
         app = self.app
-        self.assertEqual(app.inst_tree._stretch_col, "name")
-        self.assertTrue(app.inst_tree.column("name", "stretch"))
-        self.assertFalse(app.inst_tree.column("side", "stretch"))
+        for tree in (app.inst_tree, app.add_tree, app.um_tree, app.cust_tree, app.pack_tree):
+            self.assertFalse(any(tree.column(c, "stretch") for c in tree["columns"]))
         top = tk.Toplevel(app.root)
         try:
             top.geometry("900x300")
@@ -175,43 +174,57 @@ class TestGuiSmoke(unittest.TestCase):
                 tree.column(col, width=width)
             tree.pack(side="left", fill="both", expand=True)
             app._attach_scrollbar(tree, frame)
-            tree._view_key, tree._stretch_col = "fit-test", "desc"
+            tree._view_key = "fit-test"
             app._view_cfg()["fit-test"] = {"widths": {"name": 777, "ver": 555}}  # 旧格式
             app._restore_view(tree)
             self.assertEqual(tree._manual_cols, set())
             tree.insert("", "end", values=("Short", "1.0", "d" * 30))
             app._after_tree_fill(tree)
             top.update()
-            ver = tree.column("ver", "width")
+            ver, desc = tree.column("ver", "width"), tree.column("desc", "width")
             self.assertLess(ver, 80)
-            # 窗口变宽：多出来的宽度只给伸缩列
+            # 窗口变宽：不分给任何列，右侧留空
             top.geometry("1200x300")
             top.update()
+            self.assertEqual((tree.column("ver", "width"), tree.column("desc", "width")), (ver, desc))
+            # 最后一列可以拖宽到超出窗口（横向滚动），其余列不受影响
+            tree.tk.call(tree, "drag", "desc", 1600)
+            top.update()
+            self.assertGreater(tree.column("desc", "width"), desc + 1000)
             self.assertEqual(tree.column("ver", "width"), ver)
+            tree.column("desc", width=desc)
             # 过滤后内容变短不缩，变长则增长但不超过上限
             tree.delete(*tree.get_children(""))
             app._after_tree_fill(tree)
             self.assertEqual(tree.column("ver", "width"), ver)
-            tree.insert("", "end", values=("N" * 120, "2.0", "x"))
+            tree.insert("", "end", values=("N" * 200, "2.0", "x"))
             app._after_tree_fill(tree)
             self.assertEqual(tree.column("name", "width"), app.AUTO_COL_MAX)
-            # 双击 name 右侧分隔线：放开上限展开到完整内容，且不再被自动改宽
+            # 被截断的单元格悬停显示全文，放得下的不提示
             top.update()
+            iid = tree.get_children("")[0]
+            self.assertEqual(app._clipped_cell_text(tree, iid, "name"), "N" * 200)
+            self.assertIsNone(app._clipped_cell_text(tree, iid, "ver"))
+            app._show_tree_tip(tree, (iid, "name"))
+            self.assertIsNotNone(tree._tip)
+            app._hide_tree_tip(tree)
+            self.assertIsNone(tree._tip)
+            # 双击 name 右侧分隔线：放开上限展开到完整内容，且不再被自动改宽
             edge = tree.column("name", "width")
-            hit = SimpleNamespace(widget=tree, x=edge, y=5)
+            hit = SimpleNamespace(widget=tree, x=edge, y=5, x_root=0, y_root=0)
             with mock.patch.object(tree, "identify_region", return_value="separator"):
                 self.assertEqual(app._on_separator_double(hit), "break")
             self.assertGreater(tree.column("name", "width"), app.AUTO_COL_MAX)
             self.assertIn("name", tree._manual_cols)
             with mock.patch.object(tree, "identify_region", return_value="cell"):
                 self.assertIsNone(app._on_separator_double(hit))
+                self.assertIsNone(app._on_heading_menu(hit))  # 行上右键仍交给列表菜单
             # 拖动分隔线改宽的列记为手动并持久化
             with mock.patch.object(tree, "identify_region", return_value="separator"):
                 app._on_column_press(hit)
             tree.column("ver", width=150)
             app._on_column_release(hit)
             self.assertIn("ver", tree._manual_cols)
-            app._persist_view(tree)
             saved = app._view_cfg()["fit-test"]
             self.assertEqual(set(saved["manual"]), {"name", "ver"})
             self.assertEqual(saved["widths"]["ver"], 150)
@@ -220,6 +233,15 @@ class TestGuiSmoke(unittest.TestCase):
             self.assertEqual(tree.column("ver", "width"), 150)
             app._after_tree_fill(tree)
             self.assertEqual(tree.column("ver", "width"), 150)
+            # 右键表头「调整所有列宽以适合」：放弃拖过的宽度，按内容重新定宽（可以变窄）
+            with mock.patch.object(tree, "identify_region", return_value="heading"), \
+                    mock.patch("tkinter.Menu.tk_popup") as popup:
+                self.assertEqual(app._on_heading_menu(hit), "break")
+            popup.assert_called_once()
+            app._fit_all_columns(tree)
+            self.assertEqual(tree._manual_cols, set())
+            self.assertLess(tree.column("ver", "width"), 80)
+            self.assertEqual(app._view_cfg()["fit-test"]["manual"], [])
         finally:
             app._view_cfg().pop("fit-test", None)
             top.destroy()

@@ -69,7 +69,7 @@ class PacksGuiMixin:
         self.pack_inst_tree = self._make_pack_tree(pages[0], 'packs-installed',
             ('name', 'kind', 'version', 'time', 'source', 'status', 'file'),
             ('名称', '类型', '本地版本', '本地更新时间', '下载源', '状态', '文件名'),
-            (240, 75, 100, 135, 105, 195, 240), 'file')
+            (240, 75, 100, 135, 105, 195, 240))
         self.pack_inst_tree.bind('<Double-1>', lambda _e: self.reveal_selected_pack())
 
         nav = ttk.Frame(pages[1])
@@ -106,7 +106,7 @@ class PacksGuiMixin:
         self.pack_tree = self._make_pack_tree(self.pack_offline_frame, 'packs',
             ('name', 'author', 'cat', 'source', 'installed', 'ver', 'status', 'desc'),
             ('名称', '作者/维护者', '分类', '下载源', '已安装', '本地版本', '状态', '说明'),
-            (230, 100, 110, 110, 65, 95, 170, 300), 'desc')
+            (230, 100, 110, 110, 65, 95, 170, 300))
         bar = ttk.Frame(self.pack_offline_frame)
         bar.pack(fill='x', padx=6, pady=4)
         for label, action in (('详情', self.show_pack_detail), ('安装', self.install_selected_packs),
@@ -118,7 +118,7 @@ class PacksGuiMixin:
                   style='Muted.TLabel').pack(anchor='w', padx=8, pady=5)
         self.pack_um_tree = self._make_pack_tree(pages[2], 'packs-unmanaged',
             ('kind', 'file', 'version', 'time', 'status'),
-            ('类型', '文件名', '识别版本', '修改时间', '状态'), (85, 470, 130, 160, 120), 'file')
+            ('类型', '文件名', '识别版本', '修改时间', '状态'), (85, 470, 130, 160, 120))
         self.pack_um_tree.bind('<Double-1>', lambda _e: self._selected_unmanaged_packs()
                                and self._reveal(self._selected_unmanaged_packs()[0][1].path))
         bar = ttk.Frame(pages[2])
@@ -132,7 +132,7 @@ class PacksGuiMixin:
         self.pack_custom_tree = self._make_pack_tree(pages[3], 'packs-custom',
             ('name', 'author', 'cat', 'source', 'installed', 'ver', 'status', 'desc'),
             ('名称', '作者/维护者', '分类', '下载源', '已安装', '本地版本', '状态', '说明'),
-            (230, 100, 110, 110, 65, 95, 170, 300), 'desc')
+            (230, 100, 110, 110, 65, 95, 170, 300))
         bar = ttk.Frame(pages[3])
         bar.pack(fill='x', padx=6, pady=4)
         for label, action in (('添加', lambda: self._register_one_pack(self._pack_kind() or 'resourcepack', None)),
@@ -150,7 +150,7 @@ class PacksGuiMixin:
         self._pack_action_buttons.append(button)
         return button
 
-    def _make_pack_tree(self, parent, view_key, cols, heads, widths, stretch):
+    def _make_pack_tree(self, parent, view_key, cols, heads, widths):
         frame = ttk.Frame(parent)
         frame.pack(fill='both', expand=True, padx=6)
         tree = ttk.Treeview(frame, columns=cols, selectmode='extended')
@@ -166,7 +166,6 @@ class PacksGuiMixin:
         tree.pack(side='left', fill='both', expand=True)
         self._attach_scrollbar(tree, frame)
         tree._view_key = view_key
-        tree._stretch_col = stretch
         self._make_sortable(tree)
         self._restore_view(tree)
         tree.bind('<Return>', lambda _e: self.show_pack_detail())

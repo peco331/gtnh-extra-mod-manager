@@ -310,7 +310,8 @@ class GuiApp(PacksGuiMixin):
 
     def _attach_scrollbar(self, widget, parent):
         """给已 pack 的列表加滚动条。滚动条先占位再放列表：pack 空间不足时
-        最后放入的控件会被挤掉，窄窗口下滚动条就消失了。树表另加横向滚动条。"""
+        最后放入的控件会被挤掉，窄窗口下滚动条就消失了。树表另加横向滚动条，
+        并按资源管理器的方式管理列宽（见 _init_columns）。"""
         info = widget.pack_info()
         widget.pack_forget()
         sb = ttk.Scrollbar(parent, orient="vertical", command=widget.yview)
@@ -320,10 +321,9 @@ class GuiApp(PacksGuiMixin):
             hsb = ttk.Scrollbar(parent, orient="horizontal", command=widget.xview)
             hsb.pack(side="bottom", fill="x")
             widget.configure(xscrollcommand=hsb.set)
-            # 窄窗口里列不再被压到看不清，超出部分靠横向滚动
-            for col in widget["columns"]:
-                width = int(widget.column(col, "width"))
-                widget.column(col, minwidth=min(width, max(50, width * 2 // 3)))
+            self._init_columns(widget)
+            # 对话框里的列表随后同步填好行，回到事件循环时按内容定一次宽
+            self.root.after_idle(lambda: widget.winfo_exists() and self._fit_columns(widget))
         info.pop("in", None)
         widget.pack(**info)
         return sb
@@ -473,33 +473,37 @@ class GuiApp(PacksGuiMixin):
         # 旧版本保存的是伸缩后的宽度（没有 manual 字段），不是用户的选择，不再沿用
         manual = set(vs.get("manual") or ())
         for c, w in (vs.get("widths") or {}).items():
-            if c in manual and c in tree["columns"] and c != tree._stretch_col:
+            if c in manual and c in tree["columns"]:
                 try:
                     tree.column(c, width=int(w))
                     tree._manual_cols.add(c)
                 except (tk.TclError, ValueError):
                     pass
 
-    # ---- 列宽：一列伸缩填满，其余按内容定宽；双击分隔线适配该列 ----
-    AUTO_COL_MAX = 320   # 自动定宽的上限，超长内容靠双击分隔线或拖动展开
+    # ---- 列宽：参照资源管理器「详细信息」视图 ----
+    # 所有列都不伸缩：列宽之和小于窗口时右侧留空，超出时横向滚动，任何一列（含最后一列）
+    # 都能自由拖宽拖窄。列宽按内容自动定，拖过的列固定并记住；双击分隔线或右键表头适配内容，
+    # 被截断的单元格悬停显示全文。
+    AUTO_COL_MAX = 560   # 自动定宽的上限，更长的内容悬停看全文，或双击分隔线展开
+    FIT_COL_MAX = 2000   # 手动适配（双击分隔线、右键表头）的上限
     COL_PAD = 18         # 单元格左右内边距与排序余量
+    TIP_DELAY = 500      # 悬停多久后显示全文（毫秒）
 
     def _init_columns(self, tree):
-        stretch = getattr(tree, "_stretch_col", None) or tree["columns"][0]
-        tree._stretch_col = stretch
         tree._manual_cols = set()
         tree._auto_widths = {}
         for col in tree["columns"]:
-            if col == stretch:
-                tree.column(col, stretch=True)
-            else:
-                tree.column(col, stretch=False, minwidth=30)
+            tree.column(col, stretch=False, minwidth=30)
         tag = "ColumnFit"
         if tag not in tree.bindtags():
             tree.bindtags((tag,) + tree.bindtags())
             tree.bind_class(tag, "<ButtonPress-1>", self._on_column_press)
             tree.bind_class(tag, "<ButtonRelease-1>", self._on_column_release)
             tree.bind_class(tag, "<Double-Button-1>", self._on_separator_double)
+            tree.bind_class(tag, "<Button-3>", self._on_heading_menu)
+            tree.bind_class(tag, "<Motion>", self._on_tree_motion)
+            for seq in ("<Leave>", "<MouseWheel>", "<Shift-MouseWheel>", "<KeyPress>"):
+                tree.bind_class(tag, seq, lambda e: self._hide_tree_tip(e.widget))
 
     def _tree_fonts(self, tree):
         style = ttk.Style(tree)
@@ -527,24 +531,35 @@ class GuiApp(PacksGuiMixin):
         return max(cells, head_font.measure(tree.heading(col, "text"))) + self.COL_PAD
 
     def _fit_columns(self, tree):
-        """列表重新填充后按内容调整非伸缩列。只增不减：搜索过滤时列宽不来回跳。"""
-        if not hasattr(tree, "_stretch_col"):
+        """列表重新填充后按内容调整没拖过的列。只增不减：搜索过滤时列宽不来回跳。"""
+        if not hasattr(tree, "_manual_cols"):
             return
         try:
             cell_font, head_font = self._tree_fonts(tree)
             for col in tree["columns"]:
-                need = self._content_width(tree, col, cell_font, head_font)
-                if col == tree._stretch_col:
-                    # 伸缩列在窗口变窄时先缩，缩到放得下标题与一部分内容后改为横向滚动
-                    tree.column(col, minwidth=min(max(need, 120), 220))
-                    continue
                 if col in tree._manual_cols:
                     continue
+                need = self._content_width(tree, col, cell_font, head_font)
                 width = max(min(need, self.AUTO_COL_MAX), tree._auto_widths.get(col, 0))
                 tree._auto_widths[col] = width
                 tree.column(col, width=width)
         except tk.TclError:
             pass
+
+    def _fit_column(self, tree, col):
+        """把一列调到正好放下全部内容，并记为用户选定的宽度。"""
+        cell_font, head_font = self._tree_fonts(tree)
+        tree.column(col, width=min(self._content_width(tree, col, cell_font, head_font),
+                                   self.FIT_COL_MAX))
+        tree._manual_cols.add(col)
+        self._persist_view(tree)
+
+    def _fit_all_columns(self, tree):
+        """「调整所有列宽以适合」：放弃拖过的宽度，各列按当前内容重新定宽（可以变窄）。"""
+        tree._manual_cols.clear()
+        tree._auto_widths.clear()
+        self._fit_columns(tree)
+        self._persist_view(tree)
 
     def _separator_column(self, tree, x):
         """x 处分隔线左侧的列（像素坐标含横向滚动偏移）；不在分隔线上返回 None。"""
@@ -566,6 +581,7 @@ class GuiApp(PacksGuiMixin):
 
     def _on_column_press(self, event):
         tree = event.widget
+        self._hide_tree_tip(tree)
         tree._col_drag = None
         if tree.identify_region(event.x, event.y) == "separator":
             tree._col_drag = {c: tree.column(c, "width") for c in tree["columns"]}
@@ -576,9 +592,10 @@ class GuiApp(PacksGuiMixin):
         tree._col_drag = None
         if not before:
             return
-        for col, width in before.items():
-            if col != getattr(tree, "_stretch_col", None) and tree.column(col, "width") != width:
-                tree._manual_cols.add(col)  # 用户拖过的列不再自动改宽
+        changed = [c for c, width in before.items() if tree.column(c, "width") != width]
+        if changed:
+            tree._manual_cols.update(changed)  # 用户拖过的列不再自动改宽
+            self._persist_view(tree)
 
     def _on_separator_double(self, event):
         tree = event.widget
@@ -586,11 +603,93 @@ class GuiApp(PacksGuiMixin):
             return None
         col = self._separator_column(tree, event.x)
         if col:
-            cell_font, head_font = self._tree_fonts(tree)
-            tree.column(col, width=min(self._content_width(tree, col, cell_font, head_font), 1200))
-            if col != tree._stretch_col:
-                tree._manual_cols.add(col)
+            self._fit_column(tree, col)
         return "break"  # 不触发行双击（打开详情等）与 Tk 自带的拖动
+
+    def _on_heading_menu(self, event):
+        """右键表头：调整该列 / 所有列宽以适合。右键行仍走各列表自己的菜单。"""
+        tree = event.widget
+        self._hide_tree_tip(tree)
+        region = tree.identify_region(event.x, event.y)
+        if region not in ("heading", "separator"):
+            return None
+        if region == "separator":
+            col = self._separator_column(tree, event.x)
+        else:
+            col = tree.identify_column(event.x)
+            col = None if col in ("", "#0") else tree.column(col, "id")
+        menu = tk.Menu(self.root, tearoff=0)
+        if col:
+            menu.add_command(label=f"调整「{tree.heading(col, 'text')}」列宽以适合",
+                             command=lambda: self._fit_column(tree, col))
+        menu.add_command(label="调整所有列宽以适合", command=lambda: self._fit_all_columns(tree))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    # ---- 悬停显示被截断的单元格全文 ----
+    def _on_tree_motion(self, event):
+        tree = event.widget
+        key = None
+        if tree.identify_region(event.x, event.y) == "cell":
+            iid, col = tree.identify_row(event.y), tree.identify_column(event.x)
+            if iid and col not in ("", "#0"):
+                key = (iid, tree.column(col, "id"))
+        if key == getattr(tree, "_tip_key", None):
+            return
+        self._hide_tree_tip(tree)
+        tree._tip_key = key
+        if key:
+            tree._tip_job = tree.after(self.TIP_DELAY, lambda: self._show_tree_tip(tree, key))
+
+    def _hide_tree_tip(self, tree):
+        job, tip = getattr(tree, "_tip_job", None), getattr(tree, "_tip", None)
+        tree._tip_job = tree._tip = tree._tip_key = None
+        try:
+            if job:
+                tree.after_cancel(job)
+            if tip is not None:
+                tip.destroy()
+        except tk.TclError:
+            pass
+
+    def _clipped_cell_text(self, tree, iid, col):
+        """单元格文字超出可见宽度（列太窄，或被横向滚动挡住一部分）时返回全文，否则 None。"""
+        text = str(tree.set(iid, col))
+        box = tree.bbox(iid, col)
+        if not text or not box:
+            return None
+        x, _y, width, _h = box
+        visible = min(x + width, tree.winfo_width()) - max(x, 0)
+        cell_font, _head = self._tree_fonts(tree)
+        return text if cell_font.measure(text) + 8 > visible else None
+
+    def _show_tree_tip(self, tree, key):
+        tree._tip_job = None
+        try:
+            if not tree.winfo_exists() or not tree.exists(key[0]):
+                return
+            text = self._clipped_cell_text(tree, *key)
+            if not text:
+                return
+            tip = tk.Toplevel(tree, background=self.theme.color("border"))
+            tip.wm_overrideredirect(True)
+            tip.wm_attributes("-topmost", True)
+            tk.Label(tip, text=text, justify="left", wraplength=640, font=self._tree_fonts(tree)[0],
+                     background=self.theme.color("surface"), foreground=self.theme.color("fg"),
+                     padx=6, pady=3).pack(padx=1, pady=1)
+            tip.update_idletasks()
+            px, py = tree.winfo_pointerxy()
+            x = max(0, min(px + 12, tip.winfo_screenwidth() - tip.winfo_reqwidth()))
+            y = py + 20
+            if y + tip.winfo_reqheight() > tip.winfo_screenheight():
+                y = py - 8 - tip.winfo_reqheight()
+            tip.wm_geometry(f"+{x}+{y}")
+            tree._tip = tip
+        except tk.TclError:
+            pass
 
     # ---- 表头点击排序（通用，所有列表） ----
     def _make_sortable(self, tree, desc_first_cols=()):
@@ -779,7 +878,6 @@ class GuiApp(PacksGuiMixin):
         self._attach_scrollbar(self.inst_tree, tree_frame)
         self.inst_tree._view_key = "installed"
         self._make_sortable(self.inst_tree, desc_first_cols=("latest", "inst_time"))
-        self.inst_tree._stretch_col = "name"
         self._restore_view(self.inst_tree)
         self.inst_tree.bind("<Double-1>", self._on_inst_double)
         self.inst_tree.bind("<Button-3>", lambda e: self._popup(self.inst_tree, self._inst_menu, e))
@@ -851,7 +949,6 @@ class GuiApp(PacksGuiMixin):
         # 默认按更新时间降序（有日期的在前，无日期的最后）；有保存的排序则恢复
         if not (self._view_cfg().get("addable") or {}).get("sort_col"):
             self.add_tree._sort_col, self.add_tree._sort_rev = "updated", True
-        self.add_tree._stretch_col = "desc"
         self._restore_view(self.add_tree)
         self.add_tree.bind("<Double-1>", lambda e: self.show_addable_detail())
         self.add_tree.bind("<Button-3>", lambda e: self._popup(self.add_tree, self._add_menu, e))
@@ -1026,7 +1123,6 @@ class GuiApp(PacksGuiMixin):
         self._attach_scrollbar(self.um_tree, tree_frame)
         self.um_tree._view_key = "unmanaged"
         self._make_sortable(self.um_tree, desc_first_cols=("mtime", "size"))
-        self.um_tree._stretch_col = "file"
         self._restore_view(self.um_tree)
         self.um_tree.bind("<Button-3>", lambda e: self._popup(self.um_tree, self._um_menu, e))
         self.um_tree.bind("<Double-1>", self._um_reveal)
@@ -1054,7 +1150,6 @@ class GuiApp(PacksGuiMixin):
         self._attach_scrollbar(self.cust_tree, tree_frame)
         self.cust_tree._view_key = "custom"
         self._make_sortable(self.cust_tree)
-        self.cust_tree._stretch_col = "src"
         self._restore_view(self.cust_tree)
         self.cust_tree.bind("<Button-3>", lambda e: self._popup(self.cust_tree, self._cust_menu, e))
         btns = ttk.Frame(tab)
