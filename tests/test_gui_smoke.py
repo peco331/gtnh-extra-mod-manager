@@ -156,6 +156,74 @@ class TestGuiSmoke(unittest.TestCase):
             root.geometry(old)
             root.update()
 
+    def test_columns_fit_content_and_double_click_separator_fits_one(self):
+        """一列伸缩填满，其余按内容定宽（只增不减、有上限）；双击分隔线适配左侧列；
+        只记住用户拖过的列，旧版保存的伸缩宽度不再沿用。"""
+        from types import SimpleNamespace
+        app = self.app
+        self.assertEqual(app.inst_tree._stretch_col, "name")
+        self.assertTrue(app.inst_tree.column("name", "stretch"))
+        self.assertFalse(app.inst_tree.column("side", "stretch"))
+        top = tk.Toplevel(app.root)
+        try:
+            top.geometry("900x300")
+            frame = ttk.Frame(top)
+            frame.pack(fill="both", expand=True)
+            tree = ttk.Treeview(frame, columns=("name", "ver", "desc"), show="headings")
+            for col, width in (("name", 200), ("ver", 200), ("desc", 300)):
+                tree.heading(col, text=col)
+                tree.column(col, width=width)
+            tree.pack(side="left", fill="both", expand=True)
+            app._attach_scrollbar(tree, frame)
+            tree._view_key, tree._stretch_col = "fit-test", "desc"
+            app._view_cfg()["fit-test"] = {"widths": {"name": 777, "ver": 555}}  # 旧格式
+            app._restore_view(tree)
+            self.assertEqual(tree._manual_cols, set())
+            tree.insert("", "end", values=("Short", "1.0", "d" * 30))
+            app._after_tree_fill(tree)
+            top.update()
+            ver = tree.column("ver", "width")
+            self.assertLess(ver, 80)
+            # 窗口变宽：多出来的宽度只给伸缩列
+            top.geometry("1200x300")
+            top.update()
+            self.assertEqual(tree.column("ver", "width"), ver)
+            # 过滤后内容变短不缩，变长则增长但不超过上限
+            tree.delete(*tree.get_children(""))
+            app._after_tree_fill(tree)
+            self.assertEqual(tree.column("ver", "width"), ver)
+            tree.insert("", "end", values=("N" * 120, "2.0", "x"))
+            app._after_tree_fill(tree)
+            self.assertEqual(tree.column("name", "width"), app.AUTO_COL_MAX)
+            # 双击 name 右侧分隔线：放开上限展开到完整内容，且不再被自动改宽
+            top.update()
+            edge = tree.column("name", "width")
+            hit = SimpleNamespace(widget=tree, x=edge, y=5)
+            with mock.patch.object(tree, "identify_region", return_value="separator"):
+                self.assertEqual(app._on_separator_double(hit), "break")
+            self.assertGreater(tree.column("name", "width"), app.AUTO_COL_MAX)
+            self.assertIn("name", tree._manual_cols)
+            with mock.patch.object(tree, "identify_region", return_value="cell"):
+                self.assertIsNone(app._on_separator_double(hit))
+            # 拖动分隔线改宽的列记为手动并持久化
+            with mock.patch.object(tree, "identify_region", return_value="separator"):
+                app._on_column_press(hit)
+            tree.column("ver", width=150)
+            app._on_column_release(hit)
+            self.assertIn("ver", tree._manual_cols)
+            app._persist_view(tree)
+            saved = app._view_cfg()["fit-test"]
+            self.assertEqual(set(saved["manual"]), {"name", "ver"})
+            self.assertEqual(saved["widths"]["ver"], 150)
+            tree.column("ver", width=40)
+            app._restore_view(tree)
+            self.assertEqual(tree.column("ver", "width"), 150)
+            app._after_tree_fill(tree)
+            self.assertEqual(tree.column("ver", "width"), 150)
+        finally:
+            app._view_cfg().pop("fit-test", None)
+            top.destroy()
+
     def test_window_uses_bundled_app_icon(self):
         assets = Path(gui.__file__).resolve().parent / "assets"
         self.assertTrue((assets / "icon.ico").is_file())
