@@ -156,6 +156,14 @@ class TestCompareTieBreak(unittest.TestCase):
         self.assertEqual(split_mc_mod_version("dualhotbar-1.61-超长快捷栏"),
                          ("dualhotbar", None, "1.61"))
 
+    def test_abbreviated_variant_suffix_is_same_version(self):
+        # 真实案例：本地 mineshot-v1.85-Multi.jar 对应上游标签 v1.85-Multiplayer
+        self.assertEqual(compare("v1.85-Multi", "v1.85-Multiplayer"), 0)
+        self.assertEqual(compare("v1.85-Multiplayer", "v1.85-Multi"), 0)
+        # 不同的变体或过短的字母仍然区分
+        self.assertNotEqual(compare("1.0-client", "1.0-server"), 0)
+        self.assertNotEqual(compare("1.2.3s", "1.2.3t"), 0)
+
     def test_patch_name_without_base_is_unparseable(self):
         # 真实案例：仓库杂项 tag "p3" 被补丁规则解析成"版本3"，
         # 排序反而压过 v1.7.49 并抢走推荐/最新标记

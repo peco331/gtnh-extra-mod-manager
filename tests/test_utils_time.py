@@ -16,6 +16,15 @@ class TestFmtTs(unittest.TestCase):
         self.assertEqual(utils.fmt_ts(stamp), "2026-10-15 21:30")
 
 
+class TestVLabel(unittest.TestCase):
+    def test_v_prefix_is_never_doubled(self):
+        self.assertEqual(utils.vlabel("v0.1.3"), "v0.1.3")    # 日志曾显示 vv0.1.3
+        self.assertEqual(utils.vlabel("0.1.3"), "v0.1.3")
+        self.assertEqual(utils.vlabel("V2.0"), "v2.0")
+        self.assertEqual(utils.vlabel("未知"), "未知")
+        self.assertEqual(utils.vlabel(None), "?")
+
+
 class TestMarkNewest(unittest.TestCase):
     def test_new_backup_is_strictly_newest_even_with_identical_clock(self):
         import os

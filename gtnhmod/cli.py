@@ -77,7 +77,7 @@ class CliApp:
         ]
         while True:
             print()
-            print(f"===== GTNH 额外MOD管理工具 v{display_version()} =====")
+            print(f"===== GTNH 额外MOD管理工具 {utils.vlabel(display_version())} =====")
             if self.cfg.client_mods_dir:
                 print(f"客户端: {self.cfg.client_mods_dir}")
             if self.cfg.server_mods_dir:
@@ -312,7 +312,7 @@ class CliApp:
             if version is None:
                 return
         if not self.ui.confirm(f"安装 {entry['name_en'] or entry['id']}"
-                               + (f" v{version}" if version else "（最新）")
+                               + (f" {utils.vlabel(version)}" if version else "（最新）")
                                + f" 到 {side_txt}（按端别标注自动判断）?"):
             return
         self.ui.info("正在下载...")
@@ -368,10 +368,10 @@ class CliApp:
         if st is None:
             return "—"
         if not st["enabled"]:
-            return f"v{st['version']}✗禁用"
+            return f"{utils.vlabel(st['version'])}✗禁用"
         if st["status"] == "update_avail":
-            return f"v{st['version']}↑可更新"
-        return f"v{st['version']}✓"
+            return f"{utils.vlabel(st['version'])}↑可更新"
+        return f"{utils.vlabel(st['version'])}✓"
 
     def _installed_actions(self, m):
         actions = ["更新（所有已装端别）", "启用/禁用（选端别）", "锁定/解锁",
@@ -398,7 +398,7 @@ class CliApp:
                     return
             for side in m["sides"]:
                 self.ui.info(f"更新 {SIDE_LABELS[side]} {m['name_en']} 到 "
-                             + (f"v{version}" if version else "最新") + "...")
+                             + (f"{utils.vlabel(version)}" if version else "最新") + "...")
                 r = updater.update_mod(self.cfg, self.db, self.installed, m["mod_id"], side,
                                        version=version, prefetched=(options, verr))
                 self._print_update_result(r, side, m["name_en"])
@@ -483,17 +483,17 @@ class CliApp:
                 continue
             st = reg[side].get(mod_id) or {}
             cur = st.get("version")
-            status = updater.version_status(cur, info.latest_version)
+            status = updater.installed_status(st, info)
             if status == 'local_newer':
-                self.ui.warn(f"  {SIDE_LABELS[side]} {name}: 本地 v{cur} 高于上游 v{info.latest_version}，不会自动降级")
+                self.ui.warn(f"  {SIDE_LABELS[side]} {name}: 本地 {utils.vlabel(cur)} 高于上游 {utils.vlabel(info.latest_version)}，不会自动降级")
             elif status == 'update' and not info.candidates:
-                self.ui.warn(f"  {SIDE_LABELS[side]} {name}: 有新版 v{info.latest_version}，需手动选择资产或下载")
+                self.ui.warn(f"  {SIDE_LABELS[side]} {name}: 有新版 {utils.vlabel(info.latest_version)}，需手动选择资产或下载")
             elif status == "update":
-                self.ui.ok(f"  {SIDE_LABELS[side]} {name}: v{cur} → v{info.latest_version} 可更新")
+                self.ui.ok(f"  {SIDE_LABELS[side]} {name}: {utils.vlabel(cur)} → {utils.vlabel(info.latest_version)} 可更新")
             elif status == "uptodate":
-                self.ui.info(f"  {SIDE_LABELS[side]} {name}: v{cur} 已是最新")
+                self.ui.info(f"  {SIDE_LABELS[side]} {name}: {utils.vlabel(cur)} 已是最新")
             else:
-                self.ui.warn(f"  {SIDE_LABELS[side]} {name}: 当前v{cur}，最新v{info.latest_version}（版本格式无法比较，请手动判断）")
+                self.ui.warn(f"  {SIDE_LABELS[side]} {name}: 当前{utils.vlabel(cur)}，最新{utils.vlabel(info.latest_version)}（版本格式无法比较，请手动判断）")
             if info.candidates is None and info.latest_version:
                 self.ui.warn(f"      （无自动下载资产，需手动下载）")
         print()
@@ -513,7 +513,7 @@ class CliApp:
         if not targets:
             self.ui.info("没有可更新的mod（或全部已禁用/锁定）")
             return
-        options = [f"{SIDE_LABELS[s]} {st['name_en']} v{st['version']}"
+        options = [f"{SIDE_LABELS[s]} {st['name_en']} {utils.vlabel(st['version'])}"
                    + (f" → {st['latest_version']}" if st["status"] == "update_avail" else "")
                    for s, st in targets]
         options.append("== 全部更新 ==")
@@ -553,7 +553,7 @@ class CliApp:
             if version is None:
                 return
         self.ui.info(f"更新 {SIDE_LABELS[side]} {st['name_en']} 到 "
-                     + (f"v{version}" if version else "最新") + "...")
+                     + (f"{utils.vlabel(version)}" if version else "最新") + "...")
         r = updater.update_mod(self.cfg, self.db, self.installed, st["mod_id"], side,
                                version=version, prefetched=(options, verr))
         self._print_update_result(r, side, st["name_en"])
@@ -562,7 +562,7 @@ class CliApp:
         if r.get("warning"):
             self.ui.warn(r["warning"])
         if r["action"] == "updated":
-            self.ui.ok(f"已更新 {SIDE_LABELS[side]} {name}: v{r['from']} → v{r['to']}（{r['file']}）")
+            self.ui.ok(f"已更新 {SIDE_LABELS[side]} {name}: {utils.vlabel(r['from'])} → {utils.vlabel(r['to'])}（{r['file']}）")
             if r.get("body"):
                 self.ui.info(f"更新日志:\n{r['body'][:600]}")
         elif r["action"] == "uptodate":
@@ -591,7 +591,7 @@ class CliApp:
         if not targets:
             self.ui.info("没有已受管的mod")
             return
-        options = [f"{SIDE_LABELS[s]} {st['name_en']} v{st['version']}"
+        options = [f"{SIDE_LABELS[s]} {st['name_en']} {utils.vlabel(st['version'])}"
                    + ("  [已禁用]" if not st["enabled"] else "")
                    for s, st in targets]
         idx = self.ui.choose("选择要切换启用状态的mod:", options)

@@ -33,10 +33,14 @@ class InstalledDB:
         # 本进程删除过的 (side, mod_id)：save 合并时不让磁盘上的旧记录复活
         # （GUI 删除 ↔ 计划任务同时保存的场景）
         self._tombstones: set = set()
+        # 本进程写过远端检查结果的 (side, mod_id)：保存时以本进程为准，
+        # 不靠比较时间字符串（时区或系统时间调整会让刚检查的结果被旧记录覆盖）
+        self._checked_here: set = set()
         self.load()
 
     def load(self):
         self._tombstones = set()  # 重新加载即重置删除标记
+        self._checked_here = set()
         data = utils.load_json(self.path, None)  # None=缺失或损坏
         if data is None:
             # 缺失/损坏 → 从 .bak 自动恢复（对齐 mods_db.json 的做法）。
@@ -78,6 +82,8 @@ class InstalledDB:
                             # 磁盘独有：非本进程删除的记录并入（他进程新装的别丢）
                             if (side, mod_id) not in self._tombstones:
                                 mine[mod_id] = rec
+                            continue
+                        if (side, mod_id) in self._checked_here:
                             continue
                         if str(rec.get("last_checked") or "") > str(local.get("last_checked") or ""):
                             for k in ("last_checked", "last_remote_version", "last_remote_date"):
@@ -132,6 +138,7 @@ class InstalledDB:
         fields = {"last_checked": utils.now_str(), "last_remote_version": remote_version}
         if remote_date:
             fields["last_remote_date"] = remote_date
+        self._checked_here.add((side, mod_id))
         self.set(side, mod_id, save=save, **fields)
 
     def all_ids(self, side: str) -> list:

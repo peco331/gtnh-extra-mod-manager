@@ -16,7 +16,7 @@ from .targets import classify_target, source_context_for_entry
 from pathlib import Path
 
 from . import net, utils
-from .versions import (MC_VERSION_RE, VersionParseError, _MC_SET,
+from .versions import (MC_VERSION_RE, VersionParseError, _MC_SET, compare,
                        max_version, order_key, parse_version, split_mc_mod_version)
 
 
@@ -376,12 +376,40 @@ class GitHubSource(Source):
         else:
             options = [option for _, option in sorted(zip(dates, options),
                        key=lambda pair: pair[0], reverse=True)]
+        options = self._demote_backports(options, force=force)
         seen, unique = set(), []
         for option in options:
             if option.version not in seen:
                 seen.add(option.version)
                 unique.append(option)
         return unique
+
+    def _demote_backports(self, options, *, force=False):
+        """把给旧整合包补发的维护版排到维护者标记的 Latest 之后。
+
+        WildcardPattern 的 v1.0.7（给 GTNH 2.8.4）晚于 v1.1.0 发布，但维护者把 v1.1.0
+        标为 Latest：晚于 Latest 发布却版本更低的就是补发的旧线版本。只按时间会把它
+        当成最新；只按版本号又会被早年错标的 v1.97（AE2Things）带偏，所以以 Latest 为准。
+        仓库没有 Latest（全是测试版）或查询失败时保持时间顺序。"""
+        if len(options) < 2:
+            return options
+        try:
+            latest, _ = self._api(f"/repos/{self.owner}/{self.repo}/releases/latest",
+                                  "latest", force=force)
+        except (net.HttpError, SourceError, OSError, ValueError):
+            return options
+        tag = latest.get("tag_name") if isinstance(latest, dict) else None
+        anchor = next((i for i, o in enumerate(options) if tag and o.tag == tag), None)
+        if not anchor:
+            return options  # Latest 已在最前，或不在可用列表里
+        try:
+            backports = [o for o in options[:anchor] if compare(o.version, options[anchor].version) < 0]
+        except VersionParseError:
+            return options
+        if not backports:
+            return options
+        ahead = [o for o in options[:anchor] if o not in backports]
+        return ahead + [options[anchor]] + backports + options[anchor + 1:]
 
 
 # ---------- 本地目录 ----------

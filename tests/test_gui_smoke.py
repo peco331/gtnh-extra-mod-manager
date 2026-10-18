@@ -242,6 +242,47 @@ class TestGuiSmoke(unittest.TestCase):
         finally:
             self.app.db.remove_custom(mid)
 
+    def _open_source_dialog(self, entry=None):
+        self.app._custom_source_dialog(entry)
+        title = '编辑自定义源' if entry else '添加自定义源'
+        top = next(w for w in self.app.root.winfo_children()
+                   if isinstance(w, tk.Toplevel) and w.title() == title)
+        controls = list(_walk(top))
+        check = next(w for w in controls if isinstance(w, ttk.Checkbutton)
+                     and 'GTNH' in str(w.cget('text')))
+        return top, controls, check
+
+    def test_new_github_source_is_confirmed_for_gtnh_by_default(self):
+        """自己绑定的 GitHub 源不应在检查时变成「游戏平台未确定，需手动处理」。"""
+        top, controls, check = self._open_source_dialog()
+        self.assertIn('selected', check.state())
+        # Combobox 是 Entry 的子类，按所在行取真正的输入框
+        entry_at = lambda row: next(w for w in controls if type(w) is ttk.Entry
+                                    and w.grid_info().get('row') == row)
+        entry_at(1).insert(0, 'BoundDemo')            # 英文名
+        entry_at(4).insert(0, 'owner/BoundDemo')      # owner/repo
+        with mock.patch.object(gui.messagebox, 'showwarning', side_effect=AssertionError('unexpected warning')):
+            next(w for w in controls if isinstance(w, ttk.Button) and w.cget('text') == '添加').invoke()
+        entry = next(e for e in self.app.db.all() if e.get('name_en') == 'BoundDemo')
+        try:
+            self.assertEqual(entry['source']['target_profile'], 'gtnh')
+        finally:
+            self.app.db.remove_custom(entry['id'])
+
+    def test_unticked_confirmation_is_saved_and_shown_on_edit(self):
+        mid = self.app.db.add_custom({'name_en': 'UncheckedDemo', 'source_type': 'github',
+                                      'source': {'owner': 'owner', 'repo': 'UncheckedDemo'}})
+        try:
+            top, controls, check = self._open_source_dialog(self.app.db.get(mid))
+            self.assertNotIn('selected', check.state())  # 未确认的旧来源不会被悄悄确认
+            check.invoke()
+            check.invoke()
+            with mock.patch.object(gui.messagebox, 'showwarning', side_effect=AssertionError('unexpected warning')):
+                next(w for w in controls if isinstance(w, ttk.Button) and w.cget('text') == '保存').invoke()
+            self.assertEqual(self.app.db.get(mid)['source']['target_profile'], 'unknown')
+        finally:
+            self.app.db.remove_custom(mid)
+
     def test_manual_install_results_use_one_summary_without_browser_prompts(self):
         entry = {'id': 'demo', 'urls': {'github': 'https://github.com/owner/Demo'}}
         rows = [{'action': 'manual', 'side': s, 'name': 'Demo', 'note': '需手动', 'entry': entry}

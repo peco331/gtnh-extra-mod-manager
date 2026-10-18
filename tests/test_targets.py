@@ -230,6 +230,40 @@ class TestTargets(unittest.TestCase):
         self.assertEqual(info.latest_version, '3.0-GTNH')
         self.assertIn('时间', info.note)
 
+    def _src_with_latest(self, owner, repo, data, latest_tag):
+        src = GitHubSource(owner, repo, target_profile='gtnh')  # 真实条目由 Wiki 提供 GTNH 上下文
+        def api(path, cache_key, force=False):
+            if path.endswith('/releases/latest'):
+                return ({'tag_name': latest_tag}, 'fresh')
+            return (data, 'fresh')
+        return src, api
+
+    def test_backport_published_after_latest_is_not_newest(self):
+        """WildcardPattern：给旧整合包补发的 v1.0.7 晚于 v1.1.0 发布，维护者标记的 Latest 是 v1.1.0。"""
+        data = [release('v1.0.7', ['wildcardpattern-v1.0.7.jar'], '2026-08-18T00:00:00Z'),
+                release('v1.1.0', ['wildcardpattern-v1.1.0.jar'], '2026-07-03T12:00:00Z'),
+                release('v1.0.6', ['wildcardpattern-v1.0.6.jar'], '2026-07-03T08:00:00Z')]
+        src, api = self._src_with_latest('clfpwp', 'WildcardPatternforGTNH-1.7.10', data, 'v1.1.0')
+        with patch.object(src, '_api', side_effect=api):
+            self.assertEqual(src.check(None).latest_version, 'v1.1.0')
+            self.assertEqual([o.version for o in src.list_versions()], ['v1.1.0', 'v1.0.7', 'v1.0.6'])
+
+    def test_old_mistagged_high_version_does_not_win(self):
+        """AE2Things：早年错标的 v1.97 版本号更高，但最新发布是 v1.2.14。"""
+        data = [release('v1.2.14', ['ae2thing-v1.2.14.jar'], '2026-02-16T00:00:00Z'),
+                release('v1.97', ['ae2thing-v1.97.jar'], '2025-02-27T00:00:00Z')]
+        src, api = self._src_with_latest('asdflj', 'AE2Things', data, 'v1.2.14')
+        with patch.object(src, '_api', side_effect=api):
+            self.assertEqual(src.check(None).latest_version, 'v1.2.14')
+
+    def test_newer_prerelease_stays_above_latest(self):
+        """维护者的 Latest 只排除晚发布的旧线版本；版本更高的测试版仍排在最前。"""
+        data = [release('1.0.64-rc1', ['wtct-1.0.64-rc1.jar'], '2026-09-10T00:00:00Z', prerelease=True),
+                release('1.0.63', ['wtct-1.0.63.jar'], '2026-09-01T00:00:00Z')]
+        src, api = self._src_with_latest('233max258', 'Wtcts-1.7.10', data, '1.0.63')
+        with patch.object(src, '_api', side_effect=api):
+            self.assertEqual(src.check(None).latest_version, '1.0.64-rc1')
+
     def test_wiki_merge_preserves_only_same_source_confirmation(self):
         from gtnhmod.db import ModsDB
         from copy import deepcopy

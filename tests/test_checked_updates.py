@@ -177,6 +177,20 @@ class TestCheckedUpdates(unittest.TestCase):
         plan = app._show_update_plan_dialog.call_args.args[0]
         self.assertEqual({p["mod_id"] for p in plan}, {other, self.mid})
 
+    def test_status_ignores_check_result_after_mod_changed(self):
+        """检查后在详情里更新/重新绑定过的 MOD，不能继续显示旧检查结果（如过时的需手动处理）。"""
+        def lookup(entry, *_args, **_kwargs):
+            return [], None  # 检查时没有下载渠道 → 需手动处理
+        with patch.object(updater, "list_install_options", side_effect=lookup):
+            snapshot = updater.check_update_plan(self.cfg, self.db, self.inst)
+        app = self.app(snapshot)
+        row = next(m for m in app._merged_registry() if m["mod_id"] == self.latest)
+        self.assertEqual(app._checked_status(row)["status"], "no_source")  # 显示为「未绑定下载源」
+        self.db.get(self.latest)["source_type"] = "github"  # 之后绑定了下载源
+        app._merged_cache = None
+        row = next(m for m in app._merged_registry() if m["mod_id"] == self.latest)
+        self.assertEqual(app._checked_status(row)["status"], "installed")
+
     def test_item_locked_after_check_is_left_out_quietly(self):
         other = self.add_second_update()
         with patch.object(updater, "list_install_options", side_effect=self.lookup):

@@ -38,7 +38,7 @@ STATUS_CN = {"installed": "已安装", "update_avail": "可更新",
              "update_incompat": "有新版（可能不兼容）",
              "query_failed": "查询失败", "manual": "需手动处理",
              "unknown_version": "无法比较版本", "local_newer": "本地版本较新",
-             "disabled": "已禁用"}
+             "no_source": "未绑定下载源", "disabled": "已禁用"}
 INSTALL_SIDE_CN = {"both": "双端", "client": "仅客户端", "server": "仅服务端"}
 FONT = ("Microsoft YaHei UI", 9)
 
@@ -56,10 +56,10 @@ def side_state_text(st) -> str:
     if st is None:
         return "—"
     if not st["enabled"]:
-        return f"v{st['version']} ✗禁用"
+        return f"{utils.vlabel(st['version'])} ✗禁用"
     if st["status"] == "update_avail":
-        return f"v{st['version']} ↑可更新"
-    return f"v{st['version']} ✓"
+        return f"{utils.vlabel(st['version'])} ↑可更新"
+    return f"{utils.vlabel(st['version'])} ✓"
 
 
 class GuiApp(PacksGuiMixin):
@@ -83,7 +83,7 @@ class GuiApp(PacksGuiMixin):
             except (AttributeError, OSError):
                 pass
         self.root = tk.Tk()
-        self.root.title(f"GTNH 额外MOD管理工具 v{display_version()}")
+        self.root.title(f"GTNH 额外MOD管理工具 {utils.vlabel(display_version())}")
         self._set_app_icon()
         self.theme = theme.ThemeManager(self.root, FONT, self.cfg.data.get("theme", "system"))
         self.theme.on_change(self._on_theme_changed)
@@ -1967,14 +1967,38 @@ class GuiApp(PacksGuiMixin):
             rows.append(m)
         return rows
 
-    def _checked_status(self, mod):
+    def _current_check_items(self, mod_id):
+        """本次检查中仍然有效的条目。
+
+        检查之后在详情里更新、重新绑定来源、确认平台或锁定过的 MOD，旧结果不再代表
+        它的状态（否则会一直显示过时的「需手动处理」），改用安装记录的状态。"""
         snapshot = getattr(self, "_checked_updates", None)
-        items = [p for p in snapshot["plan"] if p["mod_id"] == mod["mod_id"]] if snapshot else []
+        if not snapshot:
+            return []
+        memo_key = (id(snapshot), id(getattr(self, "_merged_cache", None)))
+        if getattr(self, "_check_memo_key", None) != memo_key:
+            self._check_memo_key, self._check_memo = memo_key, {}
+        if mod_id not in self._check_memo:
+            items = [p for p in snapshot["plan"] if p["mod_id"] == mod_id]
+            # 任一端过时就整体不用：只剩另一端的「已最新」会掩盖这一端的「可更新」
+            stale = any(updater.validate_checked_updates(
+                self.cfg, self.db, self.installed, snapshot, [p]) for p in items)
+            self._check_memo[mod_id] = [] if stale else items
+        return self._check_memo[mod_id]
+
+    def _checked_status(self, mod):
+        items = self._current_check_items(mod["mod_id"])
         if not items:
+            entry = self.db.get(mod["mod_id"]) or {}
+            if mod.get("status") == "installed" and entry.get("source_type") in (None, "", "manual"):
+                # 无需检查即可知道：没有下载源就无法检测更新，直接提示去绑定
+                return {**mod, "status": "no_source"}
             return mod
         mod = dict(mod)
         actions = {p["action"] for p in items}
-        if "update" in actions:
+        if any(p.get("no_source") for p in items):
+            mod["status"] = "no_source"
+        elif "update" in actions:
             mod["status"] = "update_avail"
         elif "error" in actions:
             mod["status"] = "query_failed"
@@ -2139,7 +2163,7 @@ class GuiApp(PacksGuiMixin):
             side = "、".join(SIDE_LABELS[s] for s in item["sides"])
             note = item.get("note") or item["action"]
             if item["action"] == "update":
-                note = f'v{item["current_version"]} → v{item["target_version"]} 可更新'
+                note = f'{utils.vlabel(item["current_version"])} → {utils.vlabel(item["target_version"])} 可更新'
             self._log(f'{"[错误] " if item["action"] == "error" else ""}{side} {item["name"]}: {note}')
         counts = {action: len({p["mod_id"] for p in snapshot["plan"] if p["action"] == action})
                   for action in ("update", "uptodate", "manual", "manual_downgrade", "error")}
@@ -2165,17 +2189,17 @@ class GuiApp(PacksGuiMixin):
                 self._log(f"{SIDE_LABELS[side]} {name}: {info.note if info else '无信息'}")
                 continue
             cur = (reg[side].get(mod_id) or {}).get("version")
-            st = updater.version_status(cur, info.latest_version)
+            st = updater.installed_status(reg[side].get(mod_id) or {}, info)
             if st == 'local_newer':
-                self._log(f"{SIDE_LABELS[side]} {name}: 本地 v{cur} 高于上游 v{info.latest_version}，不会自动降级")
+                self._log(f"{SIDE_LABELS[side]} {name}: 本地 {utils.vlabel(cur)} 高于上游 {utils.vlabel(info.latest_version)}，不会自动降级")
             elif st == 'update' and not info.candidates:
-                self._log(f"{SIDE_LABELS[side]} {name}: 有新版 v{info.latest_version}，需手动选择资产或下载")
+                self._log(f"{SIDE_LABELS[side]} {name}: 有新版 {utils.vlabel(info.latest_version)}，需手动选择资产或下载")
             elif st == "update":
-                self._log(f"{SIDE_LABELS[side]} {name}: v{cur} → v{info.latest_version} 可更新")
+                self._log(f"{SIDE_LABELS[side]} {name}: {utils.vlabel(cur)} → {utils.vlabel(info.latest_version)} 可更新")
             elif st == "uptodate":
-                self._log(f"{SIDE_LABELS[side]} {name}: v{cur} 已最新")
+                self._log(f"{SIDE_LABELS[side]} {name}: {utils.vlabel(cur)} 已最新")
             else:
-                self._log(f"{SIDE_LABELS[side]} {name}: 当前v{cur}，最新v{info.latest_version}（请手动判断）")
+                self._log(f"{SIDE_LABELS[side]} {name}: 当前{utils.vlabel(cur)}，最新{utils.vlabel(info.latest_version)}（请手动判断）")
             if info.note:
                 self._log(f"  提示：{info.note}")
             if info.candidates is None and info.latest_version:
@@ -2475,7 +2499,7 @@ class GuiApp(PacksGuiMixin):
             label = SIDE_LABELS.get(r.get("side", "?"), r.get("side", "?"))
             if r["action"] == "updated":
                 n_ok += 1
-                self._log(f"已更新 {label} {name}: v{r['from']} → v{r['to']}")
+                self._log(f"已更新 {label} {name}: {utils.vlabel(r['from'])} → {utils.vlabel(r['to'])}")
                 if r.get("body"):
                     self._log(f"  更新日志: {r['body'][:200]}…")
                 if r.get("warning"):
@@ -2957,11 +2981,11 @@ class GuiApp(PacksGuiMixin):
                 continue
             dups = list(st.get("duplicates") or [])
             lines.append(f"\n{SIDE_LABELS[side]}绑定的jar（{1 + len(dups)}个）:")
-            lines.append(f"  ● {st.get('file_name')}（当前使用 v{st.get('version')}）")
+            lines.append(f"  ● {st.get('file_name')}（当前使用 {utils.vlabel(st.get('version'))}）")
             for d in dups:
                 lines.append(f"  ○ {d}（重复，建议清理）")
             if st.get("latest_version"):
-                lines.append(f"  远端最新: v{st['latest_version']}")
+                lines.append(f"  远端最新: {utils.vlabel(st['latest_version'])}")
         if e.get("desc"):
             lines.append(f"\n简介:\n{e['desc']}")
         if e.get("detail"):
@@ -3618,7 +3642,7 @@ class GuiApp(PacksGuiMixin):
             label = SIDE_LABELS.get(r.get("side", "?"), "?")
             if r["action"] == "installed":
                 n_ok += 1
-                self._log(f"已安装到{label}: {r['name']} v{r['version']}")
+                self._log(f"已安装到{label}: {r['name']} {utils.vlabel(r['version'])}")
             elif r["action"] == "skip":
                 self._log(f"已跳过 {r['name']}: {r.get('note')}")
             elif r["action"] == "manual":
@@ -4149,7 +4173,7 @@ class GuiApp(PacksGuiMixin):
 
     def _custom_source_dialog(self, existing=None):
         editing = existing is not None
-        top = self._dialog("编辑自定义源" if editing else "添加自定义源", "500x360")
+        top = self._dialog("编辑自定义源" if editing else "添加自定义源", "520x400")
         f = ttk.Frame(top)
         f.pack(fill="both", expand=True, padx=10, pady=10)
         ttk.Label(f, text="类型:").grid(row=0, column=0, sticky="w", pady=4)
@@ -4185,6 +4209,10 @@ class GuiApp(PacksGuiMixin):
                 src.insert(0, d)
         browse_btn = ttk.Button(f, text="浏览...", command=browse_src)
         browse_btn.grid(row=4, column=2)
+        # 自己绑定的下载源默认视为 GTNH 用；明确标注其他 MC 版本或加载器的文件仍会被排除
+        gtnh_var = tk.BooleanVar(value=(old_src.get("target_profile") == "gtnh") if editing else True)
+        gtnh_check = ttk.Checkbutton(f, variable=gtnh_var,
+                                     text="确认这个下载源发布的是 GTNH（1.7.10）版本")
 
         def on_kind(*_a):
             k = kind.get()
@@ -4208,6 +4236,10 @@ class GuiApp(PacksGuiMixin):
                 regex_label.grid_remove()
                 regex_entry.grid_remove()
             src.configure(state="disabled" if is_manual else "normal")
+            if k in ("github", "local_folder"):
+                gtnh_check.grid(row=6, column=0, columnspan=3, sticky="w", pady=(6, 0))
+            else:
+                gtnh_check.grid_remove()
 
         kind.trace_add("write", lambda *a: on_kind())
         if initial_type == "github":
@@ -4242,7 +4274,7 @@ class GuiApp(PacksGuiMixin):
                 fields["source"] = {"owner": repo[0], "repo": repo[1],
                                      "asset_regex": regex_entry.get().strip(), "exclude_regex": wikimod.DEFAULT_EXCLUDE_REGEX}
                 if initial_type == 'github' and repo == (old_src.get('owner'), old_src.get('repo')):
-                    for key in ('target_profile', 'tag_regex', 'exclude_regex'):
+                    for key in ('tag_regex', 'exclude_regex'):
                         if key in old_src:
                             fields['source'][key] = old_src[key]
                 fields["urls"].update(github=url, links=[{"url": url, "label": "github"}])
@@ -4258,10 +4290,9 @@ class GuiApp(PacksGuiMixin):
                     messagebox.showwarning("提示", "请填写本地目录路径", parent=top)
                     return
                 fields["source"] = {"path": p, "name_regex": regex_entry.get().strip()}
-                if initial_type == 'local_folder' and p == old_src.get('path'):
-                    if 'target_profile' in old_src:
-                        fields['source']['target_profile'] = old_src['target_profile']
             if k in ('github', 'local_folder'):
+                # 平台确认来自本对话框当前的勾选，不从旧来源继承
+                fields["source"]["target_profile"] = "gtnh" if gtnh_var.get() else "unknown"
                 try:
                     re.compile(regex_entry.get().strip())
                 except re.error as error:
@@ -4281,8 +4312,8 @@ class GuiApp(PacksGuiMixin):
             top.destroy()
             self.refresh_all()
 
-        ttk.Button(f, text="保存" if editing else "添加", command=ok).grid(row=6, column=1, sticky="w", pady=10)
-        ttk.Button(f, text="取消", command=top.destroy).grid(row=6, column=1, sticky="e", pady=10)
+        ttk.Button(f, text="保存" if editing else "添加", command=ok).grid(row=7, column=1, sticky="w", pady=10)
+        ttk.Button(f, text="取消", command=top.destroy).grid(row=7, column=1, sticky="e", pady=10)
         top.transient(self.root)
         top.grab_set()
 

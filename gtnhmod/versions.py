@@ -145,6 +145,10 @@ def _tie_break(ra: str, rb: str) -> int:
         if x is None or y is None:
             continue
         if x != y:
+            # 同一位置的字母后缀互为缩写视为同一版本：v1.85-Multi == v1.85-Multiplayer
+            if x[0] == y[0] == 1 and min(len(x[2]), len(y[2])) >= 3 \
+                    and (x[2].startswith(y[2]) or y[2].startswith(x[2])):
+                continue
             return -1 if x < y else 1
     return 0
 

@@ -119,6 +119,16 @@ def timestamp_str() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
+def vlabel(version) -> str:
+    """显示用版本：数字开头补 v，已带 v 的不重复（避免 vv0.1.3），非版本文字原样。"""
+    text = str(version or "").strip()
+    if not text or text == "?":
+        return "?"
+    if text[0] in "vV" and text[1:2].isdigit():
+        return "v" + text[1:]
+    return "v" + text if text[0].isdigit() else text
+
+
 def mark_newest(path: Path) -> None:
     """把刚写入的备份标为所在目录中最新的一份。
 

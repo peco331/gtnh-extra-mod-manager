@@ -763,8 +763,7 @@ def summarize_check(results: list, reg: dict) -> dict:
         elif not info or not info.latest_version:
             st.add("manual")
         else:
-            cur = (reg.get(side, {}).get(mod_id) or {}).get("version")
-            s = version_status(cur, info.latest_version)
+            s = installed_status(reg.get(side, {}).get(mod_id) or {}, info)
             if s == 'local_newer' or (s == 'update' and not info.candidates):
                 st.add('manual')
             else:
@@ -776,6 +775,27 @@ def summarize_check(results: list, reg: dict) -> dict:
                 counts[key] += 1
                 break
     return counts
+
+
+def release_of_file(options, file_name) -> dict | None:
+    """本地 jar 恰好是哪个发布的下载资产（按文件名，忽略 .disabled 与大小写）。"""
+    if not file_name:
+        return None
+    name = file_name[:-9] if file_name.lower().endswith(".disabled") else file_name
+    name = name.lower()
+    for option in options or []:
+        if any((c.file_name or "").lower() == name for c in (option.get("candidates") or [])):
+            return option
+    return None
+
+
+def installed_status(state: dict, info) -> str:
+    """单个已装文件相对上游最新发布的状态；本地文件就是该发布的资产时即为已最新。"""
+    name = (state or {}).get("file_name") or ""
+    name = (name[:-9] if name.lower().endswith(".disabled") else name).lower()
+    if name and any((c.file_name or "").lower() == name for c in (info.candidates or [])):
+        return "uptodate"
+    return version_status((state or {}).get("version"), info.latest_version)
 
 
 def version_status(current, latest) -> str:
@@ -875,7 +895,7 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
                   install_date=utils.now_str(), updated_at=utils.now_str(),
                   last_remote_version=info.latest_version, last_checked=utils.now_str())
     _learn_asset_name(db, entry, dest.name)
-    _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {entry.get('name_en') or mod_id} v{ver}（{dest.name}）")
+    _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {entry.get('name_en') or mod_id} {utils.vlabel(ver)}（{dest.name}）")
     leftover = _cleanup_extras(cfg, db, side, mod_id, dest, unremoved)
     result = {"action": "installed", "file": dest.name, "version": ver,
               "warning": warn, "note": info.note, "body": info.release_body}
@@ -1114,7 +1134,7 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
                   last_remote_version=info.latest_version, last_checked=utils.now_str())
     _learn_asset_name(db, entry, dest.name)
     _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id}: "
-                 f"v{old.version or '?'} → v{ver}（{dest.name}）")
+                 f"{utils.vlabel(old.version or '?')} → {utils.vlabel(ver)}（{dest.name}）")
     leftover = _cleanup_extras(cfg, db, side, mod_id, dest, unremoved)
     result = {"action": "updated", "from": old.version or "?", "to": ver,
               "file": dest.name, "note": info.note, "body": info.release_body,
@@ -1500,6 +1520,7 @@ def build_update_plan(cfg, db, installed, *, target_mod_ids=None, sides=SIDES,
             continue
 
         if not options:
+            unbound = entry.get("source_type") in (None, "", "manual")
             plan.append({
                 "mod_id": mod_id,
                 "name": name,
@@ -1508,7 +1529,10 @@ def build_update_plan(cfg, db, installed, *, target_mod_ids=None, sides=SIDES,
                 "target_version": None,
                 "prerelease": False,
                 "action": "manual",
-                "note": "该 mod 无自动下载渠道",
+                # 未绑定与「有来源但需人工处理」分开显示，前者给出可操作的提示
+                "no_source": unbound,
+                "note": ("未绑定下载源，可在详情或「自定义源」页设置 GitHub 等来源" if unbound
+                         else "该 mod 无自动下载渠道"),
                 "prefetched": (options, err),
                 "options": [],
             })
@@ -1534,16 +1558,21 @@ def build_update_plan(cfg, db, installed, *, target_mod_ids=None, sides=SIDES,
         groups = {}
         for side in mod_sides:
             current = reg[side][mod_id].get("version") or "未知"
+            # 本地文件就是某个发布的下载资产时，以该发布的版本为准：
+            # programmablehatches-0.2.0p30.jar 属于 v0.2.0p30-beta，不是「本地更新」
+            released = release_of_file(options, reg[side][mod_id].get("file_name"))
+            compared = released["version"] if released else current
             action, side_note = "update", note
             try:
-                comp = compare(chosen["version"], current)
+                comp = compare(chosen["version"], compared)
                 if comp == 0:
                     action, side_note = "uptodate", "已是最新 GTNH 发布"
                 elif comp < 0:
                     action, side_note = "manual_downgrade", "发布版本低于当前已安装版本，需手动确认"
             except VersionParseError:
                 action, side_note = "manual", f"无法比较版本（已装 {current}，目标 {chosen['version']}），请手动选择"
-            if not chosen.get("candidates"):
+            if action == "update" and not chosen.get("candidates"):
+                # 只有需要下载时才要求资产；已是最新不因新发布缺 jar 变成「需手动处理」
                 action = "manual"
                 side_note = "该版本无自动下载资产，需手动下载"
             key = (action, side_note, current)
