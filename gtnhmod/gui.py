@@ -2040,13 +2040,25 @@ class GuiApp(PacksGuiMixin):
         return "v" + v if v[0].isdigit() else v
 
     @staticmethod
+    def _display_version(local, latest):
+        """已装版本与最新发布是同一版本、只是写法不同时（jar 自标 v1.85-Multi，
+        发布标签 v1.85-Multiplayer），显示发布的完整名称，避免两列看起来不一致。"""
+        if not local or not latest or local == latest:
+            return local
+        try:
+            return latest if updater.compare(latest, local) == 0 else local
+        except updater.VersionParseError:
+            return local
+
+    @staticmethod
     def _version_cell(m) -> str:
         """已装版本列：双端一致只显示一份；不一致或部分禁用时分别标注（✗=禁用）。"""
         def cell(side):
             st = m["sides"].get(side)
             if not st:
                 return None
-            return GuiApp._fmt_ver(st.get("version") or "?") + ("" if st["enabled"] else "✗")
+            return GuiApp._fmt_ver(GuiApp._display_version(st.get("version"), m.get("latest_version"))
+                                   or "?") + ("" if st["enabled"] else "✗")
         c, s = cell("client"), cell("server")
         if c and s:
             return c if c == s else f"客 {c} / 服 {s}"

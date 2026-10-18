@@ -107,6 +107,18 @@ class TestGuiSmoke(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
         gc.collect()
 
+    def test_same_version_with_different_spelling_shows_release_name(self):
+        """Mineshot：jar 自标 v1.85-Multi，发布标签 v1.85-Multiplayer，已装列显示发布名称。"""
+        row = {"latest_version": "v1.85-Multiplayer",
+               "sides": {"client": {"version": "v1.85-Multi", "enabled": True}}}
+        self.assertEqual(gui.GuiApp._version_cell(row), "v1.85-Multiplayer")
+        # 真正不同的版本保持本地原样
+        row["sides"]["client"]["version"] = "v1.84"
+        self.assertEqual(gui.GuiApp._version_cell(row), "v1.84")
+        row["latest_version"] = ""
+        row["sides"]["client"] = {"version": "v1.85-Multi", "enabled": False}
+        self.assertEqual(gui.GuiApp._version_cell(row), "v1.85-Multi✗")
+
     def test_app_builds(self):
         self.assertTrue(self.app.inst_tree["columns"])
 
