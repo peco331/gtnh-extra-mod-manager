@@ -6,7 +6,7 @@
 
 ### 修复
 
-- 「最新版本」以维护者在 GitHub 标记的 Latest 为准：给旧整合包补发、晚于 Latest 发布的低版本（如 WildcardPattern v1.0.7）不再被当成最新，导致误报「本地版本较新」。
+- 「最新版本」以维护者在 GitHub 标记的 Latest 为准：给旧整合包补发、晚于 Latest 发布的低版本（如 WildcardPattern v1.0.7）不再被当成最新，导致误报「本地版本较新」。同版本的旧整合包构建（如 ae2wtx v1.2.1-gtnh2.8.4）也不再排在 Latest 之前。
 - 本地文件就是某个发布的下载资产时，以该发布的版本为准（如 `programmablehatches-0.2.0p30.jar` 属于 v0.2.0p30-beta）；版本后缀互为缩写视为同一版本（如 Mineshot 的 v1.85-Multi 与 v1.85-Multiplayer）。
 - 已是最新的 MOD 不再因为最新发布没有附带 jar 而显示「需手动处理」。
 - 检查之后在详情里更新、重新绑定来源、确认平台或锁定的 MOD，不再继续显示过时的检查结果。

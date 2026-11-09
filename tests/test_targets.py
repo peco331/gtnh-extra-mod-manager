@@ -248,6 +248,24 @@ class TestTargets(unittest.TestCase):
             self.assertEqual(src.check(None).latest_version, 'v1.1.0')
             self.assertEqual([o.version for o in src.list_versions()], ['v1.1.0', 'v1.0.7', 'v1.0.6'])
 
+    def test_pack_suffixed_build_published_after_latest_is_not_newest(self):
+        """ae2wtx：v1.2.1-gtnh2.8.4 是 Latest v1.2.1 的旧整合包构建，后缀不能抬高版本。"""
+        data = [release('v1.2.1-gtnh2.8.4', ['ae2wtx-1.2.1-gtnh2.8.4.jar'], '2026-11-09T09:03:01Z'),
+                release('v1.2.1', ['ae2wtx-1.2.1.jar'], '2026-11-09T08:51:30Z'),
+                release('v1.2.0-gtnh2.8.4', ['ae2wtx-1.2.0-gtnh2.8.4.jar'], '2026-10-26T12:09:11Z')]
+        src, api = self._src_with_latest('peco331', 'AE2WirelessTransceiver-GTNH', data, 'v1.2.1')
+        with patch.object(src, '_api', side_effect=api):
+            self.assertEqual(src.check(None).latest_version, 'v1.2.1')
+            self.assertEqual([o.version for o in src.list_versions()],
+                             ['v1.2.1', 'v1.2.1-gtnh2.8.4', 'v1.2.0-gtnh2.8.4'])
+
+    def test_higher_release_with_pack_suffix_stays_ahead_of_latest(self):
+        data = [release('v1.3.0-gtnh2.9.0', ['mod-1.3.0-gtnh2.9.0.jar'], '2026-11-09T09:03:01Z'),
+                release('v1.2.1', ['mod-1.2.1.jar'], '2026-11-09T08:51:30Z')]
+        src, api = self._src_with_latest('owner', 'mod', data, 'v1.2.1')
+        with patch.object(src, '_api', side_effect=api):
+            self.assertEqual(src.check(None).latest_version, 'v1.3.0-gtnh2.9.0')
+
     def test_old_mistagged_high_version_does_not_win(self):
         """AE2Things：早年错标的 v1.97 版本号更高，但最新发布是 v1.2.14。"""
         data = [release('v1.2.14', ['ae2thing-v1.2.14.jar'], '2026-02-16T00:00:00Z'),

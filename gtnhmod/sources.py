@@ -20,6 +20,9 @@ from .versions import (MC_VERSION_RE, VersionParseError, _MC_SET, compare,
                        max_version, order_key, parse_version, split_mc_mod_version)
 
 
+_PACK_SUFFIX_RE = re.compile(r"[-_.+]gtnh[-_.]?\d[\w.\-]*$", re.I)
+
+
 class SourceError(Exception):
     pass
 
@@ -390,6 +393,7 @@ class GitHubSource(Source):
         WildcardPattern 的 v1.0.7（给 GTNH 2.8.4）晚于 v1.1.0 发布，但维护者把 v1.1.0
         标为 Latest：晚于 Latest 发布却版本更低的就是补发的旧线版本。只按时间会把它
         当成最新；只按版本号又会被早年错标的 v1.97（AE2Things）带偏，所以以 Latest 为准。
+        比较时去掉整合包后缀：ae2wtx 的 v1.2.1-gtnh2.8.4 与 Latest v1.2.1 是同一版本的旧整合包构建。
         仓库没有 Latest（全是测试版）或查询失败时保持时间顺序。"""
         if len(options) < 2:
             return options
@@ -403,13 +407,20 @@ class GitHubSource(Source):
         if not anchor:
             return options  # Latest 已在最前，或不在可用列表里
         try:
-            backports = [o for o in options[:anchor] if compare(o.version, options[anchor].version) < 0]
+            backports = [o for o in options[:anchor] if self._is_backport(o.version, options[anchor].version)]
         except VersionParseError:
             return options
         if not backports:
             return options
         ahead = [o for o in options[:anchor] if o not in backports]
         return ahead + [options[anchor]] + backports + options[anchor + 1:]
+
+    @staticmethod
+    def _is_backport(version, latest) -> bool:
+        """version 晚于 Latest 发布时，判断它是否为旧线或同版本的旧整合包构建。"""
+        core, latest_core = (_PACK_SUFFIX_RE.sub("", v) for v in (version, latest))
+        order = compare(core, latest_core)
+        return order < 0 or (order == 0 and core != version and latest_core == latest)
 
 
 # ---------- 本地目录 ----------
