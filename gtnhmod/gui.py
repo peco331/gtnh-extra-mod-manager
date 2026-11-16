@@ -4794,10 +4794,16 @@ class GuiApp(PacksGuiMixin):
         self._set_busy(True)
         self._log("测试 GitHub 连接...")
 
+        last_error = [None]
+
         def job():
-            raw = net.http_get("https://api.github.com/rate_limit",
-                               headers=headers, proxy=proxy, retries=0)
-            return json.loads(raw).get("resources", {}).get("core", {})
+            try:
+                raw = net.http_get("https://api.github.com/rate_limit",
+                                   headers=headers, proxy=proxy, retries=0)
+                return json.loads(raw).get("resources", {}).get("core", {})
+            except Exception as exc:
+                last_error[0] = str(exc)
+                raise
 
         def done(core):
             self._set_busy(False)
@@ -4811,6 +4817,8 @@ class GuiApp(PacksGuiMixin):
                     + f"剩余配额: {core.get('remaining')}/{core.get('limit')}" + chr(10)
                     + ("本次测试使用输入框中的 Token" if token else "匿名访问（建议配置 Token 提高限额）")
                     + ("\nToken 或代理尚未保存，请点「保存设置」后再安装/更新。" if unsaved else "\n当前网络设置已保存。"))
+            elif last_error[0] is not None:
+                messagebox.showerror("GitHub API 连接失败", last_error[0])
             elif core is not None:
                 messagebox.showwarning("响应异常", "连接成功但响应格式不符")
         self._run_async(job, on_done=done)

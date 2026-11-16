@@ -1,8 +1,10 @@
 """设置保存和代理模式的回归测试。"""
+import io
 import json
 import shutil
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -208,6 +210,60 @@ class TestNetworkSettingsGui(unittest.TestCase):
             app.test_network_settings()
 
         self.assertEqual(seen["result"], payload["resources"]["core"])
+
+    def test_network_test_shows_error_dialog_on_http_failure(self):
+        app = object.__new__(gui.GuiApp)
+        app.token_entry = _Entry("bad-token")
+        app.proxy_mode = _Mode("system")
+        app.proxy_entry = _Entry("")
+        app.cfg = mock.Mock(github_token="bad-token", proxy=None)
+        app.busy = False
+        app._set_busy = mock.Mock()
+        app._log = mock.Mock()
+
+        def run_with_error_handling(job, on_done=None):
+            try:
+                on_done(job())
+            except Exception:
+                on_done(None)
+
+        app._run_async = run_with_error_handling
+        err = net.HttpError(401, "https://api.github.com/rate_limit -> GitHub Token 无效或已过期")
+        with mock.patch.object(net, "http_get", side_effect=err), \
+                mock.patch.object(gui.messagebox, "showerror") as showerror:
+            app.test_network_settings()
+
+        showerror.assert_called_once()
+        self.assertIn("无效或已过期", showerror.call_args.args[1])
+
+
+class TestGitHubAuthErrorMessages(unittest.TestCase):
+    def test_http_get_reports_expired_or_invalid_github_token_on_401(self):
+        body = io.BytesIO(json.dumps({"message": "Bad credentials", "status": "401"}).encode("utf-8"))
+        err = urllib.error.HTTPError(
+            "https://api.github.com/rate_limit", 401, "Unauthorized", {}, body
+        )
+        with mock.patch.object(net, "_open_request", side_effect=err):
+            with self.assertRaises(net.HttpError) as ctx:
+                net.http_get("https://api.github.com/rate_limit", retries=0)
+
+        self.assertEqual(ctx.exception.code, 401)
+        self.assertIn("GitHub Token 无效或已过期", str(ctx.exception))
+        self.assertIn("Bad credentials", str(ctx.exception))
+
+    def test_http_get_cached_handles_401_without_response_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_file = Path(tmp) / "releases.json"
+            err = urllib.error.HTTPError(
+                "https://api.github.com/repos/a/b/releases", 401, "Unauthorized", None, None
+            )
+            with mock.patch.object(net, "_open_request", side_effect=err):
+                with self.assertRaises(net.HttpError) as ctx:
+                    net.http_get_cached("https://api.github.com/repos/a/b/releases",
+                                        cache_file=cache_file, force=True)
+
+        self.assertEqual(ctx.exception.code, 401)
+        self.assertIn("GitHub Token 无效或已过期", str(ctx.exception))
 
 
 if __name__ == "__main__":

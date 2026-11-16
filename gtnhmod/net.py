@@ -10,6 +10,7 @@ import os
 import shutil
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -74,6 +75,38 @@ def _open_request(url: str, headers: dict, timeout: int, proxy_cfg):
         return raw, hdrs
 
 
+def _read_error_message(exc: urllib.error.HTTPError) -> str:
+    """提取 HTTP 错误 JSON 响应里的 message 字段；读取失败返回空串。"""
+    try:
+        if getattr(exc, "fp", None) is None:
+            return ""
+        raw = exc.read(4096)
+        if not raw:
+            return ""
+        if exc.headers and (exc.headers.get("Content-Encoding") or "").lower() == "gzip":
+            raw = gzip.decompress(raw)
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+        if isinstance(data, dict):
+            msg = data.get("message")
+            return str(msg).strip() if msg else ""
+    except Exception:
+        pass
+    return ""
+
+
+def _http_error(url: str, exc: urllib.error.HTTPError) -> HttpError:
+    """构造 HttpError，对 GitHub 401 失效凭据补充明确指引。"""
+    api_msg = _read_error_message(exc)
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if exc.code == 401 and (host == "api.github.com" or "bad credentials" in api_msg.lower()):
+        detail = api_msg or exc.reason
+        return HttpError(
+            exc.code,
+            f"{url} -> GitHub Token 无效或已过期（{detail}），请在「设置」页更新或清空 Token",
+        )
+    return HttpError(exc.code, f"{url} -> {exc.reason}")
+
+
 def http_get(url: str, *, headers=None, timeout=30, retries=2, binary=False, proxy=None):
     """GET 请求，返回 bytes 或 UTF-8 str。5xx/超时/连接错误退避重试；4xx 直接抛出。"""
     last = None
@@ -82,7 +115,7 @@ def http_get(url: str, *, headers=None, timeout=30, retries=2, binary=False, pro
             raw, _ = _open_request(url, headers, timeout, proxy)
             return raw if binary else raw.decode("utf-8")
         except urllib.error.HTTPError as e:
-            last = HttpError(e.code, f"{url} -> {e.reason}")
+            last = _http_error(url, e)
             if e.code in (304, 400, 401, 403, 404, 422, 429):
                 raise last
         except http.client.IncompleteRead as e:
@@ -124,7 +157,7 @@ def http_get_cached(url: str, *, cache_file: Path, ttl_hours: float = 6.0,
             return cache.get("data"), "not_modified"
         if e.code in (403, 429) and cache and not force:
             return cache.get("data"), "cache_stale"
-        raise HttpError(e.code, f"{url} -> {e.reason}")
+        raise _http_error(url, e)
     try:
         data = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
