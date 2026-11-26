@@ -399,6 +399,37 @@ class TestE2E(unittest.TestCase):
         merged = updater.build_merged_registry(self.cfg, self.db, self.installed)
         self.assertIn(self.mod_id, {m["mod_id"] for m in merged})
 
+    def test_excluded_mod_stays_ignored_across_version_upgrade_and_reconcile(self):
+        if not list(self.client_mods.glob("TestMod-*.jar*")):
+            r = updater.install_mod(self.cfg, self.db, self.installed, self.mod_id, "client")
+            self.assertEqual(r["action"], "installed", r)
+        names = updater.exclude_installed(self.cfg, self.db, self.installed, self.mod_id)
+        self.assertTrue(names)
+        # 模拟整合包升级：磁盘上变成新版本 jar，且历史配置里曾留有多条旧版本忽略记录
+        for p in self.client_mods.glob("TestMod-*.jar*"):
+            p.unlink()
+        make_jar(self.client_mods / "TestMod-1.7.10-2.0.0.jar")
+        self.cfg.data["ignored_files"] = ["TestMod-1.7.10-0.9.0.jar", *self.cfg.data["ignored_files"]]
+        self.cfg.save()
+        try:
+            updater.reconcile_installed(self.cfg, self.db, self.installed)
+            self.assertIsNone(self.installed.get("client", self.mod_id))
+            merged = updater.build_merged_registry(self.cfg, self.db, self.installed)
+            self.assertNotIn(self.mod_id, {m["mod_id"] for m in merged})
+            unmatched = updater.unmatched_files(self.cfg, self.db)
+            self.assertNotIn("TestMod-1.7.10-2.0.0.jar", {f.file_name for f in unmatched["client"]})
+            self.assertEqual(updater.check_updates(self.cfg, self.db, self.installed, only={self.mod_id}), [])
+
+            # 调用一次 unignore 即可清理所有同模组历史忽略项并恢复显示
+            updater.unignore(self.cfg, "TestMod-1.7.10-2.0.0.jar")
+            self.assertFalse(any("TestMod" in n for n in self.cfg.data["ignored_files"]))
+            merged = updater.build_merged_registry(self.cfg, self.db, self.installed)
+            self.assertIn(self.mod_id, {m["mod_id"] for m in merged})
+        finally:
+            for p in self.client_mods.glob("TestMod-*.jar*"):
+                p.unlink()
+            make_jar(self.client_mods / "TestMod-1.7.10-1.0.0.jar")
+
     def test_uptodate_compare(self):
         self.assertEqual(updater.version_status("1.0.0", "1.0.0"), "uptodate")
         self.assertEqual(updater.version_status("1.0.0", "0.9.0"), "local_newer")

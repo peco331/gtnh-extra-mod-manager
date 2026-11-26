@@ -9,7 +9,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gtnhmod import db as dbmod  # noqa: E402
 from gtnhmod.installed import InstalledDB  # noqa: E402
-from gtnhmod.scanner import match_all, match_db, reconcile, scan_folder  # noqa: E402
+from gtnhmod.scanner import (  # noqa: E402
+    ignored_file_key,
+    is_file_ignored,
+    match_all,
+    match_db,
+    reconcile,
+    scan_folder,
+)
 from gtnhmod.wiki import parse_wikitext  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "wiki_sample.txt"
@@ -220,6 +227,44 @@ class TestMatchRealDb(unittest.TestCase):
         f = InstalledFile(Path("x.jar"), "x.jar", True, "NEI 拼音搜索", None, "1.0.0")
         got, quality = match_db(f, self.entries)
         self.assertIsNone(got, f"中文名不应参与匹配 → {got}({quality})")
+
+
+class TestIgnoredFilesAcrossVersions(unittest.TestCase):
+    def test_builtin_mod_remains_ignored_after_version_bump(self):
+        ignored = [
+            "angelica-2.2.43.jar",
+            "ServerUtilities-2.4.22.jar",
+            "cosmeticarmorreworked-1.0.6-GTNH.jar",
+            "backhand-1.8.15.jar",
+            "craftingtweaks-1.0.3.jar",
+            "gtnhlib-0.11.24.jar",
+            "modularui2-2.3.79-1.7.10.jar",
+        ]
+        for cand in (
+            "angelica-2.2.46.jar",
+            "angelica-2.2.46.jar.disabled",
+            "ServerUtilities-2.5.4.jar",
+            "cosmeticarmorreworked-1.0.7-GTNH.jar",
+            "backhand-1.8.18.jar",
+            "craftingtweaks-1.0.3.jar",
+            "gtnhlib-0.11.58.jar",
+            "modularui2-2.3.97-1.7.10.jar",
+        ):
+            self.assertTrue(is_file_ignored(cand, ignored), f"{cand} 应跨版本持续忽略")
+
+    def test_sibling_or_addon_mods_are_not_ignored(self):
+        ignored = [
+            "journeymap-5.2.23-fairplay.jar",
+            "ae2thing-1.2.15-pre6.jar",
+            "modularui-1.3.4.jar",
+        ]
+        for cand in (
+            "journeymap-quick-teleport-1.2.0.jar",
+            "ae2thing-bauble-1.1.0.jar",
+            "modularui2-2.3.97-1.7.10.jar",
+        ):
+            self.assertFalse(is_file_ignored(cand, ignored), f"{cand} 不应被同前缀模组误忽略")
+        self.assertEqual(ignored_file_key("not-a-jar.txt"), "")
 
 
 if __name__ == "__main__":

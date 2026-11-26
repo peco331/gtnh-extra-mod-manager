@@ -32,6 +32,42 @@ def normalize_name(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
+def ignored_file_key(file_name: str) -> str:
+    """提取已忽略 JAR 的归一化模组名，用于跨版本持续匹配；无法解析时返回空串。"""
+    low = (file_name or "").lower()
+    if low.endswith(".jar.disabled"):
+        stem = file_name[:-13]
+    elif low.endswith(".jar"):
+        stem = file_name[:-4]
+    else:
+        return ""
+    name_part, _, _ = split_mc_mod_version(stem)
+    return normalize_name(name_part or "")
+
+
+def ignored_keys(ignored_entries) -> tuple[set, set]:
+    """预计算忽略清单的精确文件名集合与归一化模组名集合。"""
+    exact = set()
+    keys = set()
+    for name in ignored_entries or ():
+        if not name:
+            continue
+        exact.add(name)
+        key = ignored_file_key(name)
+        if key:
+            keys.add(key)
+    return exact, keys
+
+
+def is_file_ignored(file_name: str, ignored_entries, *, _precomputed: tuple | None = None) -> bool:
+    """判断文件名是否被忽略（支持跨版本按模组名持续忽略）。"""
+    exact, keys = _precomputed if _precomputed is not None else ignored_keys(ignored_entries)
+    if file_name in exact:
+        return True
+    key = ignored_file_key(file_name)
+    return bool(key and key in keys)
+
+
 def _word_tokens(s: str) -> list:
     """按分隔符拆词，保留大小写（NeverEnoughCharacters-Rework → [NeverEnoughCharacters, Rework]）。"""
     return re.findall(r"[A-Za-z0-9]+", s or "")

@@ -31,10 +31,11 @@ def _update_target_context(cfg, db, installed, side, mod_id, names):
             raise ValueError("文件位置已变化")
         stat = path.stat()
         files.append((name, stat.st_size, stat.st_mtime_ns, stat.st_ino))
+    ignored_entries = cfg.data.get("ignored_files") or []
     return {
         "directory": str(folder.resolve()), "files": files,
         "locked": bool(installed.merged_record(side, db.entry_ids(mod_id)).get("locked")),
-        "ignored": any(name in (cfg.data.get("ignored_files") or []) for name in names),
+        "ignored": any(scanner.is_file_ignored(name, ignored_entries) for name in names),
         "source": json.dumps({key: entry.get(key) for key in
             ("source_type", "source", "urls", "group", "compat")}, sort_keys=True),
         "gtnh_version": cfg.data.get("gtnh_version") or "",
@@ -254,28 +255,38 @@ def scan_sides(cfg, db, *, strict: bool = False) -> dict:
 
 def unmatched_files(cfg, db) -> dict:
     """两端未匹配且未忽略的 jar，返回 {side: [InstalledFile]}。"""
-    ignored = set(cfg.data.get("ignored_files") or [])
+    ignored_pre = scanner.ignored_keys(cfg.data.get("ignored_files"))
     result = {}
     for side, files in scan_sides(cfg, db).items():
-        result[side] = [f for f in files if not f.mod_id and f.file_name not in ignored]
+        result[side] = [
+            f for f in files
+            if not f.mod_id and not scanner.is_file_ignored(f.file_name, None, _precomputed=ignored_pre)
+        ]
     return result
 
 
 def reconcile_installed(cfg, db, installed) -> int:
-    """用磁盘扫描校正 installed.json（清理手动删除jar留下的残留记录）。
+    """用磁盘扫描校正 installed.json（清理手动删除jar或已忽略文件留下的残留记录）。
 
     在程序启动时调用一次。只处理已配置目录的端别——未配置目录时扫描结果
     为空，若照常校正会把该端别的记录全部误删。返回清理的记录数。
     """
-    scan = {side: files for side, files in scan_sides(cfg, db, strict=True).items()
-            if cfg.mods_dir(side) and cfg.mods_dir(side).is_dir()}
+    ignored_pre = scanner.ignored_keys(cfg.data.get("ignored_files"))
+    scan = {
+        side: [
+            f for f in files
+            if not scanner.is_file_ignored(f.file_name, None, _precomputed=ignored_pre)
+        ]
+        for side, files in scan_sides(cfg, db, strict=True).items()
+        if cfg.mods_dir(side) and cfg.mods_dir(side).is_dir()
+    }
     if not scan:
         return 0
     before = sum(len(installed.all_ids(side)) for side in scan)
     scanner.reconcile(scan, installed)
     removed = before - sum(len(installed.all_ids(side)) for side in scan)
     if removed:
-        _log_op(cfg, f"校正已安装记录：清理 {removed} 条磁盘上已不存在的记录")
+        _log_op(cfg, f"校正已安装记录：清理 {removed} 条磁盘上已不存在或已忽略的记录")
     return removed
 
 
@@ -303,12 +314,12 @@ def build_registry(cfg, db, installed) -> dict:
     已剔除（ignored_files）的 jar 不出现；同一mod多个jar时取版本最高者，
     其余记入 state["duplicates"] 供界面提示。
     """
-    ignored = set(cfg.data.get("ignored_files") or [])
+    ignored_pre = scanner.ignored_keys(cfg.data.get("ignored_files"))
     reg = {}
     for side, files in scan_sides(cfg, db).items():
         by_mod: dict = {}
         for f in files:
-            if f.file_name in ignored or not f.mod_id:
+            if not f.mod_id or scanner.is_file_ignored(f.file_name, None, _precomputed=ignored_pre):
                 continue
             by_mod.setdefault(f.mod_id, []).append(f)
         side_reg = {}
@@ -655,7 +666,7 @@ def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
     results = []
     db_dirty = False
     inst_dirty = False
-    ignored = set(cfg.data.get("ignored_files") or [])
+    ignored_pre = scanner.ignored_keys(cfg.data.get("ignored_files"))
 
     # 第一步：先扫描各端，搜集需要检查的目标并按 mod_id 去重跨端任务
     # items: mod_id -> {"entry": entry, "targets": [(side, version)]}
@@ -667,7 +678,7 @@ def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
         files = scanner.scan_folder(folder)
         scanner.match_all(files, db.all())
         for f in files:
-            if not f.mod_id or f.file_name in ignored:
+            if not f.mod_id or scanner.is_file_ignored(f.file_name, None, _precomputed=ignored_pre):
                 continue
             if only is not None and f.mod_id not in only:
                 continue
@@ -1420,19 +1431,27 @@ def associate_unmanaged(db, mod_id: str, alias: str) -> None:
 
 
 def ignore_unmanaged(cfg, file_name: str) -> None:
-    """忽略某个未受管文件（不再提示）。"""
+    """忽略某个未受管文件（不再提示），并用新文件名替换同模组的旧版本忽略项。"""
     ignored = list(cfg.data.get("ignored_files") or [])
+    key = scanner.ignored_file_key(file_name)
+    if key:
+        ignored = [n for n in ignored if scanner.ignored_file_key(n) != key]
     if file_name not in ignored:
         ignored.append(file_name)
-        cfg.data["ignored_files"] = ignored
-        cfg.save()
+    cfg.data["ignored_files"] = ignored
+    cfg.save()
 
 
 def unignore(cfg, file_name: str) -> None:
+    """恢复显示被忽略的文件，并同时清理共享同一模组名的历史旧版本忽略项。"""
     ignored = list(cfg.data.get("ignored_files") or [])
-    if file_name in ignored:
-        ignored.remove(file_name)
-        cfg.data["ignored_files"] = ignored
+    key = scanner.ignored_file_key(file_name)
+    new_ignored = [
+        n for n in ignored
+        if n != file_name and not (key and scanner.ignored_file_key(n) == key)
+    ]
+    if len(new_ignored) != len(ignored):
+        cfg.data["ignored_files"] = new_ignored
         cfg.save()
 
 
