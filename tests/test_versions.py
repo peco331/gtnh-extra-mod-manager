@@ -179,6 +179,14 @@ class TestOrderKey(unittest.TestCase):
     def test_max_version_uses_tie_break(self):
         self.assertEqual(max_version(["1.2.3s", "1.2.3t"]), "1.2.3t")
 
+    def test_dot_separated_jar_version(self):
+        # 真实案例：AE2.Convenience.Features.0.11.jar / 0.12.jar 无连字符
+        self.assertEqual(split_mc_mod_version("AE2.Convenience.Features.0.12"),
+                         ("AE2.Convenience.Features", None, "0.12"))
+        self.assertEqual(split_mc_mod_version("AE2.Convenience.Features.0.11"),
+                         ("AE2.Convenience.Features", None, "0.11"))
+        self.assertEqual(compare("0.12", "0.11"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

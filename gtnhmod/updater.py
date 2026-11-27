@@ -64,8 +64,9 @@ def check_update_plan(cfg, db, installed, *, progress_cb=None, target_mod_ids=No
             options, _ = item["prefetched"]
             published = options[0].get("published_at") if options else None
             for side in item["sides"]:
+                cands = [c.file_name for c in (options[0].get("candidates") or []) if getattr(c, "file_name", None)] if options else None
                 installed.touch_checked(side, item["mod_id"], item["target_version"],
-                                        remote_date=published, save=False)
+                                        remote_date=published, remote_assets=cands, save=False)
                 dirty = True
     if dirty:
         installed.save()
@@ -308,6 +309,31 @@ def startup_maintenance(cfg, db, installed) -> None:
         _log_op(cfg, f"启动维护失败: {e}")
 
 
+def _norm_asset_name(name: str) -> str:
+    """规范化资产文件名（剥离 .disabled 并转小写），用于比对本地文件与远端发布资产。"""
+    s = (name or "").strip()
+    if s.lower().endswith(".disabled"):
+        s = s[:-9]
+    return s.lower()
+
+
+def _is_same_remote_asset(file_name: str, inst: dict, latest: str) -> bool:
+    """本地文件恰好匹配上次检查到的最新发布资产（含伴随库如 gtnrlib），或版本已与 latest 一致。"""
+    norm = _norm_asset_name(file_name)
+    if not norm:
+        return False
+    remote_assets = [_norm_asset_name(a) for a in (inst.get("last_remote_assets") or []) if a]
+    if norm in remote_assets:
+        return True
+    if _norm_asset_name(inst.get("file_name") or "") == norm and inst.get("parsed_version") and latest:
+        try:
+            if compare(latest, inst["parsed_version"]) == 0:
+                return True
+        except VersionParseError:
+            pass
+    return False
+
+
 def build_registry(cfg, db, installed) -> dict:
     """构建已安装注册表：{side: {mod_id: state}}，以磁盘扫描为准。
 
@@ -334,7 +360,7 @@ def build_registry(cfg, db, installed) -> dict:
             inst = installed.merged_record(side, db.entry_ids(f.mod_id))
             latest = inst.get("last_remote_version")
             status = "disabled" if not f.enabled else "installed"
-            if f.enabled and latest and f.version:
+            if f.enabled and latest and f.version and not _is_same_remote_asset(f.file_name, inst, latest):
                 try:
                     if compare(latest, f.version) > 0:
                         status = "update_avail"
@@ -726,9 +752,10 @@ def check_updates(cfg, db, installed, *, sides=SIDES, force: bool = False,
         entry = data["entry"]
         if info:
             if info.latest_version:
+                cands = [c.file_name for c in (info.candidates or []) if getattr(c, "file_name", None)]
                 for side, _ in data["targets"]:
                     installed.touch_checked(side, mod_id, info.latest_version,
-                                            remote_date=info.published_at, save=False)
+                                            remote_date=info.published_at, remote_assets=cands, save=False)
                 inst_dirty = True
             if info.candidates:
                 _learn_asset_name(db, entry, info.candidates[0].file_name)
@@ -902,9 +929,11 @@ def install_mod(cfg, db, installed, mod_id: str, side: str, *,
         _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {entry.get('name_en') or mod_id} 失败: {e}")
         return {"action": "error", "error": f"下载/安装失败: {e}"}
     ver = split_mc_mod_version(dest.stem)[2] or info.latest_version or "?"
+    cands = [c.file_name for c in (info.candidates or []) if getattr(c, "file_name", None)]
     installed.set(side, mod_id, file_name=dest.name, parsed_version=ver,
                   install_date=utils.now_str(), updated_at=utils.now_str(),
-                  last_remote_version=info.latest_version, last_checked=utils.now_str())
+                  last_remote_version=info.latest_version, last_remote_assets=cands,
+                  last_checked=utils.now_str())
     _learn_asset_name(db, entry, dest.name)
     _log_op(cfg, f"{SIDE_LABELS[side]} 安装 {entry.get('name_en') or mod_id} {utils.vlabel(ver)}（{dest.name}）")
     leftover = _cleanup_extras(cfg, db, side, mod_id, dest, unremoved)
@@ -1104,6 +1133,10 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
         chosen, note = _pick_default_option(options, old_version=old.version)
         if chosen is None:
             return {"action": "manual", "note": note, "entry": entry, "warning": warn}
+        old_norm = _norm_asset_name(old.file_name)
+        if old_norm and any(_norm_asset_name(getattr(c, "file_name", "")) == old_norm for c in (chosen.get("candidates") or [])):
+            return {"action": "uptodate", "version": old.version or chosen["version"],
+                    "note": "已是最新 GTNH 发布"}
         if not old.version:
             return {"action": "manual", "note": "已安装版本未知，无法比较版本，请手动选择目标版本",
                     "entry": entry, "warning": warn}
@@ -1140,9 +1173,11 @@ def update_mod(cfg, db, installed, mod_id: str, side: str, *,
         _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id} 失败: {e}")
         return {"action": "error", "error": f"下载/更新失败: {e}", "warning": warn}
     ver = split_mc_mod_version(dest.stem)[2] or info.latest_version or "?"
+    cands = [c.file_name for c in (info.candidates or []) if getattr(c, "file_name", None)]
     installed.set(side, mod_id, file_name=dest.name, parsed_version=ver,
                   updated_at=utils.now_str(),
-                  last_remote_version=info.latest_version, last_checked=utils.now_str())
+                  last_remote_version=info.latest_version, last_remote_assets=cands,
+                  last_checked=utils.now_str())
     _learn_asset_name(db, entry, dest.name)
     _log_op(cfg, f"{SIDE_LABELS[side]} 更新 {entry.get('name_en') or mod_id}: "
                  f"{utils.vlabel(old.version or '?')} → {utils.vlabel(ver)}（{dest.name}）")

@@ -254,4 +254,8 @@ def _split_mc_mod_version_raw(stem: str):
                 m = re.match(r"^[vV]?[0-9][A-Za-z0-9_.+-]*", suffix)
                 if m:
                     return ("-".join(parts[:i]) or None, None, m.group(0).rstrip("-_.+"))
+    # 无连字符版本段时，支持点号分隔的末尾数字版本（如 AE2.Convenience.Features.0.12）
+    m_dot = re.match(r"^([A-Za-z][A-Za-z0-9._]*?)\.([vV]?\d+(?:\.\d+)+(?:[A-Za-z0-9_+-]*))$", stem)
+    if m_dot and m_dot.group(2).isascii():
+        return (m_dot.group(1), None, m_dot.group(2))
     return (stem or None, None, None)

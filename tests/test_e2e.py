@@ -625,5 +625,64 @@ class TestUpdateSideWarning(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestCompanionAssetAndDotVersionRegression(unittest.TestCase):
+    """伴随资产（如 gtnrlib-0.1.37 属于 tag 0.1.57）与点号分隔文件名版本回归测试。"""
+
+    def test_companion_asset_not_flagged_updatable_and_no_reinstall(self):
+        from unittest import mock
+        from gtnhmod.sources import DownloadCandidate
+
+        tmp = Path(tempfile.mkdtemp(prefix="gtnh_comp_"))
+        try:
+            mods = tmp / "mods"
+            mods.mkdir()
+            make_jar(mods / "gtnrlib-0.1.37.jar")
+            make_jar(mods / "AE2.Convenience.Features.0.11.jar")
+            make_jar(mods / "AE2.Convenience.Features.0.12.jar")
+            cfg = Config(tmp)
+            cfg.set_mods_dir("client", mods)
+            db = ModsDB(tmp / "mods_db.json")
+            inst = InstalledDB(tmp / "installed.json")
+            gid = db.add_custom({
+                "name_en": "gtnrlib",
+                "source_type": "github",
+                "source": {"owner": "ikkkkkkkuuu", "repo": "GT-Never-Reset", "asset_regex": "^gtnrlib-"},
+            })
+            aid = db.add_custom({
+                "name_en": "AE2 Convenience Features",
+                "source_type": "github",
+                "source": {"owner": "zeroCNM", "repo": "AE2-Convenience-Features"},
+            })
+            # 1. AE2.Convenience.Features.0.12 应排在 0.11 前作为代表文件
+            reg = updater.build_registry(cfg, db, inst)["client"]
+            self.assertEqual(reg[aid]["file_name"], "AE2.Convenience.Features.0.12.jar")
+            self.assertEqual(reg[aid]["version"], "0.12")
+            self.assertEqual(reg[aid]["duplicates"], ["AE2.Convenience.Features.0.11.jar"])
+
+            # 2. gtnrlib-0.1.37 是 tag 0.1.57 的唯一下载资产：check 后离线注册表仍应为 installed
+            inst.touch_checked("client", gid, "0.1.57",
+                               remote_assets=["gtnrlib-0.1.37.jar"])
+            inst.touch_checked("client", aid, "v1.2",
+                               remote_assets=["AE2.Convenience.Features.0.12.jar"])
+            inst.save()
+            reg2 = updater.build_registry(cfg, db, InstalledDB(tmp / "installed.json"))["client"]
+            self.assertEqual(reg2[gid]["status"], "installed")
+            self.assertEqual(reg2[aid]["status"], "installed")
+
+            # 3. update_mod 命中同一资产时应返回 uptodate 而非重复下载覆盖
+            opts = ([{
+                "version": "0.1.57", "tag": "0.1.57", "body": "",
+                "candidates": [DownloadCandidate("https://example.invalid/gtnrlib-0.1.37.jar", "gtnrlib-0.1.37.jar", 100)],
+                "compat": "unknown", "recommended": True, "latest": True,
+                "target_status": "eligible", "target_reason": "", "prerelease": False,
+                "published_at": "2026-11-23T00:00:00Z", "asset_ambiguous": False,
+            }], None)
+            with mock.patch("gtnhmod.updater.list_install_options", return_value=opts):
+                res = updater.update_mod(cfg, db, inst, gid, "client")
+            self.assertEqual(res["action"], "uptodate")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

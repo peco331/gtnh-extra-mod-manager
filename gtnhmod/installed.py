@@ -20,7 +20,7 @@ def merge_records(records):
         result.update(record)
     result["locked"] = any(r.get("locked") for r in records)
     checked = max(records, key=lambda r: str(r.get("last_checked") or ""))
-    for key in ("last_checked", "last_remote_version", "last_remote_date"):
+    for key in ("last_checked", "last_remote_version", "last_remote_date", "last_remote_assets"):
         if key in checked:
             result[key] = checked[key]
     return result
@@ -86,7 +86,7 @@ class InstalledDB:
                         if (side, mod_id) in self._checked_here:
                             continue
                         if str(rec.get("last_checked") or "") > str(local.get("last_checked") or ""):
-                            for k in ("last_checked", "last_remote_version", "last_remote_date"):
+                            for k in ("last_checked", "last_remote_version", "last_remote_date", "last_remote_assets"):
                                 if rec.get(k):
                                     local[k] = rec[k]
             utils.atomic_write_json(self.path, {"version": 1, "installed": self.data})
@@ -130,7 +130,7 @@ class InstalledDB:
             self.save()
 
     def touch_checked(self, side: str, mod_id: str, remote_version,
-                      remote_date=None, *, save: bool = True) -> None:
+                      remote_date=None, *, remote_assets=None, save: bool = True) -> None:
         """记录一次远端检查结果（用于未改动时免查显示）。
 
         批量检查时传 save=False，结束后调用方统一 save()，避免逐mod全文件重写。
@@ -138,6 +138,10 @@ class InstalledDB:
         fields = {"last_checked": utils.now_str(), "last_remote_version": remote_version}
         if remote_date:
             fields["last_remote_date"] = remote_date
+        if remote_assets:
+            assets = [str(a) for a in remote_assets if a]
+            if assets:
+                fields["last_remote_assets"] = assets
         self._checked_here.add((side, mod_id))
         self.set(side, mod_id, save=save, **fields)
 
