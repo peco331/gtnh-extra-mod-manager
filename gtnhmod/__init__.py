@@ -6,7 +6,7 @@
 
 # 唯一的版本来源（pyproject.toml 从这里读取）。表示「下一次发布」的版本：
 # 只在发布时修改，日常修复不改；本地构建靠提交号区分，见 display_version()。
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 try:  # 打包时由 scripts/write_build_info.py 生成，源码运行时不存在
     from ._build_info import BUILD
